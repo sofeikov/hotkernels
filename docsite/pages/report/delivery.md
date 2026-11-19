@@ -221,7 +221,7 @@ The judge proves a kernel right as a native function. It says nothing about the 
 | Spellings | Positional, keyword, `out=`, `axis=`, method and function forms |
 | Values | The judge's value classes: NaN, infinities, signed zeros, ties |
 
-That is **170,973 calls over the 22 hooked operations** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
+That is **170,982 calls over the 22 hooked operations** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
 
 **Each case also states whether a kernel should have run**, and the counters are checked against it. Without that, a check that quietly stopped matching would pass every comparison, since NumPy's fallback is always right, while delivering nothing.
 

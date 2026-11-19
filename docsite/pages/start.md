@@ -160,7 +160,7 @@ From a clone of the repository:
 
 ```bash
 uv run delivery demo          # run examples/workload.py with and without hotkernels, and compare
-uv run delivery check         # 170,973 NumPy calls, both ways; results, errors and warnings must agree
+uv run delivery check         # 170,982 NumPy calls, both ways; results, errors and warnings must agree
 uv run delivery time          # time each statement from Python on your machine
 uv run delivery numpy-tests   # NumPy's own test suite, both ways; about ten minutes
 ```
