@@ -21,3 +21,11 @@ Beyond the judge, every kept attempt was checked with a program outside the repo
 - **compare:** significantly faster, 1.052x [1.050 – 1.054]
 - **Kept:** yes
 - **Notes:** 1.03x to 1.05x up to 65,536, 1.06x to 1.08x from 262,144. The program outside the judge, its flag part now with calls of 1, 4, 8 and 11 elements: 35,999,946 results, 0 differ; the kernel never lacks a flag glibc raises.
+
+## 3. Stores past the caches from 24 MB of output
+
+- **Idea:** from 3,145,728 elements, with out at a multiple of 8 bytes, the first zero to three elements go to the scalar routine so that out is at a multiple of 32 bytes, and the pairs of groups store with `vmovntpd`, followed by one `sfence`, as `where_f64` and the cumulative sums do from the same size. The kernel moves 24 bytes per element, and these stores take away the 8 bytes an ordinary store reads before it overwrites a line.
+- **check:** pass. The first version wrote past the end of out at some sizes from the threshold up: after the unaligned first elements a group no longer started at a multiple of four, and the bound of the single groups assumed it did. Found by the program outside the judge (guard bytes changed at 3,145,730 elements), whose sizes the judge's correctness cases do not reach. The bounds of groups and pairs became `n - 3` and `n - 7` compared as signed. A second program then ran every size from 0 to 299 and the 81 sizes from 40 below the threshold to 40 above it, and 4,194,309, at five placements of a and of out (one not a multiple of 8), with out clear and out equal to a and to b: 24,714 runs, no failure.
+- **compare:** no significant difference, 1.000x [1.000 – 1.001]
+- **Kept:** no
+- **Notes:** 1.01x to 1.02x at 4,194,304 and 16,777,216, nothing elsewhere. At 1.1 ns per element the kernel needs about 22 GB/s of memory, well inside what this machine gives a copy; the arithmetic, not memory, holds it at every size.
