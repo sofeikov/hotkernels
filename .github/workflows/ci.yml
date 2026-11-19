@@ -70,3 +70,8 @@ jobs:
       # Every hooked NumPy call, with and without hotkernels installed, on the
       # NumPy in uv.lock, with the x86-64 kernels.
       - run: uv run delivery check
+      - run: |
+          status=0
+          uv run judge check cumfmax_f64 --unlocked || status=1
+          uv run judge check fmax_reduce_f64 --unlocked || status=1
+          exit $status
