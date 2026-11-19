@@ -48,3 +48,19 @@ Against the same library on 20,000,000 ordinary pairs (the first two classes abo
 - **compare:** n/a (first version). `run` (CI jobs running on the machine): 3.64x [3.64 – 3.64] over naive C, 5.66x over NumPy.
 - **Kept:** yes
 - **Notes:** 0.46 ns per element from 256 up, against 1.75 for the library call. `fsqrt` on two doubles measured on this core outside the judge: 0.64 ns throughput (0.32 ns per element), 4.1 ns latency. The test outside the judge: 5,999,910 results, 0 differ; sizes 0 to 300, 4,515 runs, 0 differ, no guard byte changed; flags on 2,000,000 calls, none raised that the library did not raise, none lacking.
+
+## 2. Eight elements per step, tested together
+
+- **Idea:** four vectors loaded with `ldp`, tested with one reduction (`orr` of the four masks, `addp`, `fmov`, `cbnz`), computed and stored; a step that fails goes through the two-element loop. Fewer reductions and branches per element.
+- **check:** pass
+- **compare:** significantly slower, 0.994x [0.992 – 0.995]
+- **Kept:** no
+- **Notes:** 0.93x to 0.99x by size on `mixed`. Timing variants of the loop outside the judge showed what limits it: without the test (`sub`, `cmhs`, `addp`, `fmov`, `cbnz`) the loop runs at 0.31 ns per element, the throughput of `fsqrt`; with it, 0.45. The test's five instructions per vector, not the loop overhead, are the cost.
+
+## 3. Blocks computed without a test per vector, checked once per block
+
+- **Idea:** when out is neither a nor b, blocks of up to 64 elements are computed with no test per vector; each vector's big goes into a running `umax` and `umin` of its bits as 32-bit lanes (the high halves are what matter; the low halves are ignored by comparing the 64-bit lanes with 2^511 and 2^-484 as bits, whose low halves are zero). After the block one test: if a big was out of [2^-484, 2^511) or a NaN, FPSR is put back as it was before the block (read at entry with `mrs`, written with `msr` only here) and the block is computed again from its inputs on the checked path of attempt 1. Out equal to a or b takes the checked path throughout. Two instructions per vector instead of five.
+- **check:** pass
+- **compare:** significantly faster, 1.213x [1.211 – 1.215]
+- **Kept:** yes
+- **Notes:** 1.18x to 1.23x at every size. 0.38 ns per element from 256 up. The test outside the judge: 5,999,910 results, 0 differ; sizes 0 to 300, 4,515 runs, 0 differ, no guard byte changed; flags on 2,000,000 calls of 1 to 11 elements, none extra, none lacking.

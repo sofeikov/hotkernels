@@ -65,75 +65,167 @@
 // element. The scalar routine raises what the library raises.
 //
 // out may be exactly a or exactly b; it overlaps neither in any other way.
-// Each vector's inputs are loaded before its output is stored, and the scalar
-// routine loads an element before it stores it.
 //
-// Registers: x5 byte offset of the next element, x6 byte offset of the end,
-// x7 end of the scalar routine's range, x16 where the scalar routine returns.
-// v30 = 2^-484 as bits, v31 = 2^511 - 2^-484 as bits.
+// Two paths for the vectors, both computing the same results:
+//
+// The block path, taken when out is neither a nor b. Blocks of up to
+// BLOCK elements are computed without a test per vector: each vector's big
+// goes into a running unsigned maximum and minimum of the high halves of its
+// bits (umax, umin on 32-bit lanes; the low halves are compared too and are
+// ignored, which comparing the 64-bit lanes against 2^511 and 2^-484, whose
+// low halves are 0, does). After the block, if every big was in
+// [2^-484, 2^511) the block stands. If not, the block is computed again,
+// from its inputs, which the block path has not overwritten, on the checked
+// path below. The block's vector pass may have raised flags the library does
+// not (overflow or underflow squaring a big out of range), so FPSR is first
+// put back as it was before the block: it is read at entry and again after
+// every block computed again.
+//
+// The checked path, for out equal to a or b and for the blocks computed
+// again: two elements at a time, each vector tested before its arithmetic,
+// a vector that fails going to the scalar routine. Each vector's inputs are
+// loaded before its output is stored, and the scalar routine loads an
+// element before it stores it.
+//
+// The last element of an odd n goes to the scalar routine.
+//
+// Registers: x0, x1, x2 advance through a, b, out; x3 elements left; x4 FPSR
+// before the current block; x8 the block's length;
+// x14 elements left for the checked path, x15 where it returns;
+// x7 elements for the scalar routine, x16 where it returns.
+// v26 = 2^-484 as bits, v27 = 2^511 - 2^-484 as bits (the checked path);
+// v28, v29 the block's running maximum and minimum; v30 = 2^-484 as bits,
+// v31 = 2^511 as bits.
+
+// Elements per block of the block path: an even number.
+.set BLOCK, 64
 
 .text
 .globl _hypot_f64
 .p2align 2
 _hypot_f64:
-    mov     x5, #0
-    lsl     x6, x3, #3
     // FPCR: RMode (bits 22-23) and FZ (bit 24) must be clear for the vector
-    // path; otherwise everything goes to the scalar routine.
+    // paths; otherwise everything goes to the scalar routine.
     mrs     x9, fpcr
     tst     x9, #0x01c00000
     b.ne    Lall_scalar
     movz    x9, #0x21b0, lsl #48
+    dup     v26.2d, x9
     dup     v30.2d, x9
     movz    x9, #0x3e30, lsl #48
+    dup     v27.2d, x9
+    movz    x9, #0x5fe0, lsl #48
     dup     v31.2d, x9
+    cmp     x2, x0
+    b.eq    Lchecked_all
+    cmp     x2, x1
+    b.eq    Lchecked_all
+    mrs     x4, fpsr
 
-Lloop:
-    add     x9, x5, #16
-    cmp     x9, x6
-    b.hi    Ltail
-    ldr     q0, [x0, x5]
-    ldr     q1, [x1, x5]
+Lblock:
+    cmp     x3, #2
+    b.lo    Ltail
+    and     x8, x3, #0xfffffffffffffffe
+    mov     x9, #BLOCK
+    cmp     x8, x9
+    csel    x8, x9, x8, hi
+    mov     x10, x8
+    movi    v28.2d, #0
+    movi    v29.2d, #0xffffffffffffffff
+Lfast:
+    ldr     q0, [x0], #16
+    ldr     q1, [x1], #16
     fabs    v0.2d, v0.2d
     fabs    v1.2d, v1.2d
     fmax    v2.2d, v0.2d, v1.2d
     fmin    v3.2d, v0.2d, v1.2d
-    // big's bits minus 2^-484's, unsigned at or above the width of the range:
-    // out of [2^-484, 2^511), or a NaN
-    sub     v4.2d, v2.2d, v30.2d
-    cmhs    v4.2d, v4.2d, v31.2d
-    addp    d4, v4.2d
-    fmov    x10, d4
-    cbnz    x10, Lslow
+    umax    v28.4s, v28.4s, v2.4s
+    umin    v29.4s, v29.4s, v2.4s
     fmul    v2.2d, v2.2d, v2.2d
     fmla    v2.2d, v3.2d, v3.2d
     fsqrt   v2.2d, v2.2d
-    str     q2, [x2, x5]
-    mov     x5, x9
-    b       Lloop
+    str     q2, [x2], #16
+    subs    x10, x10, #2
+    b.ne    Lfast
+    // any big at or above 2^511, or a NaN; any big below 2^-484
+    cmhs    v4.2d, v28.2d, v31.2d
+    cmhi    v5.2d, v30.2d, v29.2d
+    orr     v4.16b, v4.16b, v5.16b
+    addp    d4, v4.2d
+    fmov    x10, d4
+    sub     x3, x3, x8
+    cbz     x10, Lblock
+    // Compute the block again on the checked path, with FPSR as it was.
+    sub     x0, x0, x8, lsl #3
+    sub     x1, x1, x8, lsl #3
+    sub     x2, x2, x8, lsl #3
+    add     x3, x3, x8
+    msr     fpsr, x4
+    mov     x14, x8
+    adr     x15, Lagain_done
+    b       L2
+Lagain_done:
+    mrs     x4, fpsr
+    b       Lblock
 
-Lslow:
-    // This vector's two elements by the scalar routine, then back to the loop.
-    mov     x7, x9
-    adr     x16, Lloop
-    b       Lscalar
+Lchecked_all:
+    mov     x14, x3
+    adr     x15, Ltail
+    b       L2
 
-Lall_scalar:
 Ltail:
-    mov     x7, x6
+Lall_scalar:
+    mov     x7, x3
     adr     x16, Ldone
     b       Lscalar
 
 Ldone:
     ret
 
-// The scalar routine: elements from byte offset x5 up to x7, then br x16.
-// The library's hypot, instruction for instruction.
+// The checked path: two elements at a time while x14 >= 2, then br x15.
+L2:
+    cmp     x14, #2
+    b.lo    L2_end
+    ldr     q0, [x0]
+    ldr     q1, [x1]
+    fabs    v0.2d, v0.2d
+    fabs    v1.2d, v1.2d
+    fmax    v2.2d, v0.2d, v1.2d
+    fmin    v3.2d, v0.2d, v1.2d
+    // big's bits minus 2^-484's, unsigned at or above the width of the range:
+    // out of [2^-484, 2^511), or a NaN
+    sub     v4.2d, v2.2d, v26.2d
+    cmhs    v4.2d, v4.2d, v27.2d
+    addp    d4, v4.2d
+    fmov    x10, d4
+    cbnz    x10, L2_slow
+    fmul    v2.2d, v2.2d, v2.2d
+    fmla    v2.2d, v3.2d, v3.2d
+    fsqrt   v2.2d, v2.2d
+    str     q2, [x2]
+    add     x0, x0, #16
+    add     x1, x1, #16
+    add     x2, x2, #16
+    sub     x3, x3, #2
+    sub     x14, x14, #2
+    b       L2
+L2_slow:
+    mov     x7, #2
+    adr     x16, L2
+    b       Lscalar
+L2_end:
+    br      x15
+
+// The scalar routine: x7 elements, then br x16. It advances x0, x1, x2 and
+// counts down x3 and x14 with them. The library's hypot, instruction for
+// instruction.
 Lscalar:
-    cmp     x5, x7
-    b.hs    Lscalar_out
-    ldr     d0, [x0, x5]
-    ldr     d1, [x1, x5]
+    cbz     x7, Lscalar_out
+    ldr     d0, [x0], #8
+    ldr     d1, [x1], #8
+    sub     x7, x7, #1
+    sub     x3, x3, #1
+    sub     x14, x14, #1
     fabs    d2, d0
     fabs    d3, d1
     fmaxnm  d0, d2, d3
@@ -163,8 +255,7 @@ Ls_core:
     fsqrt   d0, d0
     fmul    d0, d0, d2
 Ls_store:
-    str     d0, [x2, x5]
-    add     x5, x5, #8
+    str     d0, [x2], #8
     b       Lscalar
 Ls_nan:
     fmov    d0, d1
