@@ -111,6 +111,32 @@ typedef unsigned int hypot_status;
 // MXCSR's six flags: invalid, denormal, divide by zero, overflow, underflow
 // and precision.
 #define MXCSR_FLAGS 0x3fu
+#elif defined(__aarch64__)
+// The floating-point status as saved around a kernel: FPSR, whose cumulative
+// flags are those of every floating-point instruction.
+typedef uint64_t hypot_status;
+// FPSR's six cumulative flags: invalid (0x01), divide by zero (0x02),
+// overflow (0x04), underflow (0x08), inexact (0x10) and input denormal (0x80).
+#define FPSR_FLAGS 0x9fu
+// The four NumPy reports.
+#define FPSR_REPORTED 0x0fu
+
+// FPSR, read directly. A read or write of it waits for the floating-point
+// instructions before it to finish. Through the C library (fegetexceptflag,
+// feclearexcept, fetestexcept, fesetexceptflag) the binding made four
+// accesses around a kernel call, and 16 elements took 55 ns on an Apple M1
+// Pro, against 8 ns for the kernel alone; here it makes two reads and no
+// write unless a flag is set, and they take 45 ns.
+static inline uint64_t hypot_read_fpsr(void) {
+    uint64_t fpsr;
+    __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr));
+    return fpsr;
+}
+
+// Write FPSR.
+static inline void hypot_write_fpsr(uint64_t fpsr) {
+    __asm__ volatile("msr fpsr, %0" : : "r"(fpsr));
+}
 #else
 // The status as saved around a kernel, through the C library.
 typedef fexcept_t hypot_status;
@@ -122,12 +148,29 @@ static inline void hypot_save_flags(hypot_status *saved) {
     *saved = _mm_getcsr();
     // Writing MXCSR costs more than reading it; skip it when nothing is set.
     if (*saved & MXCSR_FLAGS) _mm_setcsr(*saved & ~MXCSR_FLAGS);
+#elif defined(__aarch64__)
+    *saved = hypot_read_fpsr();
+    // NumPy clears the flags before a ufunc's loops, so usually none is set.
+    if (*saved & FPSR_FLAGS) hypot_write_fpsr(*saved & ~(uint64_t)FPSR_FLAGS);
 #else
     fegetexceptflag(saved, FE_ALL_EXCEPT);
     feclearexcept(FE_ALL_EXCEPT);
 #endif
 }
 
+#if defined(__aarch64__)
+// Say whether the kernel raised none of the flags NumPy reports, and put back
+// the flags saved by hypot_save_flags, from one read of FPSR. The kernel
+// raises inexact on nearly every call, as the C library does; NumPy ignores
+// it. So FPSR is written back only when a flag NumPy reports differs from the
+// saved ones, and inexact and input denormal may stay set where they were
+// clear.
+static inline bool hypot_finish_flags(const hypot_status *saved) {
+    const uint64_t now = hypot_read_fpsr();
+    if ((now ^ *saved) & FPSR_REPORTED) hypot_write_fpsr(*saved | (now & (FPSR_FLAGS & ~(uint64_t)FPSR_REPORTED)));
+    return (now & FPSR_REPORTED) == 0;
+}
+#else
 // Put back the flags saved by hypot_save_flags, dropping those set since.
 static inline void hypot_restore_flags(const hypot_status *saved) {
 #if defined(__x86_64__)
@@ -136,16 +179,22 @@ static inline void hypot_restore_flags(const hypot_status *saved) {
     fesetexceptflag(saved, FE_ALL_EXCEPT);
 #endif
 }
+#endif
 
 // Run the kernel over `n` elements and say whether it raised none of the
-// flags NumPy reports. The flags are as they were before, whatever it raised.
+// flags NumPy reports. The flags NumPy reports are as they were before,
+// whatever it raised.
 static bool hypot_clean(const double *a, const double *b, double *out, size_t n) {
     hypot_status saved;
     hypot_save_flags(&saved);
     hypot_f64(a, b, out, n);
+#if defined(__aarch64__)
+    return hypot_finish_flags(&saved);
+#else
     const bool clean = !hk_float_flags_reported();
     hypot_restore_flags(&saved);
     return clean;
+#endif
 }
 
 // Compute as much of a contiguous call as the kernel may. Returns how many

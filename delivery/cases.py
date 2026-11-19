@@ -3482,9 +3482,13 @@ HYPOT_BLOCK = 256
 HYPOT_BLOCK_SIZES = (HYPOT_BLOCK - 1, HYPOT_BLOCK, HYPOT_BLOCK + 1, 3 * HYPOT_BLOCK + 5)
 # Pairs whose hypot raises a flag in NumPy's loop: overflow from two of the
 # largest doubles, underflow from two denormals. Planted in otherwise
-# ordinary arrays, to show that the warnings are NumPy's.
+# ordinary arrays, to show that the warnings are NumPy's. The hypotenuse of
+# these two denormals, about sqrt(10) * 1e-310, is not a double, so every C
+# library rounds it and raises underflow. A pair in the ratio 3 : 4, such as
+# (3e-320, 4e-320), has an exact hypotenuse on the denormal grid, and macOS's
+# hypot returns it without raising anything.
 HYPOT_OVERFLOWS = (1.5e308, 1.5e308)
-HYPOT_UNDERFLOWS = (3e-320, 4e-320)
+HYPOT_UNDERFLOWS = (3e-310, 1e-310)
 # A pair where b is negligible beside a (less than 2^-54 of it) and b * b / a
 # is below 2^-1022: NumPy raises nothing, and the kernel raises underflow in
 # the part of its arithmetic it throws away, so the call goes to NumPy.
