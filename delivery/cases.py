@@ -17,7 +17,7 @@ import ctypes
 import ctypes.util
 import itertools
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Callable, Iterator
@@ -2661,7 +2661,10 @@ def where_cases() -> Iterator[Case]:
 # computes an accumulation of two elements with its operands the other way
 # round from a longer one, which shows only where two elements compare equal
 # or are both NaN: two zeros of opposite sign, and two NaNs with different
-# payloads. Each pattern is also run with a third element.
+# payloads. Each pattern is also run with a third element. Under np.fmax the
+# binding leaves an array with a negative zero or NaNs of two patterns to
+# NumPy, whose answer there depends on its build, so those patterns check
+# that guard and the others the kernel.
 _POS_ZERO = 0x0000000000000000
 _NEG_ZERO = 0x8000000000000000
 _QUIET_NAN = 0x7FF8000000000000
@@ -2669,6 +2672,8 @@ _PAYLOAD_NAN = 0xFFF8000000000123
 _OTHER_NAN = 0x7FF80000000ABCDE
 _ONE = 0x3FF0000000000000
 _NEG_INF = 0xFFF0000000000000
+# The quiet bit of a float64 NaN, the top bit of the fraction.
+_QUIET_BIT = 0x0008000000000000
 _SHORT_FLOATS: tuple[tuple[int, ...], ...] = (
     (_POS_ZERO, _NEG_ZERO), (_NEG_ZERO, _POS_ZERO), (_NEG_ZERO, _NEG_ZERO), (_POS_ZERO, _POS_ZERO),
     (_QUIET_NAN, _PAYLOAD_NAN), (_PAYLOAD_NAN, _QUIET_NAN), (_QUIET_NAN, _ONE), (_ONE, _QUIET_NAN),
@@ -2745,14 +2750,95 @@ def _from_bits(patterns: tuple[int, ...]) -> np.ndarray:
 
 
 def _quiet_nans_only(n: int) -> np.ndarray:
-    """Return the float64 array of `unusual_nans` with each signalling NaN made quiet.
+    """Return the float64 array of `unusual_nans` with each signalling NaN replaced.
 
-    The negative quiet NaNs with a payload stay, so the kernel takes it.
+    It is replaced by the negative quiet NaN with a payload that the array
+    already holds, so its NaNs all have that one pattern and the kernel takes
+    it.
     """
     x = unusual_nans("f64", n)
     bits = x.view(np.uint64)
-    bits[::_SIGNALLING_EVERY] = _QUIET_NAN
+    bits[::_SIGNALLING_EVERY] = _UNUSUAL_NANS[8][2]
     return x
+
+
+def _cumfmax_takes(x: np.ndarray) -> bool:
+    """Say whether the binding gives `np.fmax.accumulate(x)` to cumfmax_f64, for a plain float64 x.
+
+    It does not when x holds a signalling NaN, which NumPy answers with a
+    quiet NaN, nor where NumPy's own answer depends on its build: when x
+    holds a negative zero (the sign of a zero running maximum differs between
+    NumPy's x86-64 and ARM64 builds), or NaNs of more than one bit pattern.
+
+    Args:
+        x: A one-dimensional contiguous float64 array.
+
+    Returns:
+        True when the kernel takes the call.
+    """
+    bits = np.asarray(x).view(np.uint64)
+    nans = bits[np.isnan(x)]
+    signalling = bool(np.any((nans & _QUIET_BIT) == 0))
+    return not (signalling or np.any(bits == _NEG_ZERO) or np.unique(nans).size > 1)
+
+
+def _with_cumfmax_expectation(case: Case) -> Case:
+    """Return `case`, expecting NumPy instead of cumfmax_f64 where the binding leaves its array to NumPy.
+
+    Args:
+        case: A case of np.fmax.accumulate; only one that expects cumfmax_f64
+            is changed, and its array is then plain.
+
+    Returns:
+        The case with its expectation worked out from its array.
+    """
+    if case.expect != "cumfmax_f64":
+        return case
+    (x,) = case.make()
+    return case if _cumfmax_takes(x) else replace(case, expect=None)
+
+
+def _with_bits_at(n: int, patterns: tuple[int, ...]) -> np.ndarray:
+    """Return random float64 values whose last elements have the given bit patterns.
+
+    Args:
+        n: Element count, at least len(patterns).
+        patterns: Bit patterns of the last len(patterns) elements.
+
+    Returns:
+        A contiguous float64 array.
+    """
+    x = values("f64", n)
+    x.view(np.uint64)[n - len(patterns):] = patterns
+    return x
+
+
+def _accumulate_guard_cases() -> Iterator[Case]:
+    """Yield the cases of the two guards on np.fmax.accumulate that keep build-dependent answers with NumPy.
+
+    Each guard is shown taken and not taken: a negative zero anywhere sends
+    the call to NumPy and a positive zero does not; NaNs of two patterns send
+    it and NaNs of one pattern do not. The last element alone is the one that
+    decides, at a size from which the binding releases the interpreter lock.
+    """
+    n = ACCUMULATE_LATE_N
+    for text, patterns, expect in (
+        ("negative zero last only", (_NEG_ZERO,), None),
+        ("positive zero last only", (_POS_ZERO,), "cumfmax_f64"),
+        ("zeros of both signs last", (_POS_ZERO, _NEG_ZERO), None),
+        ("NaNs of two patterns last", (_QUIET_NAN, _PAYLOAD_NAN), None),
+        ("NaNs of one pattern last", (_PAYLOAD_NAN, _PAYLOAD_NAN), "cumfmax_f64"),
+    ):
+        yield Case("accumulate", f"np.fmax.accumulate(x) f64 n={n} x={text}",
+                   partial(_made, partial(_with_bits_at, n, patterns)), _fmax_accumulate, expect)
+    for text, patterns, expect in (
+        ("all NaN of one pattern", (_PAYLOAD_NAN,) * 9, "cumfmax_f64"),
+        ("all NaN of two patterns", (_QUIET_NAN,) * 8 + (_OTHER_NAN,), None),
+        ("zeros, all positive", (_POS_ZERO,) * 9, "cumfmax_f64"),
+        ("zeros, one negative", (_POS_ZERO,) * 8 + (_NEG_ZERO,), None),
+    ):
+        yield Case("accumulate", f"np.fmax.accumulate(x) f64 x={text}",
+                   partial(_made, partial(_from_bits, patterns)), _fmax_accumulate, expect)
 
 
 def _late_signalling_nan(n: int) -> np.ndarray:
@@ -2766,22 +2852,25 @@ def accumulate_cases() -> Iterator[Case]:
     """Yield the cases of `np.maximum.accumulate` and `np.fmax.accumulate`.
 
     Both ufuncs take cummax_i64 on int64. np.fmax takes cumfmax_f64 on
-    float64 unless the array holds a signalling NaN; np.maximum on float64
+    float64 unless the array holds a signalling NaN, a negative zero or NaNs
+    of more than one pattern (`_cumfmax_takes`); np.maximum on float64
     propagates NaN and is NumPy's. Other ufuncs' accumulations pass through
     the hook uncounted.
     """
     yield from unary_cases("accumulate", {"i64": "cummax_i64"}, ("f64", "f32", "i32", "u64"),
                            (*_accumulate_spellings(np.maximum), *_OTHER_ACCUMULATIONS), empty_takes=False)
-    yield from unary_cases("accumulate", {"i64": "cummax_i64", "f64": "cumfmax_f64"}, ("f32", "i32", "u64"),
-                           _accumulate_spellings(np.fmax), empty_takes=False)
+    for case in unary_cases("accumulate", {"i64": "cummax_i64", "f64": "cumfmax_f64"}, ("f32", "i32", "u64"),
+                            _accumulate_spellings(np.fmax), empty_takes=False):
+        yield _with_cumfmax_expectation(case)
     # np.maximum on float64 over every value class, NaNs included: NumPy's.
     for n, _, label, maker in value_arrays("f64", FEW_SIZES):
         yield Case("accumulate", f"np.maximum.accumulate(x) f64 {label}", partial(_made, maker),
                    _maximum_accumulate, None)
     for patterns in _SHORT_FLOATS:
         text = " ".join(f"{p:#x}" for p in patterns)
+        expect = "cumfmax_f64" if _cumfmax_takes(_from_bits(patterns)) else None
         yield Case("accumulate", f"np.fmax.accumulate(x) f64 x=[{text}]", partial(_made, partial(_from_bits, patterns)),
-                   _fmax_accumulate, "cumfmax_f64")
+                   _fmax_accumulate, expect)
         yield Case("accumulate", f"np.maximum.accumulate(x) f64 x=[{text}]",
                    partial(_made, partial(_from_bits, patterns)), _maximum_accumulate, None)
     for numbers in _SHORT_INTS:
@@ -2801,6 +2890,7 @@ def accumulate_cases() -> Iterator[Case]:
         yield Case("accumulate", f"np.fmax.accumulate(x) f64 n={n} x=nan_some invalid flag after",
                    partial(_made, partial(values, "f64", n, "nan_some")),
                    partial(_invalid_flag_after, _fmax_accumulate), "cumfmax_f64")
+    yield from _accumulate_guard_cases()
 
 
 # ------------------------------------------------- floating-point status flags
@@ -2846,9 +2936,8 @@ _REDUCEAT_RUN = 16
 _REDUCEAT_SPARSE = 8
 # Every how many elements the starts with one repeated start are placed.
 _REDUCEAT_REPEAT_STEP = 3
-# Bit patterns of float64 values, for the arrays built to hit the binding's
-# guards: the quiet bit, and the sign bit with the magnitude.
-_QUIET_BIT = 0x0008000000000000
+# Bit pattern of float64 values, for the arrays built to hit the binding's
+# guards: the sign bit with the magnitude (the quiet bit is `_QUIET_BIT`).
 _MAGNITUDE = 0x7FFFFFFFFFFFFFFF
 # Element count of the arrays built to hit the binding's guards: ten groups
 # of four.

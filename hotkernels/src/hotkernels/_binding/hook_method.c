@@ -494,19 +494,65 @@ static hk_kernel accumulate_kernel(PyObject *ufunc, PyObject *array) {
     return HK_KERNEL_COUNT;
 }
 
+// True when np.fmax.accumulate of the `n` doubles at `values` is left to
+// NumPy: the array holds a signalling NaN, a negative zero, or NaNs of more
+// than one bit pattern.
+//
+// cumfmax_f64 ignores every NaN; NumPy ignores a quiet one and answers a
+// signalling one with a quiet NaN, through the C library's fmax. The other two
+// are where NumPy's own answer depends on its build: which zero a running
+// maximum of zeros of both signs is, and which NaN an output is while every
+// element so far is NaN. NumPy's x86-64 and ARM64 builds give a different sign
+// for the zero (seen in CI on Apple Silicon), and the kernel reproduces one
+// build. Both conditions are broader than needed, since a negative zero
+// matters only where a zero is the running maximum, and are kept simple.
+//
+// One pass with no branch. A NaN is the one value that differs from itself:
+// `nan` is all ones for one. `set` and `clear` gather the bits set and clear
+// in some NaN, so the NaNs share one pattern exactly when no bit is in both,
+// and one is signalling when the quiet bit is among the clear ones. A
+// negative zero is found by comparing the bits with its pattern. The NaN
+// compare is the quiet kind: it raises the invalid-operation flag for a
+// signalling NaN only, whose call is NumPy's. The bits are copied out with
+// memcpy, which the compiler turns into a plain load. Compiled for the
+// kernels' level, as hk_has_signalling_nan is, for the 64-bit compare;
+// elsewhere the same loop is compiled for what the platform has. With AVX2
+// it is two compares and five logical instructions per four elements: from
+// Python at 4,096 elements the call takes 1.17 us, where it took 0.94 with
+// the read for signalling NaNs alone (Intel Core i5-14600KF). Finding a zero
+// with a floating-point compare and testing its sign bit took two
+// instructions more per four elements, and the call 1.31 us.
+static HK_TARGET_KERNEL_LEVEL bool fmax_accumulate_left_to_numpy(const double *values, size_t n) {
+    // The quiet bit of a NaN, the top bit of the fraction.
+    const uint64_t quiet = 0x0008000000000000ULL;
+    // The sign bit alone: the pattern of -0.0.
+    const uint64_t sign = 0x8000000000000000ULL;
+    // 64-bit masks, as wide as an element: with bools the compiler leaves the
+    // loop scalar.
+    uint64_t set = 0, clear = 0, negative_zero = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint64_t bits;
+        memcpy(&bits, &values[i], sizeof bits);
+        const uint64_t nan = values[i] != values[i] ? ~0ULL : 0;
+        set |= bits & nan;
+        clear |= ~bits & nan;
+        negative_zero |= bits == sign ? ~0ULL : 0;
+    }
+    return (clear & quiet) != 0 || (set & clear) != 0 || negative_zero != 0;
+}
+
 // np.maximum.accumulate(x) or np.fmax.accumulate(x) on a one-dimensional
 // contiguous array with at least one element, `axis` the first, and `dtype`
 // and `out` absent or None. The parameters are NumPy's, which takes all four
 // by position or by keyword. The result is a new array of the input's type
 // and length, so it cannot overlap the input, which both kernels require.
 //
-// cumfmax_f64 ignores every NaN; NumPy ignores a quiet one and answers a
-// signalling one with a quiet NaN, through the C library's fmax. So a float64
-// array is read for signalling NaNs first, and one that holds any is NumPy's.
-// The kernel's vmaxpd sets the invalid-operation flag for every NaN operand,
-// quiet ones included, and NumPy's own loop leaves no flag behind, so the
-// flags are cleared after it (hk_clear_float_flags), as after the clip
-// kernels.
+// A float64 array is read first (fmax_accumulate_left_to_numpy), and one
+// that holds a signalling NaN, a negative zero, or NaNs of several patterns
+// is NumPy's. The kernel's vmaxpd sets the invalid-operation flag for every
+// NaN operand, quiet ones included, and NumPy's own loop leaves no flag
+// behind, so the flags are cleared after it (hk_clear_float_flags), as after
+// the clip kernels.
 static HK_NOINLINE PyObject *try_accumulate(PyObject *ufunc, PyObject *const *args, Py_ssize_t nargs,
                                             PyObject *kwnames) {
     enum { ARRAY, AXIS, DTYPE, OUT, PARAMETERS };
@@ -531,22 +577,22 @@ static HK_NOINLINE PyObject *try_accumulate(PyObject *ufunc, PyObject *const *ar
         return NULL;
     }
     void *out = PyArray_DATA((PyArrayObject *)result);
-    // True when the input holds a signalling NaN and the call is passed on.
-    bool signalling = false;
+    // True when the float64 input is NumPy's and the call is passed on.
+    bool left = false;
     {
         HK_BEGIN_NOGIL(n)
         if (kernel == HK_CUMMAX_I64) {
             cummax_i64(PyArray_DATA(x), out, (size_t)n);
         } else {
-            signalling = hk_has_signalling_nan(PyArray_DATA(x), (size_t)n);
-            if (!signalling) {
+            left = fmax_accumulate_left_to_numpy(PyArray_DATA(x), (size_t)n);
+            if (!left) {
                 cumfmax_f64(PyArray_DATA(x), out, (size_t)n);
                 hk_clear_float_flags();
             }
         }
         HK_END_NOGIL
     }
-    if (signalling) {
+    if (left) {
         Py_DECREF(result);
         return NULL;
     }
