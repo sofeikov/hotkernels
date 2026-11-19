@@ -221,7 +221,7 @@ The judge proves a kernel right as a native function. It says nothing about the 
 | Spellings | Positional, keyword, `out=`, `axis=`, method and function forms |
 | Values | The judge's value classes: NaN, infinities, signed zeros, ties |
 
-That is **166,029 calls over the 21 hooked operations** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
+That is **170,982 calls over the 22 hooked operations** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
 
 **Each case also states whether a kernel should have run**, and the counters are checked against it. Without that, a check that quietly stopped matching would pass every comparison, since NumPy's fallback is always right, while delivering nothing.
 
@@ -235,6 +235,6 @@ The binding runs without guard pages. A wrong length passed to a correct kernel 
 
 ## Where that leaves things
 
-Of the 31 kernels, 29 are installed by `install()` and the other 2 with `install(inexact=True)`. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
+Of the 32 kernels, 30 are installed by `install()` and the other 2 with `install(inexact=True)`. One of the 30, the kernel for `np.hypot`, is exact only against one C library's `hypot`, and `install()` keeps its hook only after comparing the two on the machine it runs on. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
 
 The last chapter collects every number, and is candid about which of them mean less than they appear to.

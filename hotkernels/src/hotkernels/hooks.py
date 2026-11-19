@@ -12,12 +12,15 @@ NumPy untouched.
 """
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
 from typing import Callable
 
 import numpy as np
+
+from .environment import BINDING_MODULE
 
 # Kinds of hook, as shown to the user.
 TYPE_SLOT = "type slot"
@@ -68,6 +71,30 @@ PROBE_COLS = 22
 # codes are counted once more than the others, and a kernel that dropped or
 # misplaced a code would fail.
 PROBE_CODES = 41
+
+# Number of pairs the hypot probe compares, and the seed they are drawn with.
+# Algorithms for hypot that differ do so on a fraction of a percent to about
+# ten percent of ordinary pairs. The closest one tried, the kernel's own with
+# one fused multiply-add in its first sum, differs on 16 of the probe's
+# PROBE_HYPOT_ORDINARY_N ordinary pairs, and on none of the others.
+PROBE_HYPOT_N = 20000
+PROBE_HYPOT_ORDINARY_N = 14000
+PROBE_HYPOT_SEED = 96
+# Exponents, as powers of two, the hypot probe draws its magnitudes between.
+# The close ones span -30 to 30, so that most pairs are computed in full
+# rather than returning the larger operand; the spread ones span -200 to 200.
+# The large ones lie above 2^511, where the algorithm scales its inputs down,
+# and stay below 2^1000 so that no result overflows. The small ones lie below
+# 2^-459, where it scales them up, and stay above 2^-1000 so that no result
+# is a denormal, whose rounding raises the underflow flag and would send the
+# call to NumPy's own loop.
+PROBE_HYPOT_CLOSE = (-30, 30)
+PROBE_HYPOT_SPREAD = (-200, 200)
+PROBE_HYPOT_LARGE = (512, 1000)
+PROBE_HYPOT_SMALL = (-1000, -460)
+# A quiet NaN with a payload of its own and the sign bit set: the result of
+# hypot for a NaN operand is a sum of the operands, which keeps one of them.
+PROBE_HYPOT_NAN = np.array([0xFFF8000000001234], dtype=np.uint64).view(np.float64)[0]
 
 # Element count of the sorted array the search probes look in. It differs
 # from PROBE_N so that a kernel which confused its two lengths would fail.
@@ -357,6 +384,112 @@ def _where() -> bool:
     return result.dtype == np.float64 and bool(np.array_equal(result, expected))
 
 
+def _hypot_pairs() -> tuple[np.ndarray, np.ndarray]:
+    """Return the pairs the hypot probe compares, in a fixed order.
+
+    First PROBE_HYPOT_ORDINARY_N ordinary pairs, where algorithms for hypot
+    disagree most: half standard normal, half with magnitudes from 2^-30 to
+    2^30. They come first and on their own, so that the kernel computes them
+    four at a time on its vector path, the path that carries nearly all of a
+    real call. Then, shuffled together, one block for each kind of operand
+    the algorithm treats on a path of its own: magnitudes from 2^-200 to
+    2^200, where one operand is often negligible beside the other; both
+    operands above 2^511; one of them above 2^511; both below 2^-459; a
+    denormal beside a value near 2^-1000 and beside 1.0; a zero of either
+    sign beside anything; an infinity beside a finite value, a NaN or another
+    infinity; a quiet NaN beside a finite value or another NaN; and a value
+    near 2^-300 beside an ordinary one. None of them raises a floating-point
+    flag in the C library's hypot (no result overflows or is a denormal, and
+    no NaN is signalling), so the kernel takes the call when it is right.
+
+    Returns:
+        The arrays a and b, PROBE_HYPOT_N float64 elements each.
+    """
+    rng = np.random.default_rng(PROBE_HYPOT_SEED)
+
+    def spread(low: int, high: int, count: int) -> np.ndarray:
+        """Return values of either sign with exponents drawn from low to high.
+
+        Args:
+            low: Smallest power of two of a magnitude.
+            high: Largest power of two of a magnitude.
+            count: Number of values.
+
+        Returns:
+            A float64 array of `count` values.
+        """
+        signs = rng.choice([-1.0, 1.0], count)
+        return np.ldexp(signs * rng.uniform(0.5, 1.0, count), rng.integers(low, high + 1, count))
+
+    half = PROBE_HYPOT_ORDINARY_N // 2
+    a = [rng.standard_normal(half), spread(*PROBE_HYPOT_CLOSE, half)]
+    b = [rng.standard_normal(half), spread(*PROBE_HYPOT_CLOSE, half)]
+    blocks = 16
+    k = (PROBE_HYPOT_N - PROBE_HYPOT_ORDINARY_N) // blocks
+    denormals = np.ldexp(rng.uniform(0.0, 1.0, k), -1022)
+    pairs = (
+        (spread(*PROBE_HYPOT_SPREAD, k), spread(*PROBE_HYPOT_SPREAD, k)),
+        (spread(*PROBE_HYPOT_LARGE, k), spread(*PROBE_HYPOT_LARGE, k)),
+        (spread(*PROBE_HYPOT_LARGE, k), spread(*PROBE_HYPOT_SPREAD, k)),
+        (spread(*PROBE_HYPOT_SMALL, k), spread(*PROBE_HYPOT_SMALL, k)),
+        (denormals, spread(PROBE_HYPOT_SMALL[0], PROBE_HYPOT_SMALL[0] + 20, k)),
+        (denormals, np.ones(k)),
+        (np.zeros(k), spread(*PROBE_HYPOT_SPREAD, k)),
+        (-np.zeros(k), spread(*PROBE_HYPOT_LARGE, k)),
+        (np.zeros(k), denormals),
+        (np.zeros(k), -np.zeros(k)),
+        (np.full(k, np.inf), spread(*PROBE_HYPOT_SPREAD, k)),
+        (spread(*PROBE_HYPOT_SPREAD, k), np.full(k, -np.inf)),
+        (np.full(k, np.inf), np.full(k, PROBE_HYPOT_NAN)),
+        (np.full(k, PROBE_HYPOT_NAN), spread(*PROBE_HYPOT_SPREAD, k)),
+        (np.full(k, np.nan), np.full(k, PROBE_HYPOT_NAN)),
+        (spread(*PROBE_HYPOT_SPREAD, k), np.ldexp(spread(-10, 10, k), -300)),
+    )
+    # Shuffled, so that the kernel meets these operands inside groups of
+    # other kinds and not only in groups of their own.
+    order = rng.permutation(blocks * k)
+    a.append(np.concatenate([x for x, _ in pairs])[order])
+    b.append(np.concatenate([y for _, y in pairs])[order])
+    return np.concatenate(a), np.concatenate(b)
+
+
+def _hypot() -> bool:
+    """Probe the hypot loop: the kernel must give the C library's bits on this machine.
+
+    The kernel computes one particular algorithm for hypot, and NumPy calls
+    whatever the C library has, so this probe is what decides whether the
+    hook may stay. It computes np.hypot on the pairs of `_hypot_pairs` twice:
+    first on strided views of them, a call the hook leaves to NumPy's own
+    loop and so to the C library, then on contiguous arrays, which the kernel
+    takes. It passes only if the kernel's counter did not move for the first
+    call, moved for the second, and every result has the same bits, NaN
+    payloads included. A call that raised a floating-point flag would go to
+    NumPy's loop and leave the counter where it was, so it cannot pass by
+    that route either; both calls run under np.errstate(all="raise"), which
+    turns such a flag into an exception, and an exception fails the probe.
+
+    Returns:
+        True when the kernel took the contiguous call and matched the C
+        library on every pair.
+    """
+    binding = importlib.import_module(BINDING_MODULE)
+    a, b = _hypot_pairs()
+    # Every second element of arrays twice as long: a step of 16 bytes.
+    wide_a = np.zeros(2 * PROBE_HYPOT_N)
+    wide_b = np.zeros(2 * PROBE_HYPOT_N)
+    wide_a[::2] = a
+    wide_b[::2] = b
+    before = binding.counters()[0]["hypot_f64"]
+    with np.errstate(all="raise"):
+        reference = np.hypot(wide_a[::2], wide_b[::2])
+        if binding.counters()[0]["hypot_f64"] != before:
+            return False
+        result = np.hypot(a, b)
+    if binding.counters()[0]["hypot_f64"] == before:
+        return False
+    return result.dtype == np.float64 and bool(np.array_equal(result.view(np.uint64), reference.view(np.uint64)))
+
+
 def _cumsum(dtype: type) -> bool:
     """Probe the method hook: `x.cumsum()` on ones, whose running sum is exact in every type."""
     return bool(np.array_equal(np.ones(PROBE_N, dtype).cumsum(), np.arange(1, PROBE_N + 1).astype(dtype)))
@@ -565,6 +698,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("slot.argmin.f64", TYPE_SLOT, (Probe("argmin_f64", partial(_argext_method, np.float64, "argmin", -1.0)),)),
     Hook("loop.clip.f32", INNER_LOOP, (Probe("clip_f32", partial(_clip, np.float32)),)),
     Hook("loop.clip.f64", INNER_LOOP, (Probe("clip_f64", partial(_clip, np.float64)),)),
+    Hook("loop.hypot.f64", INNER_LOOP, (Probe("hypot_f64", _hypot),)),
     Hook("function.argmax", FUNCTION, (
         Probe("argmax_f32", partial(_argext_function, np.float32, np.argmax, 1.0)),
         Probe("argmax_f64", partial(_argext_function, np.float64, np.argmax, 1.0)),
@@ -692,6 +826,7 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("cumfmax_f64", "fmax.accumulate", "float64", "accumulate", ("ufunc.accumulate",)),
     KernelInfo("fmax_reduce_f64", "fmax.reduceat", "float64", "reduceat", ("ufunc.reduceat",)),
     KernelInfo("any_rows_bool", "m.any(axis=1)", "bool", "any", ("method.any", "function.any")),
+    KernelInfo("hypot_f64", "np.hypot", "float64", "hypot", ("loop.hypot.f64",)),
     # A loop built into the binding, for short arrays.
     KernelInfo("round_f64", "np.round", "float64", "round", ("function.round", "function.around", "method.round"),
                builtin=True),
