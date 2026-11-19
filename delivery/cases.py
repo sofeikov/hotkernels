@@ -3374,6 +3374,321 @@ def any_cases() -> Iterator[Case]:
     yield from _any_bad_byte_cases()
 
 
+# ------------------------------------------------------------------ hypot
+
+# Value classes whose pairs make NumPy's hypot raise a floating-point flag
+# when both arrays hold them: underflow for two denormals, overflow for two
+# of the largest doubles. The kernel then hands the call to NumPy's loop, or
+# raises no flag at the sizes where the class holds no such pair, so either
+# side may compute it.
+HYPOT_MAY_RAISE = frozenset({"denormal", "extremes"})
+# Element types beside float64. float32 has a loop of its own, which is not
+# hooked. Integers are converted to float64 in buffers, contiguous ones, that
+# NumPy's float64 loop receives, so the kernel may take them.
+HYPOT_OTHER_LOOPS = ("f32",)
+HYPOT_CONVERTED = ("i64", "i32")
+# Elements the binding computes at a time when the output is one of the
+# inputs (HK_STACK_SCRATCH_BYTES of doubles), and sizes around it.
+HYPOT_BLOCK = 256
+HYPOT_BLOCK_SIZES = (HYPOT_BLOCK - 1, HYPOT_BLOCK, HYPOT_BLOCK + 1, 3 * HYPOT_BLOCK + 5)
+# Pairs whose hypot raises a flag in NumPy's loop: overflow from two of the
+# largest doubles, underflow from two denormals. Planted in otherwise
+# ordinary arrays, to show that the warnings are NumPy's.
+HYPOT_OVERFLOWS = (1.5e308, 1.5e308)
+HYPOT_UNDERFLOWS = (3e-320, 4e-320)
+# A pair where b is negligible beside a (less than 2^-54 of it) and b * b / a
+# is below 2^-1022: NumPy raises nothing, and the kernel raises underflow in
+# the part of its arithmetic it throws away, so the call goes to NumPy.
+HYPOT_NEGLIGIBLE_UNDERFLOW = (2.0 ** 300, 2.0 ** -400)
+# Settings of np.errstate the flagged calls are made under.
+ERRSTATE_SETTINGS = ("raise", "warn", "ignore")
+
+
+def _hypot(a, b):
+    """Return `np.hypot(a, b)`."""
+    return np.hypot(a, b)
+
+
+def _hypot_out(a, b):
+    """Return `np.hypot(a, b, out=o)` into a fresh output array."""
+    return np.hypot(a, b, out=np.empty(np.shape(a)))
+
+
+def _hypot_into_a(a, b):
+    """Return `np.hypot(a, b, out=a)`: the output is the first input."""
+    return np.hypot(a, b, out=a)
+
+
+def _hypot_into_b(a, b):
+    """Return `np.hypot(a, b, out=b)`: the output is the second input."""
+    return np.hypot(a, b, out=b)
+
+
+def _hypot_self(a, b):
+    """Return `np.hypot(a, a)`: one array as both inputs."""
+    return np.hypot(a, a)
+
+
+def _hypot_self_into(a, b):
+    """Return `np.hypot(a, a, out=a)`: one array as both inputs and the output."""
+    return np.hypot(a, a, out=a)
+
+
+def _hypot_strided_out(a, b):
+    """Return the output array of `np.hypot(a, b, out=o[::2])`, every second element of a larger array."""
+    o = np.zeros(2 * len(a))
+    np.hypot(a, b, out=o[::2])
+    return o
+
+
+def _hypot_overlap(a, b):
+    """Return `np.hypot(a[1:], b[1:], out=a[:-1])`: the output overlaps the first input one element behind."""
+    return np.hypot(a[1:], b[1:], out=a[:-1])
+
+
+def _hypot_where(a, b):
+    """Return `np.hypot(a, b, out=o, where=m)` with a mask True at every third element."""
+    mask = np.zeros(len(a), dtype=bool)
+    mask[::OVERLAP_EVERY] = True
+    return np.hypot(a, b, out=np.zeros(len(a)), where=mask)
+
+
+def _hypot_dtype(dtype: type, a, b):
+    """Return `np.hypot(a, b, dtype=dtype)`."""
+    return np.hypot(a, b, dtype=dtype)
+
+
+def _hypot_reduce(a, b):
+    """Return `np.hypot.reduce(a)`."""
+    return np.hypot.reduce(a)
+
+
+def _hypot_accumulate(a, b):
+    """Return `np.hypot.accumulate(a)`."""
+    return np.hypot.accumulate(a)
+
+
+def _hypot_outer(a, b):
+    """Return `np.hypot.outer(a[:30], b[:30])`."""
+    return np.hypot.outer(a[:30], b[:30])
+
+
+def _hypot_at(a, b):
+    """Return a after `np.hypot.at(a, [0, 1, 1, -1], b[:4])`, which computes in place at indices."""
+    np.hypot.at(a, [0, 1, 1, -1], b[:4])
+    return a
+
+
+def _hypot_errstate(setting: str, call: Callable, a, b):
+    """Make a hypot call under np.errstate(all=setting).
+
+    Args:
+        setting: A value np.errstate takes, such as "raise" or "warn".
+        call: The hypot call, taking a and b.
+        a: First input.
+        b: Second input.
+
+    Returns:
+        What the call returns.
+    """
+    with np.errstate(all=setting):
+        return call(a, b)
+
+
+# The ways of writing a call that the kernel takes for two plain arrays, and
+# those it must not or may: (text, call, expectation for float64 arrays of
+# HYPOT_BLOCK or more elements). A scalar has a step of zero, so a call with
+# one is NumPy's; a strided output is too. NumPy copies an operand that
+# overlaps the output partly, and the copy may reach the kernel. A masked
+# call and the ufunc methods other than a call run NumPy's machinery around
+# the loop, which decides what the loop sees.
+_HYPOT_SPELLINGS: tuple[tuple[str, Callable, str | None], ...] = (
+    ("np.hypot(a, b)", _hypot, "hypot_f64"),
+    ("np.hypot(a, b, out=o)", _hypot_out, "hypot_f64"),
+    ("np.hypot(a, b, out=a)", _hypot_into_a, "hypot_f64"),
+    ("np.hypot(a, b, out=b)", _hypot_into_b, "hypot_f64"),
+    ("np.hypot(a, a)", _hypot_self, "hypot_f64"),
+    ("np.hypot(a, a, out=a)", _hypot_self_into, "hypot_f64"),
+    ("np.hypot(a, b, dtype=np.float64)", partial(_hypot_dtype, np.float64), "hypot_f64"),
+    ("np.hypot(a, b, dtype=np.float32)", partial(_hypot_dtype, np.float32), None),
+    ("np.hypot(a, 2.5)", lambda a, b: np.hypot(a, 2.5), None),
+    ("np.hypot(-0.0, b)", lambda a, b: np.hypot(-0.0, b), None),
+    ("np.hypot(a, np.float64(3))", lambda a, b: np.hypot(a, np.float64(3)), None),
+    ("np.hypot(a, b[:1])", lambda a, b: np.hypot(a, b[:1]), None),
+    ("np.hypot(a, b, out=o[::2])", _hypot_strided_out, None),
+    ("np.hypot(a[1:], b[1:], out=a[:-1])", _hypot_overlap, ANY),
+    ("np.hypot(a, b, out=o, where=m)", _hypot_where, ANY),
+    ("np.hypot.reduce(a)", _hypot_reduce, None),
+    ("np.hypot.accumulate(a)", _hypot_accumulate, None),
+    ("np.hypot.outer(a[:30], b[:30])", _hypot_outer, ANY),
+    ("np.hypot.at(a, i, b[:4])", _hypot_at, ANY),
+)
+
+
+def _hypot_layout_expect(dtype: str, variant: Variant, n: int) -> str | None:
+    """Say whether the kernel takes `np.hypot(a, b)` with one operand in a layout and the other plain.
+
+    The hook sits under NumPy's machinery, so what decides is what reaches the
+    float64 loop: contiguous doubles are taken whatever array they came from.
+    A strided operand reaches the loop with its step and is NumPy's; most
+    other layouts reach it through NumPy's buffers or as they are, which NumPy
+    decides.
+
+    Args:
+        dtype: Element type of both operands, as a spec name.
+        variant: Layout of the one operand that is not plain.
+        n: Element count.
+
+    Returns:
+        The kernel name, None, or ANY.
+    """
+    # A two-dimensional operand of n elements does not broadcast against a
+    # one-dimensional one of n: NumPy raises.
+    if n == 0 or variant.dims == 2:
+        return None
+    # A list is converted to float64, whatever it was made from.
+    if variant.name == "list":
+        return ANY
+    if dtype in HYPOT_OTHER_LOOPS:
+        return None
+    if dtype in HYPOT_CONVERTED:
+        return ANY
+    if variant.name in ("contiguous", "readonly"):
+        return "hypot_f64"
+    if variant.name == "strided":
+        return None
+    return ANY
+
+
+def _planted(n: int, pair: tuple[float, float], arg: str, index: int) -> np.ndarray:
+    """Return random float64 values with one element replaced by a pair's member.
+
+    Args:
+        n: Element count.
+        pair: The two values planted, one in a and one in b.
+        arg: "a" or "b", which also picks the member of the pair.
+        index: Position of the planted element.
+
+    Returns:
+        A contiguous float64 array.
+    """
+    x = values("f64", n, arg=arg)
+    x[index] = pair[0 if arg == "a" else 1]
+    return x
+
+
+def _hypot_value_cases() -> Iterator[Case]:
+    """Yield `np.hypot(a, b)` over every float64 value class at every size, both arrays plain.
+
+    Each class on both sides at once, each on a beside random b, and each on
+    b beside random a; then the NaNs the judge does not make.
+    """
+    for n in VALUE_SIZES:
+        random_a = partial(values, "f64", n, arg="a")
+        random_b = partial(values, "f64", n, arg="b")
+        sides = zip(value_arrays("f64", (n,), "a"), value_arrays("f64", (n,), "b"))
+        for (_, cls, label, a_maker), (_, _, _, b_maker) in sides:
+            yield Case("hypot", f"np.hypot(a, b) f64 {label} and b alike",
+                       partial(_built_each, a_maker, b_maker), _hypot,
+                       ANY if cls in HYPOT_MAY_RAISE else "hypot_f64")
+            yield Case("hypot", f"np.hypot(a, b) f64 {label}, b random",
+                       partial(_built_each, a_maker, random_b), _hypot, "hypot_f64")
+        for _, _, label, b_maker in value_arrays("f64", (n,), "b"):
+            yield Case("hypot", f"np.hypot(a, b) f64 a random, {label}",
+                       partial(_built_each, random_a, b_maker), _hypot, "hypot_f64")
+        # A signalling NaN raises the invalid flag in NumPy's loop, which then
+        # warns; every array of unusual_nans starts with one.
+        yield Case("hypot", f"np.hypot(a, b) f64 n={n} a and b=signalling and negative NaNs",
+                   partial(_built_each, partial(unusual_nans, "f64", n), partial(_unusual_nans_reversed, n)),
+                   _hypot, None)
+
+
+def _hypot_layout_cases() -> Iterator[Case]:
+    """Yield `np.hypot(a, b)` with each operand in every layout, the other plain, for float64 and its neighbours."""
+    for dtype in ("f64", *HYPOT_OTHER_LOOPS, *HYPOT_CONVERTED):
+        for n in (0, *LAYOUT_SIZES):
+            plain = {"a": partial(values, dtype, n, arg="a"), "b": partial(values, dtype, n, arg="b")}
+            for arg in ("a", "b"):
+                for variant in variants_for(dtype, n):
+                    makers = {**plain, arg: partial(_variant_of, dtype, n, variant, arg)}
+                    yield Case("hypot", f"np.hypot(a, b) {dtype} n={n} {arg}={variant.name}",
+                               partial(_built_each, makers["a"], makers["b"]), _hypot,
+                               _hypot_layout_expect(dtype, variant, n))
+        # Two arrays of different element types: NumPy converts one of them.
+        if dtype != "f64":
+            for n in LAYOUT_SIZES:
+                yield Case("hypot", f"np.hypot(a, b) f64 and {dtype} n={n}",
+                           partial(_built_each, partial(values, "f64", n, arg="a"), partial(values, dtype, n, arg="b")),
+                           _hypot, ANY)
+
+
+def _hypot_spelling_cases() -> Iterator[Case]:
+    """Yield every spelling of the call, on float64 arrays around the binding's block size and the lock threshold."""
+    for n in (1, 16, *HYPOT_BLOCK_SIZES, *LAYOUT_SIZES[1:]):
+        make = partial(_built_each, partial(values, "f64", n, arg="a"), partial(values, "f64", n, arg="b"))
+        for text, call, expect in _HYPOT_SPELLINGS:
+            # NumPy describes the one element of an array of one as it likes:
+            # its step may be anything, so the loop may or may not see 8.
+            yield Case("hypot", f"{text} f64 n={n}", make, call, ANY if n == 1 else expect)
+    for text, call, _ in _HYPOT_SPELLINGS[:2]:
+        for n in (1, ORDINARY_N):
+            yield Case("hypot", f"{text} f64 n={n} two-dimensional, b a row",
+                       partial(_built_each, partial(_rows_of, n, "a"), partial(values, "f64", COLUMNS, arg="b")),
+                       call, ANY)
+
+
+def _rows_of(n: int, arg: str) -> np.ndarray:
+    """Return random float64 values as a C-ordered array of COLUMNS columns, at least one row.
+
+    Args:
+        n: Element count, rounded up to a whole row.
+        arg: Argument name, to vary the random data.
+
+    Returns:
+        A two-dimensional contiguous array.
+    """
+    rows = max(1, -(-n // COLUMNS))
+    return values("f64", rows * COLUMNS, arg=arg).reshape(rows, COLUMNS)
+
+
+def _hypot_flag_cases() -> Iterator[Case]:
+    """Yield calls whose data make a floating-point flag, under every np.errstate setting.
+
+    The kernel's result is dropped and NumPy's loop computes the call again,
+    so the result, the warning or the exception are NumPy's. With the output
+    one of the inputs the binding computes block by block, so a flag in a
+    late block leaves the earlier blocks to the kernel and the rest to NumPy,
+    which must still see the inputs of the rest as they were. The pair whose
+    flag only the kernel raises is NumPy's too.
+    """
+    # The pair only the kernel's vector path raises a flag for goes to NumPy
+    # when it falls in a group of four, and is the kernel's when it falls in
+    # the last one to three elements, which the kernel does one at a time.
+    pairs = (("overflow", HYPOT_OVERFLOWS, None), ("underflow", HYPOT_UNDERFLOWS, None),
+             ("negligible", HYPOT_NEGLIGIBLE_UNDERFLOW, ANY))
+    for n in (1, 16, *HYPOT_BLOCK_SIZES, LAYOUT_SIZES[-1]):
+        for (name, pair, expect), index in itertools.product(pairs, sorted({0, n // 2, n - 1})):
+            make = partial(_built_each, partial(_planted, n, pair, "a", index), partial(_planted, n, pair, "b", index))
+            for text, call, _ in _HYPOT_SPELLINGS[:4]:
+                for setting in ERRSTATE_SETTINGS:
+                    yield Case("hypot", f"np.errstate(all={setting!r}) {text} f64 n={n} {name} at {index}",
+                               make, partial(_hypot_errstate, setting, call), expect)
+
+
+def hypot_cases() -> Iterator[Case]:
+    """Yield the cases of `np.hypot(a, b)`.
+
+    The hook is the float64 loop of the hypot ufunc. The kernel takes a loop
+    call whose three operands are contiguous and whose output is clear of the
+    inputs or is one of them, and whose data raise no floating-point flag;
+    see the binding's loop_hypot_f64.
+    """
+    yield from _hypot_value_cases()
+    yield from _hypot_layout_cases()
+    yield from _hypot_spelling_cases()
+    yield from _hypot_flag_cases()
+
+
 # Every operation that has a hook, with its exact cases.
 OPERATIONS: dict[str, Callable[[], Iterator[Case]]] = {
     "argmax": partial(argext_cases, "argmax"),
@@ -3397,6 +3712,7 @@ OPERATIONS: dict[str, Callable[[], Iterator[Case]]] = {
     "any": any_cases,
     "round": round_cases,
     "median": median_cases,
+    "hypot": hypot_cases,
 }
 
 # Operations that have kernels which are not bit-identical to NumPy, with the

@@ -228,6 +228,12 @@ def _selected(dtype: type, share: float, n: int) -> tuple:
     return (rng.random(n) < share, rng.standard_normal(n).astype(dtype), rng.standard_normal(n).astype(dtype))
 
 
+def _pair(n: int) -> tuple:
+    """Build two arrays of normally distributed float64 values."""
+    rng = _rng(n)
+    return (rng.standard_normal(n), rng.standard_normal(n))
+
+
 def _mask(share: float, n: int) -> tuple:
     """Build a mask that is True for `share` of its elements."""
     return (_rng(n).random(n) < share,)
@@ -427,6 +433,7 @@ TAKEN: tuple[Timed, ...] = (
     Timed("searchsorted", "np.digitize(x, bins)", "float64, 1,000 bin edges", partial(_search, SMALL_TABLE), _digitize, "searchsorted_right_f64"),
     Timed("interp", "np.interp(x, xp, fp)", "float64, as many queries as points", partial(_interp, None), np.interp, "interp_f64"),
     Timed("interp", "np.interp(x, xp, fp)", "float64, 1,000 points", partial(_interp, SMALL_TABLE), np.interp, "interp_f64"),
+    Timed("hypot", "np.hypot(a, b)", "float64", _pair, np.hypot, "hypot_f64"),
 )
 
 # Statements that reach a hook and are left to NumPy: what a hook costs a
@@ -465,6 +472,7 @@ LEFT: tuple[Timed, ...] = (
     Timed("maskfill", "np.copyto(x, 0.0)", "float64", partial(_floats, np.float64), lambda x: np.copyto(x, 0.0), None),
     Timed("where", "np.where(mask, 1.0, 0.0)", "bool, half selected", partial(_mask, HALF), lambda m: np.where(m, 1.0, 0.0), None),
     Timed("where", "np.where(mask, a, b)", "float32, half true", partial(_selected, np.float32, HALF), np.where, None),
+    Timed("hypot", "np.hypot(a[::2], b[::2])", "float64, strided", _pair, lambda a, b: np.hypot(a[::2], b[::2]), None),
 )
 
 

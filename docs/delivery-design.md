@@ -245,6 +245,7 @@ The hook for an operation does not depend on the architecture. The "Kernels" col
 | `histogram` | 1 | Function | Contiguous float64, an integer bin count, no weights or density |
 | `bincount` | 3 | Function | One-dimensional, contiguous, no weights, `minlength` absent or a Python int >= 0. `uint8` (`bincount_u8`) whatever its values. `int16` (`bincount_i16`) and `int64` (`bincount_i64`) with at least one element: the array is read once for its largest element as an unsigned number, compiled for AVX2 with four running maxima, and a negative element, which reads as too large, sends the call to NumPy, which raises. The result has NumPy's length, the largest element plus one or `minlength`, and the kernel is given exactly that many counters, which it zeroes itself, so every element is inside its range. A result longer than 65,536 counts and longer than the array is NumPy's, whose memory comes zeroed from the system where the kernel would write every count; so is a largest element of the largest int64, whose length overflows. Empty arrays are NumPy's. The lock is released for the scan and for the kernel |
 | `isin` | 1 | Function | Contiguous int64, at most eight test values, flags at their defaults |
+| `np.hypot(a, b)` | 1 (x86-64 assembly; on ARM64 the C library's `hypot` itself) | Inner loop, the `hypot` ufunc's (float64, float64) -> float64 loop | The loop's three operands contiguous doubles (steps of 8), `n >= 1`, and the output sharing no byte with either input or starting exactly where one of them starts. A scalar operand (a step of 0), strided operands, and the partial overlap `np.hypot.accumulate` gives the loop are NumPy's; `np.hypot.reduce` reaches the loop with a step of 0. The kernel is exact only against the C library whose algorithm it computes (glibc's from about 2.35), so the hook's probe compares it with NumPy's own loop on 20,000 pairs and the hook stays only if every bit agrees. The floating-point flags set before the kernel are saved, the kernel runs with them clear, and if it raised overflow, underflow, invalid or divide by zero its result is dropped and NumPy's loop computes the same elements, raising NumPy's own flags; the saved flags are put back either way. When the output is an input the kernel computes blocks of 256 elements into a buffer on the stack and copies each clean block, so NumPy's loop still finds the input of a flagged block and of the rest unchanged. Counted as its own operation, `hypot` |
 
 "Contiguous" for a kernel that works element by element or reduces the whole array means any shape. NumPy's inner loops already work that way: a contiguous 40 by 25 array arrived at the `clip` loop as one run of 1,000.
 
@@ -407,7 +408,7 @@ hotkernels/                  the installable package, its own distribution
       binding.h              counters and the shared checks
       module.c               hook table, counters, the interface to Python
       hook_slot.c            type slot: argmax, argmin
-      hook_loop.c            inner loop: clip
+      hook_loop.c            inner loops: clip, hypot
       hook_function.c        function objects: argmax, count_nonzero, sum, histogram, bincount, isin,
                              interp, compress, extract, putmask, copyto, where, clip
       hook_method.c          methods: astype, sum, nonzero, cumsum, searchsorted, argmax, argmin, clip
