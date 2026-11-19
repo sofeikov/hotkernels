@@ -64,3 +64,19 @@ Against the same library on 20,000,000 ordinary pairs (the first two classes abo
 - **compare:** significantly faster, 1.213x [1.211 – 1.215]
 - **Kept:** yes
 - **Notes:** 1.18x to 1.23x at every size. 0.38 ns per element from 256 up. The test outside the judge: 5,999,910 results, 0 differ; sizes 0 to 300, 4,515 runs, 0 differ, no guard byte changed; flags on 2,000,000 calls of 1 to 11 elements, none extra, none lacking.
+
+## 4. Two vectors per iteration of the block loop
+
+- **Idea:** `ldp`/`stp` of two vectors, two pairs of running maxima and minima so the accumulators are not one chain, blocks a multiple of four.
+- **check:** pass
+- **compare:** significantly slower, 0.908x [0.908 – 0.909]
+- **Kept:** no
+- **Notes:** 0.41 ns per element against 0.38 outside the judge too. Reordering the one-vector loop (the arithmetic before the running maximum and minimum) made no difference outside the judge (0.385 against 0.380) and was not run in it.
+
+## 5. Blocks of 256 elements
+
+- **Idea:** a quarter of the per-block work (the reduction, the branch, resetting the accumulators).
+- **check:** pass
+- **compare:** significantly slower, 0.986x [0.986 – 0.987]
+- **Kept:** no
+- **Notes:** the per-block work was already about 2% of a block of 64; nothing to gain, and a block with a special value costs four times as much to compute again.
