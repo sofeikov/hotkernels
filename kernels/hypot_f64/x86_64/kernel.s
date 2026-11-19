@@ -33,8 +33,11 @@
 # Every group of four loads its inputs before it stores its output, and the
 # elements are written once, in order.
 #
-# Four elements per step. Both inputs of a group are tested first, on their
-# bits, before any floating-point instruction touches them: when every
+# Four elements are a group. While eight elements are left, two groups are
+# loaded and tested together, then computed and stored one after the other;
+# when either fails the test, they are done one group at a time. Both inputs
+# of a group are tested on their bits, before any floating-point instruction
+# touches them: when every
 # element lies in [2^-459, 2^511] the group takes the common case, both
 # branches of core computed and one taken by a blend, then ax + ay taken
 # where ax >= ay * 2^54. A group with another element goes to a second test:
