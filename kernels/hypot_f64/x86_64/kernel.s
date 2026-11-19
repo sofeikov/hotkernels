@@ -135,10 +135,57 @@ hypot_f64:
     vmovapd     ymm12, [rip + .Ltwo54]
     mov         r10, rcx
     and         r10, -4                     # end of the whole groups
+    lea         r11, [rcx - 7]              # a pair of groups starts below this,
+                                            # compared as signed: n - 7 may be negative
     xor         eax, eax
-    test        r10, r10
-    jz          .Ltail
 
+# Two groups at a time while eight elements are left, one while four are.
+.Ldispatch:
+    cmp         rax, r11
+    jl          .Lpair
+    cmp         rax, r10
+    jb          .Lloop
+    jmp         .Ltail
+
+# Two groups, tested together. When either has an element outside
+# [2^-459, 2^511] the first is done alone, and the second after it.
+.p2align 4
+.Lpair:
+    vandpd      ymm0, ymm15, [rdi + rax*8]
+    vandpd      ymm1, ymm15, [rsi + rax*8]
+    vandpd      ymm2, ymm15, [rdi + rax*8 + 32]
+    vandpd      ymm3, ymm15, [rsi + rax*8 + 32]
+    vpaddq      ymm4, ymm0, ymm14
+    vpaddq      ymm5, ymm1, ymm14
+    vpaddq      ymm6, ymm2, ymm14
+    vpaddq      ymm7, ymm3, ymm14
+    vpcmpgtq    ymm4, ymm4, ymm13
+    vpcmpgtq    ymm5, ymm5, ymm13
+    vpcmpgtq    ymm6, ymm6, ymm13
+    vpcmpgtq    ymm7, ymm7, ymm13
+    vpor        ymm4, ymm4, ymm5
+    vpor        ymm6, ymm6, ymm7
+    vpor        ymm4, ymm4, ymm6
+    vptest      ymm4, ymm4
+    jnz         .Lloop
+    vminpd      ymm5, ymm0, ymm1
+    vmaxpd      ymm0, ymm0, ymm1            # ax of the first group
+    vmovapd     ymm1, ymm5                  # ay
+    CORE        ymm0, ymm1
+    NEGLIGIBLE  ymm0, ymm1
+    vmovupd     [rdx + rax*8], ymm4
+    vminpd      ymm5, ymm2, ymm3
+    vmaxpd      ymm2, ymm2, ymm3            # ax of the second group
+    vmovapd     ymm3, ymm5                  # ay
+    CORE        ymm2, ymm3
+    NEGLIGIBLE  ymm2, ymm3
+    vmovupd     [rdx + rax*8 + 32], ymm4
+    add         rax, 8
+    cmp         rax, r11
+    jl          .Lpair
+    jmp         .Ldispatch
+
+# One group.
 .p2align 4
 .Lloop:
     vandpd      ymm0, ymm15, [rdi + rax*8]  # |a|
@@ -156,9 +203,7 @@ hypot_f64:
     NEGLIGIBLE  ymm2, ymm3
     vmovupd     [rdx + rax*8], ymm4
     add         rax, 4
-    cmp         rax, r10
-    jb          .Lloop
-    jmp         .Ltail
+    jmp         .Ldispatch
 
 # A group with an element outside [2^-459, 2^511]. ymm0 = |a|, ymm1 = |b|.
 .Lother:
@@ -184,9 +229,7 @@ hypot_f64:
     NEGLIGIBLE  ymm0, ymm1
     vmovupd     [rdx + rax*8], ymm4
     add         rax, 4
-    cmp         rax, r10
-    jb          .Lloop
-    jmp         .Ltail
+    jmp         .Ldispatch
 
 .Lgroup_scalar:
     lea         r8, [rax + 4]
@@ -320,7 +363,7 @@ hypot_f64:
     cmp         rax, r8
     jb          .Lscalar
     cmp         rax, r10
-    jb          .Lloop
+    jb          .Ldispatch
     cmp         rax, rcx
     jb          .Ltail
 

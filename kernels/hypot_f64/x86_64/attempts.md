@@ -13,3 +13,11 @@ Beyond the judge, every kept attempt was checked with a program outside the repo
 - **compare:** n/a (first version). `run`: 5.12x [5.12 – 5.13] over naive C overall (random 5.51x, mixed 4.76x), 6.94x over NumPy.
 - **Kept:** yes
 - **Notes:** 1.06 ns per element from 256 to 4,096 (about 23 cycles per group of four), 1.20 at 16,384 and above. The program outside the judge: 35,999,946 results, 0 differ, no NaN with another payload, no guard byte changed. Flags: the kernel never lacks one glibc raises; it raises underflow where glibc does not in 2% of random bit patterns and in none of the pairs with exponents from -200 to 200. Those are pairs where `ay` is negligible beside `ax` (glibc returns `ax + ay` without computing anything) and `ay * ay / ax` is below 2^-1022, so the core computed and thrown away underflows. The close-placement table: 0.92x to 0.99x of the first.
+
+## 2. Two groups per step, tested together
+
+- **Idea:** while eight elements are left, two groups are loaded and tested with one `vptest`, then computed one after the other and stored, the first before the second's arithmetic starts (both groups' inputs are loaded by then, so out equal to a or b is still read before it is written). When either group has an element outside [2^-459, 2^511], the first group takes the path of one group, and the second follows. Loop overhead and the test's branch halve; the divide and the square root are unchanged.
+- **check:** pass (the first version read past the buffers at n = 8: after a single group the pair loop restarted at element 4; a pair now starts only where eight elements are left)
+- **compare:** significantly faster, 1.052x [1.050 – 1.054]
+- **Kept:** yes
+- **Notes:** 1.03x to 1.05x up to 65,536, 1.06x to 1.08x from 262,144. The program outside the judge, its flag part now with calls of 1, 4, 8 and 11 elements: 35,999,946 results, 0 differ; the kernel never lacks a flag glibc raises.
