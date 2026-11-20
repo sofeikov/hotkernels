@@ -19,3 +19,11 @@ What the compiler does with `naive.c` (`clang -O3 -march=native`): one search at
 - **compare:** significantly faster, 1.089x [1.087 – 1.092]
 - **Kept:** yes
 - **Notes:** 1.15x to 1.18x up to 4,096 elements for both needle counts, 1.05x to 1.07x at 16,384 to 262,144, nothing above. Tried first with two steps at every size: 1.072x [1.066 – 1.078] overall, but 0.95x, 0.91x and 0.88x at 1,048,576, 4,194,304 and 16,777,216 with 1,000 needles. There the probes miss the second-level cache, and the second gather of a pass waits for the first, so fewer misses are in flight; hence the threshold. Three and four steps in a pass were slower than two in a benchmark outside the judge (1,000 needles against 1,024 elements: 1.71 us with two, 2.03 with three, 2.32 with four, 1.98 with one): the gathers of a pass form a chain, and the instructions that wait for it fill the scheduler.
+
+## 3. The first pass takes two or three steps without a gather
+
+- **Idea:** the first step already needed no gather, since every search probes `a[half - 1]`. The second probes one of two elements and the third one of four, all known before the pass. The probe is chosen with the masks of the compares before it: `e0 ^ (m1 & (e0 ^ e1))` for the second step, and the same twice over for the third, with the differences of the candidates computed once per chunk. That is two instructions for the second probe and six for the third, against a gather. The number of steps is the number of bits of n; the first pass takes three when it is odd and two when it is even, so the passes with gathers are always pairs.
+- **check:** pass
+- **compare:** significantly faster, 1.064x [1.060 – 1.069]
+- **Kept:** yes
+- **Notes:** 1.22x at 16 elements, where two of five steps lost their gather, 1.16x at 64, 1.09x at 1,024, 1.05x at 65,536, and 1.01x to 1.02x from 1,048,576, where the first steps are the ones that stay in the cache. In a benchmark outside the judge the first two steps alone gave 9% at 16 elements and 3% at 1,024 with 1,000 needles, and the third step 4% and 2% more.

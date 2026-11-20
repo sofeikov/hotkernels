@@ -17,3 +17,11 @@ All runs on an Intel Core i5-14600KF, Linux, pinned to one performance core by t
 - **compare:** significantly faster, 1.090x [1.088 – 1.093]
 - **Kept:** yes
 - **Notes:** the same shape as the left kernel: 1.15x to 1.17x up to 4,096 elements, 1.05x to 1.07x to 262,144, nothing above, where a pass takes one step. With two steps at every size it was 1.071x [1.064 – 1.078] overall and 0.93x, 0.91x and 0.88x at the three largest sizes with 1,000 needles.
+
+## 3. The first pass takes two or three steps without a gather
+
+- **Idea:** as attempt 3 of the left kernel. The masks here say that a search did not advance, so the selections are `vpandn` where the left kernel has `vpand`.
+- **check:** pass
+- **compare:** significantly faster, 1.061x [1.059 – 1.064]
+- **Kept:** yes
+- **Notes:** 1.22x at 16 elements, 1.15x at 64, 1.06x at 1,024, 1.04x at 65,536, 1.01x to 1.02x from 1,048,576.

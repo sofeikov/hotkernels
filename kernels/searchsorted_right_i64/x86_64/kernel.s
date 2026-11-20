@@ -34,7 +34,12 @@
 # the probes miss the second-level cache and a probe that waits for another
 # is a miss that is not in flight.
 #
-# The first step needs no gather: every search probes the same element.
+# The first pass over a chunk needs no gather. Every search probes the same
+# element first, then one of two, then one of four, and which one is chosen
+# with the masks of the compares before it: an AND and an XOR against the
+# difference of the candidates. The pass takes two steps, or three when the
+# number of steps (the number of bits of n) is odd, so that what is left for
+# the gathers is always pairs.
 #
 # Paths, by the number of needles:
 #   0        nothing
@@ -47,10 +52,12 @@
 # and Intel processors that carry the gather mitigation).
 #
 # Registers: r9 len; rax and rcx the addresses of a[half - 1] for the two
-# steps of a pass, ymm8 and ymm7 their halves in every lane; r10 and r11 the
-# byte offsets where the chunk starts and ends, rbx the offset inside it
-# (saved below the stack pointer, where n and the chunk's size are kept
-# too). ymm0 positions, ymm4 needles, ymm9 the gather's mask.
+# steps of a pass, ymm8 and ymm7 their halves in every lane (ymm6 the third
+# of the first pass); r10 and r11 the byte offsets where the chunk starts and
+# ends, rbx the offset inside it (saved below the stack pointer, where n, the
+# number of needles and the chunk's size are kept too). ymm0 positions, ymm4
+# needles, ymm9 the gather's mask; ymm10 to ymm15 and ymm5 the candidates of
+# the first pass.
 
 # Needles per chunk, in bytes of v: 64 while a fits the second-level cache.
 .set CHUNK_BYTES, 512
@@ -120,11 +127,13 @@ searchsorted_right_i64:
     cmovae  eax, r9d
     mov     [rsp - 16], rax             # bytes of v per chunk
     mov     [rsp - 24], rcx             # n
+    mov     [rsp - 32], r8              # needles
     xor     r10d, r10d
     test    rcx, rcx
     jz      .Lempty
 
 .Lchunk:
+    mov     r8, [rsp - 32]
     mov     rax, r8
     shr     rax, 2
     shl     rax, 5                      # where the whole vectors end
@@ -134,20 +143,96 @@ searchsorted_right_i64:
     add     r11, [rsp - 16]
     cmp     r11, rax
     cmova   r11, rax                    # where this chunk ends
-    # The first step: every search probes a[half - 1].
+    # The first two steps need no gather. Every search probes a[half - 1]
+    # first, and then one of two elements: ymm11 is the one a search probes
+    # when it did not advance, ymm12 what differs in the other.
     mov     r9, [rsp - 24]
     HALVE   rax, ymm8, xmm8
     vpbroadcastq ymm10, qword ptr [rax]
+    jz      .Lfirst1
+    HALVE   rcx, ymm7, xmm7
+    vpbroadcastq ymm11, qword ptr [rcx]
+    lea     rbx, [rax + rcx + 8]
+    sub     rbx, rdi                    # the address of a[half1 + half2 - 1]
+    vpbroadcastq ymm12, qword ptr [rbx]
+    vpxor   ymm12, ymm12, ymm11
+    # The number of steps is the number of bits of n. When it is odd the
+    # first pass takes three steps, so that what is left is always pairs.
+    bsr     r8, qword ptr [rsp - 24]
+    test    r8b, 1
+    jz      .Lthree
+    mov     rbx, r10
+.p2align 4
+.Lfirst2:
+    vmovdqu ymm4, [rsi + rbx]
+    vpcmpgtq ymm0, ymm10, ymm4          # the first probe is greater than the needle
+    vpandn  ymm1, ymm0, ymm12
+    vpxor   ymm1, ymm1, ymm11           # the second probe
+    vpcmpgtq ymm1, ymm1, ymm4
+    vpandn  ymm0, ymm0, ymm8
+    vpandn  ymm1, ymm1, ymm7
+    vpaddq  ymm0, ymm0, ymm1
+    vmovdqu [rdx + rbx], ymm0
+    add     rbx, 32
+    cmp     rbx, r11
+    jb      .Lfirst2
+    test    r9, r9
+    jnz     .Lstep
+    jmp     .Lchunkdone
+    # Three steps. The third probe is one of four elements: ymm13 is the
+    # one for a search that advanced at neither step, ymm14 and ymm15 what
+    # differs in the one that advanced at the first only and at the second
+    # only, and ymm5 what the two differences leave of the fourth.
+.Lthree:
+    HALVE   r8, ymm6, xmm6
+    vpbroadcastq ymm13, qword ptr [r8]
+    sub     r8, rdi                     # (half3 - 1) * 8
+    vpbroadcastq ymm14, qword ptr [rax + r8 + 8]
+    vpbroadcastq ymm15, qword ptr [rcx + r8 + 8]
+    vpbroadcastq ymm5, qword ptr [rbx + r8 + 8]
+    vpxor   ymm14, ymm14, ymm13
+    vpxor   ymm15, ymm15, ymm13
+    vpxor   ymm5, ymm5, ymm13
+    vpxor   ymm5, ymm5, ymm14
+    vpxor   ymm5, ymm5, ymm15
+    mov     rbx, r10
+.p2align 4
+.Lfirst3:
+    vmovdqu ymm4, [rsi + rbx]
+    vpcmpgtq ymm0, ymm10, ymm4          # the first probe is greater than the needle
+    vpandn  ymm1, ymm0, ymm12
+    vpxor   ymm1, ymm1, ymm11           # the second probe
+    vpandn  ymm2, ymm0, ymm14
+    vpandn  ymm3, ymm0, ymm5
+    vpcmpgtq ymm1, ymm1, ymm4
+    vpxor   ymm2, ymm2, ymm13
+    vpxor   ymm3, ymm3, ymm15
+    vpandn  ymm3, ymm1, ymm3
+    vpxor   ymm2, ymm2, ymm3            # the third probe
+    vpcmpgtq ymm2, ymm2, ymm4
+    vpandn  ymm0, ymm0, ymm8
+    vpandn  ymm1, ymm1, ymm7
+    vpandn  ymm2, ymm2, ymm6
+    vpaddq  ymm0, ymm0, ymm1
+    vpaddq  ymm0, ymm0, ymm2
+    vmovdqu [rdx + rbx], ymm0
+    add     rbx, 32
+    cmp     rbx, r11
+    jb      .Lfirst3
+    test    r9, r9
+    jnz     .Lstep
+    jmp     .Lchunkdone
+    # One element: one step.
+.Lfirst1:
     mov     rbx, r10
 .Lfirst:
-    vpcmpgtq ymm11, ymm10, [rsi + rbx]  # the probe is greater than the needle
-    vpandn  ymm11, ymm11, ymm8          # half where it is not
+    vpcmpgtq ymm11, ymm10, [rsi + rbx]
+    vpandn  ymm11, ymm11, ymm8
     vmovdqu [rdx + rbx], ymm11
     add     rbx, 32
     cmp     rbx, r11
     jb      .Lfirst
-    test    r9, r9
-    jz      .Lchunkdone
+    jmp     .Lchunkdone
 .Lstep:
     HALVE   rax, ymm8, xmm8
     jz      .Lpass1
