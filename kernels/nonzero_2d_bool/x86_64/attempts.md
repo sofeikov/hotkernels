@@ -26,3 +26,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.025x [1.024 – 1.027]
 - **Kept:** yes
 - **Notes:** dense widths 32 and 1,000 1.04x, width 22 1.03x, width 3 no significant difference.
+
+## 4. The one-element loop unrolled by two, the write position by one `lea`
+
+- **Idea:** under 32 elements, and for the last 0 to 31, the kernel runs one element at a time. Micro-benchmark at 16 and 31 elements, width 22: 0.58 ns per element against the compiler's 0.46 (unrolled by four, branchless). Two elements per pass, the column reset left as a branch (it predicts: the pattern repeats every row), the write position advanced by `lea r9, [r9 + rax * 2]`: 0.43 to 0.47 ns per element.
+- **check:** pass
+- **compare:** significantly faster, 1.006x [1.001 – 1.012]
+- **Kept:** yes
+- **Notes:** the only timed size it reaches is 16 elements: width 3 1.22x and 1.25x there, the other widths no significant difference.

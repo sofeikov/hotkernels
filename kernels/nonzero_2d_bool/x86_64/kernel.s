@@ -563,14 +563,26 @@ nonzero_2d_bool:
     mov     [rsi + r9 * 8], rcx
     mov     [rsi + r9 * 8 + 8], r8
     movzx   eax, byte ptr [rdi + r11]
-    add     eax, eax
-    add     r9, rax
     inc     r8
     cmp     r8, r10
     jne     .Lsame_row
     xor     r8d, r8d
     inc     rcx
 .Lsame_row:
+    lea     r9, [r9 + rax * 2]
+    inc     r11
+    cmp     r11, rdx
+    jae     .Ldone
+    mov     [rsi + r9 * 8], rcx
+    mov     [rsi + r9 * 8 + 8], r8
+    movzx   eax, byte ptr [rdi + r11]
+    inc     r8
+    cmp     r8, r10
+    jne     .Lsame_row2
+    xor     r8d, r8d
+    inc     rcx
+.Lsame_row2:
+    lea     r9, [r9 + rax * 2]
     inc     r11
     cmp     r11, rdx
     jb      .Lone
