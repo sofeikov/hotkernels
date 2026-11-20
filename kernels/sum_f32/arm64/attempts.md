@@ -165,3 +165,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.017x [1.014 – 1.019]
 - **Kept:** yes
 - **Notes:** 1.21x at 64 (2.4 ns), nothing elsewhere. The judge calls with one size at a time, so the indirect branch is always predicted; calls of changing sizes would mispredict it, as they mispredicted the loop's exit before. Load average 4.5.
+
+## 21. A group of two as a straight run entered at its length
+
+- **Idea:** attempt 20 for the group of two: 15 steps written out, entered by a computed branch.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.997 – 1.004]
+- **Kept:** no
+- **Notes:** 9.0 ns at 256 either way: the group of two is bound by the latency of its four chains (attempt 12), not by its loop. Load average 6.0.
