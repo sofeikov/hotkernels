@@ -37,7 +37,8 @@
 #           without one is done. A chunk with one is marked in the table,
 #           element by element, and the window is put around that chunk's
 #           values if they are less than WINDOW apart, after the set has
-#           been stored in the table.
+#           been stored in the table. A window that starts at the value 0
+#           needs no subtraction, and is the one chosen where it fits.
 #           Fewer than sixteen elements all go to the table. Labels that keep to 64 neighbouring
 #           values, or that come sorted, never reach the table; if no chunk
 #           ever failed there is no table at all, and the values are read
@@ -356,9 +357,22 @@ unique_i64:
     mov     [rsp - SIZE_SLOT], rax      # bytes of x
     cmp     rax, CHUNK_BYTES
     jb      .Lmark_plain                # fewer than a chunk: all through the table
-    # The first window: WINDOW / 2 below the first element, if that is
-    # inside the range, and not below lo.
+    # The first window. If the first element is from 0 to 63 and 0 is in
+    # the range, the window starts at the value 0, where an element is its
+    # own bit number (see .Lwin_raw16). Otherwise it starts WINDOW / 2 below
+    # the first element, if that is inside the range, and not below lo.
     mov     rax, [rdi]
+    cmp     rax, WINDOW
+    jae     .Lwin_around
+    test    rcx, rcx
+    jg      .Lwin_around
+    mov     rsi, rcx
+    neg     rsi
+    cmp     rsi, r8
+    jae     .Lwin_around
+    xor     r9d, r9d
+    jmp     .Lwin_go
+.Lwin_around:
     sub     rax, rcx
     cmp     rax, r8
     jae     .Lwin_set
@@ -374,6 +388,8 @@ unique_i64:
     # A chunk: t = x - (the window's first value) for sixteen elements,
     # 1 << t into the sets, and the or of every t tested for a bit from 64
     # up. Without one, every element of the chunk is a bit of the sets.
+    # Two loops: for a window that starts at the value 0, t is the element
+    # itself and the four subtractions are not needed.
     jmp     .Lwin_go
     .p2align 5
 .Lwin16:
@@ -397,6 +413,30 @@ unique_i64:
     add     rdi, CHUNK_BYTES
     cmp     rdi, r11
     jbe     .Lwin16
+    jmp     .Lwin_head
+    .p2align 5
+.Lwin_raw16:
+    vmovdqu ymm4, [rdi]
+    vmovdqu ymm5, [rdi + 32]
+    vmovdqu ymm6, [rdi + 64]
+    vmovdqu ymm7, [rdi + 96]
+    vpor    ymm8, ymm4, ymm5
+    vpor    ymm9, ymm6, ymm7
+    vpsllvq ymm4, ymm15, ymm4
+    vpsllvq ymm5, ymm15, ymm5
+    vpsllvq ymm6, ymm15, ymm6
+    vpsllvq ymm7, ymm15, ymm7
+    vpor    ymm8, ymm8, ymm9
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    vptest  ymm8, ymm13
+    jnz     .Lwin_fail
+    add     rdi, CHUNK_BYTES
+    cmp     rdi, r11
+    jbe     .Lwin_raw16
+
 
     # The next chunk, or the last one, which ends at n.
 .Lwin_head:
@@ -406,6 +446,8 @@ unique_i64:
     je      .Lmark_done
     mov     rdi, r11
 .Lwin_go:
+    test    r9, r9
+    jz      .Lwin_raw16
     jmp     .Lwin16
 
     # A chunk with an element outside the window. Its elements are marked
@@ -415,8 +457,8 @@ unique_i64:
     #
     # The chunk is read for the smallest and the largest d of its elements
     # inside the range (rsi, r11). If they are less than WINDOW apart, the
-    # chunk is of one cluster, and the window is put around their middle,
-    # and not below lo. If the window it replaces was
+    # chunk is of one cluster, and the window is put at the value 0 or
+    # around their middle, and not below lo. If the window it replaces was
     # itself put there no more than FREQUENT_BYTES back, the clusters do
     # not last, and the data is not for a window.
     #
@@ -470,14 +512,25 @@ unique_i64:
     sub     rax, rsi
     cmp     rax, WINDOW
     jae     .Lfail_wide
-    # One cluster: around its middle.
-    lea     rax, [rsi + r11]
+    # One cluster. From the value 0, if lo is not above it and the chunk's
+    # values are all from 0 to 63; else around their middle.
+    test    rcx, rcx
+    jg      3f
+    lea     rax, [rcx + rsi]
+    test    rax, rax
+    js      3f
+    lea     rax, [rcx + r11]
+    cmp     rax, WINDOW
+    jae     3f
+    xor     eax, eax
+    jmp     4f
+3:  lea     rax, [rsi + r11]
     shr     rax, 1
     sub     rax, WINDOW / 2
     jae     2f
     xor     eax, eax
 2:  add     rax, rcx                    # the new window's first value
-    mov     [rsp - WINDOW_SLOT], rax
+4:  mov     [rsp - WINDOW_SLOT], rax
     mov     [rsp - LAST_FAIL_SLOT], rdi
     lea     rsi, [rdi + CHUNK_BYTES]    # mark up to here
     mov     rax, [rsp - LAST_MOVE_SLOT]
