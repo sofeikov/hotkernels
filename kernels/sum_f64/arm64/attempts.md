@@ -139,3 +139,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.004x [1.004 – 1.004]
 - **Kept:** yes
 - **Notes:** 1.02x at 65,536 and 262,144, 1.01x at 1,048,576, nothing elsewhere. Load average 18.
+
+## 17. Two groups of four without the walk
+
+- **Idea:** float32's attempt 14: 544 to 1,024 elements that are a multiple of 64 go straight to two groups of four, with no node stack.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.997 – 1.005]
+- **Kept:** no
+- **Notes:** 1.01x at 1,024 (58.5 ns against 59.1). Load average 11.
