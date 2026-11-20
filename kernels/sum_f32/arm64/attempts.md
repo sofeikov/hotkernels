@@ -173,3 +173,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.001x [0.997 – 1.004]
 - **Kept:** no
 - **Notes:** 9.0 ns at 256 either way: the group of two is bound by the latency of its four chains (attempt 12), not by its loop. Load average 6.0.
+
+## 22. Leaf starts by addition when the leaves are equal
+
+- **Idea:** a group of eight with m a multiple of 8 finds its leaf starts by adding q vectors seven times, eight instructions instead of the nineteen of the general halving.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.996 – 1.005]
+- **Kept:** no
+- **Notes:** 1.01x at 4,096 and 16,384 within the noise of the whole. The setup of a group runs beside the previous group's loads. Load average 5.2.
