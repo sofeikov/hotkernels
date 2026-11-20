@@ -51,7 +51,7 @@
 .set LONG_N, 16384
 // Above this many elements (4 MB) their loads are non-temporal, ldnp; x14 is
 // 2 then.
-.set HUGE_N, 524288
+.set HUGE_N, 2097152
 
 // Sum one leaf of x7 >= 1 vectors at x6 into d0: eight running sums, in
 // v16..v19 (lanes 0..1, 2..3, 4..5, 6..7), combined as NumPy combines them.
@@ -165,6 +165,112 @@
     fadd    v\b\().2d, v\b\().2d, v1.2d
     fadd    v\c\().2d, v\c\().2d, v2.2d
     fadd    v\d\().2d, v\d\().2d, v3.2d
+.endm
+
+.macro LEAF_RUN
+    ldp     q16, q17, [x6]
+    ldp     q18, q19, [x6, #32]
+    add     x6, x6, #VEC
+    sub     x8, x7, #1
+    adr     x0, 9f
+    sub     x0, x0, x8, lsl #4
+    sub     x0, x0, x8, lsl #3
+    br      x0
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x6, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+9:
+    faddp   v16.2d, v16.2d, v17.2d
+    faddp   v18.2d, v18.2d, v19.2d
+    faddp   v16.2d, v16.2d, v18.2d
+    faddp   d0, v16.2d
 .endm
 
 .text
@@ -347,7 +453,7 @@ Lplain:
     b.ls    Lleaf
     // Beyond the first-level cache, leaves one at a time, in the order of
     // memory: there the groups' several streams cost more than they gain.
-    cbnz    x14, Lsplit
+    cbnz    x14, Lplain_long
     cmp     x7, #32
     b.ls    Lpair
     cmp     x7, #33
@@ -355,10 +461,20 @@ Lplain:
     cmp     x7, #64
     b.ls    Lquad
     b       Lsplit
+Lplain_long:
+    cmp     x14, #2
+    b.eq    Lsplit
+    cmp     x7, #32
+    b.ls    Lpair_seq
+    cmp     x7, #33
+    b.eq    Lsplit
+    cmp     x7, #64
+    b.ls    Lquad_seq
+    b       Lsplit
 Lleaf:
     cmp     x14, #2
     b.eq    Lleaf_nt
-    LEAF
+    LEAF_RUN
     b       Lpush
 Lleaf_nt:
     LEAF_NT
@@ -519,6 +635,43 @@ Lq_sum:
     faddp   v24.2d, v24.2d, v28.2d      // leaf 2, leaf 3
     faddp   v16.2d, v16.2d, v24.2d      // 0 + 1, 2 + 3
     faddp   d0, v16.2d
+    b       Lpush
+
+// ---- Beyond the first-level cache: a group's leaves one after another, in
+// the order of memory, each a straight run, combined in registers.
+// LEAFAT \dst: the leaf from x6 to \end into d\dst; x6 ends at \end.
+.macro LEAFAT end, dst
+    sub     x7, \end, x6
+    lsr     x7, x7, #6
+    LEAF_RUN
+    fmov    d\dst, d0
+.endm
+
+Lpair_seq:  // 17..32 vectors: two leaves
+    lsr     x8, x7, #1
+    add     x10, x6, x8, lsl #6
+    add     x11, x6, x7, lsl #6
+    LEAFAT  x10, 20
+    LEAFAT  x11, 21
+    fadd    d0, d20, d21
+    b       Lpush
+
+Lquad_seq:  // 34..64 vectors: four leaves
+    lsr     x11, x7, #1                 // b2
+    lsr     x10, x11, #1                // b1
+    sub     x0, x7, x11
+    add     x12, x11, x0, lsr #1        // b3
+    add     x10, x6, x10, lsl #6
+    add     x11, x6, x11, lsl #6
+    add     x12, x6, x12, lsl #6
+    add     x13, x6, x7, lsl #6
+    LEAFAT  x10, 20
+    LEAFAT  x11, 21
+    LEAFAT  x12, 22
+    LEAFAT  x13, 23
+    fadd    d20, d20, d21
+    fadd    d22, d22, d23
+    fadd    d0, d20, d22
     b       Lpush
 
 Ldone:

@@ -89,3 +89,13 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 ## Where this run stopped
 
 Ten attempts, the last two rejected; the run was cut short at the coordinator's request (the binding and documents for `sum_f64` are left to the stacked x86-64 work). Recorded `uv run judge run sum_f64 --unlocked --record` at a load average of 7.8, flagged as noisy by the judge: 1.25x [1.24 – 1.25] over the naive C and 9.85x over NumPy overall; 1.40x to 1.45x from 1,024 to 16,384 elements; **slower than the naive C from 65,536 to 1,048,576 (0.97x, 0.97x, 0.91x [0.86 – 0.95])**, 1.07x and 1.03x beyond. Beyond the first-level cache the kernel sums one leaf at a time, as the C does, and is level with it at best: the gain there is open.
+
+## 11. Beyond the first-level cache: groups summed leaf after leaf, without loops
+
+- **Is the loss real?** An outside timer, the kernel and the naive C (built with the judge's flags) timed alternately, six rounds each, at a load average of 14: C/kernel 0.974 at 65,536, 0.973 at 262,144 and 0.867 at 1,048,576 (1.063 at 4,194,304). Real.
+- **What the C does.** clang's code for the leaf is NumPy's loop, as ours is: no prefetch, five accumulators. It walks the tree by recursion, whose returns the processor predicts. Our walk pops a node or a combine marker from its stack after every leaf, and which one comes next follows the bits of a counter: a branch mispredicted about once a leaf, and the leaf's loop exit as well. Beyond the first-level cache each misprediction throws away the loads already issued for the next leaves. Outside timer, one change at a time: prefetch in the leaf 0.86x of the C (rejected); post-indexed or single-register loads, groups of two, plain-order groups of four, all 0.92x to 0.98x; the leaf as a straight run entered at its length (no loop exit), 0.99x; and both of the following together 1.06x to 1.07x.
+- **Idea:** beyond 16,384 elements, a node of 17 to 32 or 34 to 64 vectors has its two or four leaves summed one after another, in the order of memory, each leaf a straight run entered at its length, and their sums combined in registers in the node's order: one pass of the walk per four leaves instead of one per leaf, and no loop exits. `ldnp` (attempt 8) starts at 2,097,152 elements (16 MB) instead of 524,288: at 1,048,576 (8 MB, inside the second-level cache) it cost 13%.
+- **check:** pass
+- **compare:** significantly faster, 1.030x [1.014 – 1.045]
+- **Kept:** yes
+- **Notes:** 1.11x at 65,536 and 262,144, 1.13x [1.00 – 1.28] at 1,048,576, nothing elsewhere. Outside timer against the naive C: 1.064x, 1.075x and 1.069x at the three sizes, 1.035x at 4,194,304. Load average 11.
