@@ -29,3 +29,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.028x [1.019 – 1.036]
 - **Kept:** yes
 - **Notes:** 1.08x at 1,024 and 16,384, 1.09x at 4,096 (251 ns); 1.01x to 1.02x from 65,536 to 1,048,576. Load average 4.0.
+
+## 4. Leaves one at a time beyond the first-level cache
+
+- **Idea:** attempt 2 lost 3% to 4% beyond the first-level cache, where the baseline, one leaf at a time and so one stream through memory, had run at the speed of the naive C. So an array of more than 16,384 elements (128 KB) is walked down to its leaves and they are summed one after another; the out-of-order core still overlaps neighbouring leaves.
+- **check:** pass
+- **compare:** significantly faster, 1.011x [1.007 – 1.016]
+- **Kept:** yes
+- **Notes:** 1.03x from 262,144 to 4,194,304, 1.04x at 16,777,216, nothing in the first-level cache. A first try with 16,384 itself on the long path was 0.74x there: an array of exactly 128 KB still sits in the first-level cache. Load average 4.8.

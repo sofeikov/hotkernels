@@ -13,6 +13,9 @@
 .set SUMS, 96                   // stack of sums, 8 bytes each
 .set NODES, 608                 // node stack, 16 bytes a node
 .set FRAME, 2656
+// Above this many elements (128 KB, the first-level cache of a performance
+// core) the leaves are summed one at a time.
+.set LONG_N, 16384
 
 // Sum one leaf of x7 >= 1 vectors at x6 into d0: eight running sums, in
 // v16..v19 (lanes 0..1, 2..3, 4..5, 6..7), combined as NumPy combines them.
@@ -145,6 +148,9 @@ Lbig:
     stp     xzr, xzr, [sp, #ZERO + 16]
     stp     xzr, xzr, [sp, #ZERO + 32]
     stp     xzr, xzr, [sp, #ZERO + 48]
+    // x14: non-zero for an array larger than the first-level cache (LONG_N).
+    cmp     x1, #LONG_N
+    cset    x14, hi
 Lnode:
     // A node on the right edge holds the tail: a leaf while 8m + t <= 128.
     cbz     x2, Lplain
@@ -161,6 +167,9 @@ Lplain:
     // is summed as a group: its 2 or 4 leaves side by side.
     cmp     x7, #16
     b.ls    Lleaf
+    // Beyond the first-level cache, leaves one at a time, in the order of
+    // memory: there the groups' several streams cost more than they gain.
+    cbnz    x14, Lsplit
     cmp     x7, #32
     b.ls    Lpair
     cmp     x7, #33
