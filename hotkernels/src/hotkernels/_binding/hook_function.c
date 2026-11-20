@@ -410,17 +410,36 @@ static HK_NOINLINE PyObject *try_sum_f32(PyArrayObject *a) {
     if (result != NULL) hk_take(HK_SUM_F32);
     return result;
 }
+
+// The same for float64, as the np.float64 NumPy returns: the sum_f64 kernel.
+static HK_NOINLINE PyObject *try_sum_f64(PyArrayObject *a) {
+    const npy_intp n = PyArray_SIZE(a);
+    double total;
+    {
+        HK_BEGIN_NOGIL(n)
+        total = sum_f64(PyArray_DATA(a), (size_t)n);
+        HK_END_NOGIL
+    }
+    hk_clear_reported_float_flags();
+    if (!isfinite(total)) return NULL;
+    PyObject *result = hk_scalar(NPY_DOUBLE, &total);
+    if (result != NULL) hk_take(HK_SUM_F64);
+    return result;
+}
 #endif
 
 // The sum of a contiguous uint8 array, as the np.uint64 NumPy returns, or of
 // a contiguous boolean array, as the np.intp it returns for that, and on
-// ARM64 of a contiguous, aligned, one-dimensional float32 array.
+// ARM64 of a contiguous, aligned, one-dimensional float32 or float64 array.
 PyObject *hk_try_sum(PyObject *array) {
     if (hk_is_flat(array, NPY_BOOL)) return try_sum_bool((PyArrayObject *)array);
 #if defined(__aarch64__)
     // An array whose elements are not aligned to their size is copied by
     // NumPy in blocks of its buffer size, 8,192 elements, whose sums it adds
     // one after another: another order. It stays with NumPy.
+    if (hk_is_flat_1d(array, NPY_DOUBLE) && PyArray_ISALIGNED((PyArrayObject *)array)) {
+        return try_sum_f64((PyArrayObject *)array);
+    }
     if (hk_is_flat_1d(array, NPY_FLOAT) && PyArray_ISALIGNED((PyArrayObject *)array)) {
         return try_sum_f32((PyArrayObject *)array);
     }
