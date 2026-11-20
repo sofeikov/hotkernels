@@ -34,9 +34,19 @@
 // k + j, because the L1 is slow to serve loads of one offset in different
 // 256-byte blocks together.
 //
-// Beyond the first-level cache there are no groups: the leaves are summed
-// one after another, one stream through memory, and the out-of-order core
-// overlaps neighbouring leaves. Above HUGE_N elements their loads are ldnp.
+// The walk mispredicts. Which comes off the node stack after a leaf or a
+// group, a node or a marker, follows the bits of a counter, so the branch
+// that tells them apart misses about once per pass. So the walk passes as
+// rarely as it can: in the cache a node of 68..128, 136..256 or 272..512
+// vectors is 2, 4 or 8 groups of four summed one after another, their sums
+// kept in registers and combined in the tree's order.
+//
+// Beyond the first-level cache (above LONG_N elements) there are no groups
+// side by side, whose several streams cost more there than they gain: a
+// node of up to 256 vectors has its leaves summed one after another, in the
+// order of memory, each leaf a straight run entered at its length (no loop
+// exit to mispredict), their sums combined in registers. Above HUGE_N
+// elements those runs load with ldnp.
 
 // Bytes of one vector of eight elements, the unit the tree is cut in.
 .set VEC, 64
@@ -48,10 +58,10 @@
 .set SAVED, 2656                // two words kept across a QUAD4
 .set FRAME, 2672
 // Above this many elements (128 KB, the first-level cache of a performance
-// core) the leaves are summed one at a time.
+// core) a node's leaves are summed one after another.
 .set LONG_N, 16384
-// Above this many elements (4 MB) their loads are non-temporal, ldnp; x14 is
-// 2 then.
+// Above this many elements (16 MB, beyond the second-level cache) their
+// loads are non-temporal, ldnp; x14 is 2 then.
 .set HUGE_N, 2097152
 
 // Sum one leaf of x7 >= 1 vectors at x6 into d0: eight running sums, in

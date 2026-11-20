@@ -86,9 +86,9 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **Kept:** no
 - **Notes:** 0.93x at 4,194,304 and 0.96x at 16,777,216 (where the pairs' loads are not the non-temporal ones of attempt 8), nothing elsewhere. Load average 12.
 
-## Where this run stopped
+## Where the first run stopped (superseded by attempts 11 on)
 
-Ten attempts, the last two rejected; the run was cut short at the coordinator's request (the binding and documents for `sum_f64` are left to the stacked x86-64 work). Recorded `uv run judge run sum_f64 --unlocked --record` at a load average of 7.8, flagged as noisy by the judge: 1.25x [1.24 – 1.25] over the naive C and 9.85x over NumPy overall; 1.40x to 1.45x from 1,024 to 16,384 elements; **slower than the naive C from 65,536 to 1,048,576 (0.97x, 0.97x, 0.91x [0.86 – 0.95])**, 1.07x and 1.03x beyond. Beyond the first-level cache the kernel sums one leaf at a time, as the C does, and is level with it at best: the gain there is open.
+Ten attempts, the last two rejected; the run was paused at the coordinator's request (the binding and documents for `sum_f64` are left to the stacked x86-64 work). Recorded `uv run judge run sum_f64 --unlocked --record` at a load average of 7.8, flagged as noisy by the judge: 1.25x [1.24 – 1.25] over the naive C and 9.85x over NumPy overall; 1.40x to 1.45x from 1,024 to 16,384 elements; **slower than the naive C from 65,536 to 1,048,576 (0.97x, 0.97x, 0.91x [0.86 – 0.95])**, 1.07x and 1.03x beyond. Beyond the first-level cache the kernel sums one leaf at a time, as the C does, and is level with it at best: the gain there is open.
 
 ## 11. Beyond the first-level cache: groups summed leaf after leaf, without loops
 
@@ -155,3 +155,7 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.002x [1.000 – 1.004]
 - **Kept:** yes
 - **Notes:** 1.01x at 4,096 (227 ns) and 16,384, nothing elsewhere. The walk now passes once per 4,096 elements in the cache; a level more would not show at the timed sizes. Load average 6.5.
+
+## Where this run stands
+
+Eighteen attempts. Recorded `uv run judge run sum_f64 --unlocked --record` at a load average of 6.1, not flagged noisy: 1.31x [1.31 – 1.32] over the naive C and 10.6x over NumPy overall, no size slower than the C: 2.26x at 16, 1.40x at 64, 1.35x at 256, 1.44x to 1.52x from 1,024 to 16,384, 1.10x to 1.11x from 65,536 to 1,048,576, 1.07x at 4,194,304 and 1.02x at 16,777,216. The outside timer, kernel and C alternately, six rounds, at a load average of 5.8: 1.098x, 1.100x, 1.069x, 1.084x and 1.020x from 65,536 to 16,777,216.
