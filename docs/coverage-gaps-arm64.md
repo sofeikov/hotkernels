@@ -40,6 +40,14 @@ What the table says:
 
 One entry per kernel, added by the pull request that builds it: what was built and what the judge measured.
 
+- **`sum_f32`** (`kernels/sum_f32/`): `np.sum(x)` and `x.sum()` on float32 with NumPy's result bit for bit, by making NumPy's additions in NumPy's pairwise order, several of its blocks at a time; checked against NumPy 2.3.0, 2.4.0 and 2.5.5 on every length from 0 to 5,000 and thousands of lengths to 6,000,000. The kernel, what was tried and the figures are in [kernel-findings.md](kernel-findings.md#npsum-on-floats-in-numpys-order).
+  - **The kernel returns its sum in a register** (`returns="f32"`); no output buffer. The spec's domain, finite sums, is stated by `prepare`: an array whose sum is not finite has its NaNs and infinities replaced by `+0.0` and is halved until its sum is finite; signed zeros, denormals and the largest values stay in.
+  - **ARM64 only.** The binding serves the call on ARM64 (`#if defined(__aarch64__)`); on x86-64 it stays with NumPy, `report()` lists the kernel as not installed with the reason, and nothing was built or run there.
+  - **Taken:** `np.sum(x)` and `x.sum()` with no other argument on a contiguous, aligned, one-dimensional float32 array; an explicit `axis=None` or `axis=0` goes to NumPy, as for `uint8`, and so does a matrix. A result that is not finite is thrown away and the call passed on, so NaN bits and overflow warnings are NumPy's.
+  - **An array not aligned to its elements goes to NumPy.** NumPy sums a contiguous float32 array whose address is not a multiple of 4 differently: it copies it in blocks of its buffer size, 8,192 elements, sums each block in the pairwise order and adds the blocks' sums one after another. `delivery check` found it at 20,000 elements.
+  - **Flags.** After its `np.sum` NumPy leaves the inexact flag as its additions left it and clears invalid, divide by zero, overflow and underflow, even when they were set before the call. The kernel makes the same additions, so the binding clears those four and leaves the inexact flag; `delivery check` compares the flags.
+  - **Figures** (Apple M1 Pro, recorded on 20 November 2026 on a quiet machine). `uv run judge run sum_f32 --unlocked --record` at a load average of 1.5: 2.11x [2.10 – 2.11] over the naive C and 18.7x over NumPy across the eleven sizes; 2.75x over the C at 16 elements, 2.88x at 4,096, 1.64x at 1,048,576, 1.32x at 16,777,216, no size slower than the C. `uv run delivery time --only sum` at a load average of 2.3: `np.sum(x)` 22.8x faster than NumPy at 16 elements, 10.8x at 4,096 and 3.14x at 1,048,576; `x.sum()` 5.85x, 5.85x and 3.07x.
+
 ## What is not built
 
 Recorded so the question is not asked again without new figures. "Level" means the NumPy call is within a tenth of the naive C from 65,536 elements up, on the Apple M1 Pro.
