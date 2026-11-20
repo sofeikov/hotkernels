@@ -107,3 +107,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.004x [1.001 – 1.007]
 - **Kept:** yes
 - **Notes:** 1.02x at 65,536 and 262,144, 1.01x at 1,048,576. Outside timer against the naive C: 1.097x, 1.107x, 1.071x. Load average 8.7.
+
+## 13. The same sequence of leaves above 16 MB, with `ldnp`
+
+- **Idea:** above 2,097,152 elements the walk still summed one leaf at a time with a loop (attempt 8's `ldnp` leaves). There too a group's leaves now run one after another as straight runs, with `ldnp`.
+- **check:** pass
+- **compare:** significantly faster, 1.003x [1.000 – 1.006]
+- **Kept:** yes
+- **Notes:** 1.02x at 4,194,304 and 16,777,216; 0.99x [0.99 – 1.00] at 65,536, a path this change does not touch (one more compare per leaf). Outside timer against the naive C: 1.067x at 1,048,576, 1.070x at 4,194,304, 1.030x at 16,777,216. Load average 7.5.

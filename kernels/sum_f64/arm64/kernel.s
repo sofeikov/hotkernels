@@ -462,8 +462,6 @@ Lplain:
     b.ls    Lquad
     b       Lsplit
 Lplain_long:
-    cmp     x14, #2
-    b.eq    Lsplit
     cmp     x7, #32
     b.ls    Lpair_seq
     cmp     x7, #33
@@ -644,10 +642,137 @@ Lq_sum:
 // ---- Beyond the first-level cache: a group's leaves one after another, in
 // the order of memory, each a straight run, combined in registers.
 // LEAFAT \dst: the leaf from x6 to \end into d\dst; x6 ends at \end.
+.macro LEAF_RUN_NT
+    ldnp    q16, q17, [x6]
+    ldnp    q18, q19, [x6, #32]
+    add     x6, x6, #VEC
+    sub     x8, x7, #1
+    adr     x0, 9f
+    sub     x0, x0, x8, lsl #5
+    add     x0, x0, x8, lsl #2
+    br      x0
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+9:
+    faddp   v16.2d, v16.2d, v17.2d
+    faddp   v18.2d, v18.2d, v19.2d
+    faddp   v16.2d, v16.2d, v18.2d
+    faddp   d0, v16.2d
+.endm
+
 .macro LEAFAT end, dst
     sub     x7, \end, x6
     lsr     x7, x7, #6
+    cmp     x14, #2
+    b.eq    5f
     LEAF_RUN
+    b       6f
+5:
+    LEAF_RUN_NT
+6:
     fmov    d\dst, d0
 .endm
 
@@ -687,14 +812,14 @@ Locto_seq:  // 68..128 vectors: eight leaves
     sub     x0, x13, x11
     add     x12, x11, x0, lsr #1        // b3
     sub     x0, x15, x13
-    add     x14, x13, x0, lsr #1        // b5
+    add     x1, x13, x0, lsr #1         // b5
     sub     x0, x7, x15
     add     x16, x15, x0, lsr #1        // b7
     add     x10, x6, x10, lsl #6
     add     x11, x6, x11, lsl #6
     add     x12, x6, x12, lsl #6
     add     x13, x6, x13, lsl #6
-    add     x14, x6, x14, lsl #6
+    add     x1, x6, x1, lsl #6
     add     x15, x6, x15, lsl #6
     add     x16, x6, x16, lsl #6
     add     x17, x6, x7, lsl #6
@@ -702,11 +827,10 @@ Locto_seq:  // 68..128 vectors: eight leaves
     LEAFAT  x11, 21
     LEAFAT  x12, 22
     LEAFAT  x13, 23
-    LEAFAT  x14, 24
+    LEAFAT  x1, 24
     LEAFAT  x15, 25
     LEAFAT  x16, 26
     LEAFAT  x17, 27
-    mov     x14, #1                     // the flag, borrowed above: still long
     fadd    d20, d20, d21
     fadd    d22, d22, d23
     fadd    d24, d24, d25
