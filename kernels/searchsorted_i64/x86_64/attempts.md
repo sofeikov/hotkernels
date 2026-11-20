@@ -27,3 +27,11 @@ What the compiler does with `naive.c` (`clang -O3 -march=native`): one search at
 - **compare:** significantly faster, 1.064x [1.060 – 1.069]
 - **Kept:** yes
 - **Notes:** 1.22x at 16 elements, where two of five steps lost their gather, 1.16x at 64, 1.09x at 1,024, 1.05x at 65,536, and 1.01x to 1.02x from 1,048,576, where the first steps are the ones that stay in the cache. In a benchmark outside the judge the first two steps alone gave 9% at 16 elements and 3% at 1,024 with 1,000 needles, and the third step 4% and 2% more.
+
+## 4. Chunks of 256 needles while `a` fits the second-level cache
+
+- **Idea:** the float64 kernel settled on 64 searches in step when a pass took one step and its measure was gathers in flight. Each chunk pays for its halves, the candidates of its first pass and the ends of its loops; with 256 needles in a chunk that is paid a quarter as often, and the positions and needles of a chunk are still only 4 KB of the first-level cache.
+- **check:** pass
+- **compare:** significantly faster, 1.009x [1.008 – 1.011]
+- **Kept:** yes
+- **Notes:** a call with 64 needles is one chunk either way and does not change. With 1,000 needles 1.04x at 16 elements, 1.03x at 1,024, 1.01x at 16,384 and nothing from 65,536. In a benchmark outside the judge 128 needles gave half of that, and 32 needles in a chunk was 9% to 27% slower than 64.

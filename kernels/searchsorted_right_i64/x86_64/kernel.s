@@ -19,7 +19,7 @@
 # signed one, `vpcmpgtq`; there is no NaN to order, so nothing is fixed
 # afterwards.
 #
-# Up to 64 searches run in step, and up to 512 when a does not fit the
+# Up to 256 searches run in step, and up to 512 when a does not fit the
 # second-level cache. Their positions live in out, which is exactly one
 # 64-bit slot per needle, and their needles stay in v. A pass over the chunk
 # loads four positions and their needles, takes two steps of those four
@@ -44,7 +44,7 @@
 # Paths, by the number of needles:
 #   0        nothing
 #   1..3     one search at a time, in general registers
-#   4..      chunks of up to 64 or 512 in step, four per vector; then, if the
+#   4..      chunks of up to 256 or 512 in step, four per vector; then, if the
 #            count is not a multiple of four, one more vector that ends with
 #            the last needle and overlaps the one before it
 #
@@ -59,8 +59,10 @@
 # needles, ymm9 the gather's mask; ymm10 to ymm15 and ymm5 the candidates of
 # the first pass.
 
-# Needles per chunk, in bytes of v: 64 while a fits the second-level cache.
-.set CHUNK_BYTES, 512
+# Needles per chunk, in bytes of v: 256 while a fits the second-level cache.
+# What a chunk costs beyond its searches is paid once per 256 needles, and
+# its positions and needles are 4 KB of the first-level cache.
+.set CHUNK_BYTES, 2048
 # From this many elements a no longer does (2 MB), and the chunk is larger.
 .set LARGE_N, 262144
 # Needles per chunk for such an a: 512.

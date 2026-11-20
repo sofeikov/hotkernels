@@ -25,3 +25,11 @@ All runs on an Intel Core i5-14600KF, Linux, pinned to one performance core by t
 - **compare:** significantly faster, 1.061x [1.059 – 1.064]
 - **Kept:** yes
 - **Notes:** 1.22x at 16 elements, 1.15x at 64, 1.06x at 1,024, 1.04x at 65,536, 1.01x to 1.02x from 1,048,576.
+
+## 4. Chunks of 256 needles while `a` fits the second-level cache
+
+- **Idea:** as attempt 4 of the left kernel.
+- **check:** pass
+- **compare:** significantly faster, 1.007x [1.005 – 1.009]
+- **Kept:** yes
+- **Notes:** nothing with 64 needles; with 1,000 needles 1.04x at 16 elements, 1.03x at 1,024, 1.02x at 16,384, nothing from 65,536.
