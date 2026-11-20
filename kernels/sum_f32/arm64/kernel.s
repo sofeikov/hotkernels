@@ -1,9 +1,46 @@
 // float sum_f32(const float *x, size_t n);
 //
 // x0 = x, x1 = n. Returns np.sum(x), NumPy's bits: the same additions in
-// NumPy's pairwise order (see spec.py). The tree is walked with a stack
-// below sp; a node whose leaves all lie at one depth below it is summed as a
-// group, its 2, 4 or 8 leaves side by side.
+// NumPy's pairwise order (see spec.py), each one rounded once, with only the
+// operands of an addition swapped.
+//
+// NumPy's tree in vectors of 8 elements. n = 8m + t. A leaf is at most 128
+// elements: eight running sums, element i into sum i mod 8, combined as
+// ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7)), then its last t
+// elements one by one. A larger node splits at 8 * floor(m / 2) elements, so
+// only the nodes on the right edge carry the t elements, and every other
+// node is a whole number of vectors, split into floor(m/2) and ceil(m/2).
+//
+// Signs of zeros. A zero operand changes no sum that is not zero, so the
+// sign of an intermediate zero only reaches a result that is zero, and NumPy
+// returns 0 + pairwise(x), never -0.0. So running sums may start at +0.0
+// instead of the first vector, and the result only needs a final + 0.0.
+//
+// Paths, by n:
+//   0..7       one after another from +0.0
+//   8..128     one leaf, two vectors per trip
+//   136..256   a multiple of 8: one group of two leaves, straight in
+//   544..1024  a multiple of 64: one group of eight equal leaves, straight in
+//   others     the walk: a stack of nodes below sp, split until a node is a
+//              group or a leaf, and a stack of sums. A marker on the node
+//              stack says when the sums of two children are to be added.
+//
+// Groups. A node of 17..32 vectors is two leaves, of 34..64 four, of
+// 68..128 eight (33 and 65..67 have leaves at two depths and are split
+// again). A group's leaves are summed in one loop, each leaf in its own two
+// registers, so eight leaves are sixteen independent chains of additions and
+// the loop runs at the core's three loads per cycle instead of one leaf's
+// latency of three cycles a step. The leaves have q or q + 1 vectors; after
+// the loop each longer leaf adds its last vector and each shorter one a
+// vector of +0.0 from the frame. Leaf sums are combined across leaves by
+// faddp in the node's own order.
+//
+// Groups of eight, q even: leaves whose starts are a multiple of 8 vectors
+// apart (every power-of-two size) are taken in a diagonal order, leaf j's
+// step k beside leaf 0's step k + j, because the L1 is slow to serve loads of
+// the same 32 bytes of different 256-byte blocks together. From LONG_N
+// elements, beyond the L1, they read 64 bytes a visit with ldnp, and each
+// group prefetches the first line of each leaf of the next.
 
 // Bytes of one vector of eight elements, the unit the tree is cut in.
 .set VEC, 32
