@@ -69,3 +69,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.013x [1.006 – 1.019]
 - **Kept:** yes
 - **Notes:** 1.10x at 262,144 and 1.02x at 65,536, recovering attempt 7's loss; unchanged at 1,048,576 and above. Load average 19, from other work: rough.
+
+## 9. Test for a group of four first
+
+- **Idea:** float32's attempt 10: in an array that fits the first-level cache a node is tested for a group of four with one unsigned compare first.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.999 – 1.003]
+- **Kept:** no
+- **Notes:** 1.01x at 4,096 within the noise. A group of four here is 512 elements, half of float32's group of eight, and the tests are a smaller share still of its loads than float32's were. Load average 17.
