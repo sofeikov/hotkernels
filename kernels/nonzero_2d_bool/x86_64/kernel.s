@@ -233,16 +233,20 @@
     mov     [rsi + r9 * 8 + 16 * \j + 8], r8
 .endm
 
-# Wide, dense: group j of the block, from the low byte of eax.
-# ymm1 = (row, column, row, column) of the group's first element, r8 = its
-# column. A group that crosses a row's end goes to WIDE_CROSS j.
-.macro WIDE_GROUP j
-    movzx   ecx, al
-    shr     eax, 8
-    vpbroadcastq ymm2, qword ptr [r12 + rcx * 8]
-    lea     r14, [r8 + 8]
-    cmp     r14, r10
-    ja      .Lwide_cross\j
+# The byte of eax for group j of a block in ecx (no REX prefix, so that `ah`
+# can be named), and eax shifted on to the next two groups after an odd one.
+.macro GROUP_BYTE j, reg
+    .if \j & 1
+    movzx   \reg, ah
+    shr     eax, 16
+    .else
+    movzx   \reg, al
+    .endif
+.endm
+
+# Wide, dense: four pairs of pairs from the positions in ymm2 and the
+# (row, column, row, column) of the group's first element in ymm1, stored.
+.macro WIDE_PAIRS
     vpshufb ymm3, ymm2, ymm8
     vpaddq  ymm3, ymm3, ymm1
     vmovdqu [rsi + r9 * 8], ymm3
@@ -255,9 +259,29 @@
     vpshufb ymm3, ymm2, ymm11
     vpaddq  ymm3, ymm3, ymm1
     vmovdqu [rsi + r9 * 8 + 96], ymm3
+.endm
+
+# Wide, dense, a block inside one row: group j.
+.macro ROW_GROUP j
+    GROUP_BYTE \j, ecx
+    vpbroadcastq ymm2, qword ptr [r12 + rcx * 8]
+    WIDE_PAIRS
     popcnt  ecx, ecx
-    add     r9, rcx
-    add     r9, rcx
+    lea     r9, [r9 + rcx * 2]
+    vpaddq  ymm1, ymm1, ymm13
+.endm
+
+# Wide, dense: group j of the block. r8 = the group's first column. A group
+# that crosses a row's end goes to WIDE_CROSS j.
+.macro WIDE_GROUP j
+    GROUP_BYTE \j, ecx
+    vpbroadcastq ymm2, qword ptr [r12 + rcx * 8]
+    lea     r14, [r8 + 8]
+    cmp     r14, r10
+    ja      .Lwide_cross\j
+    WIDE_PAIRS
+    popcnt  ecx, ecx
+    lea     r9, [r9 + rcx * 2]
     vpaddq  ymm1, ymm1, ymm13
     mov     r8, r14
 .Lwide_next\j:
@@ -288,19 +312,17 @@
     CROSS_PAIRS 2, ymm10
     CROSS_PAIRS 3, ymm11
     popcnt  ecx, ecx
-    add     r9, rcx
-    add     r9, rcx
+    lea     r9, [r9 + rcx * 2]
     vpaddq  ymm1, ymm1, ymm14           # next row, column + 8 - width
     sub     r14, r10
     mov     r8, r14
     jmp     .Lwide_next\j
 .endm
 
-# Narrow, dense: one group, from the low byte of eax. \table holds the
-# group's rows and columns; ymm1 = (first row, 0, first row, 0).
-.macro NARROW_GROUP table
-    movzx   edx, al
-    shr     eax, 8
+# Narrow, dense: group j. \table holds the group's rows and columns;
+# ymm1 = (first row, 0, first row, 0).
+.macro NARROW_GROUP j, table
+    GROUP_BYTE \j, edx
     lea     r8d, [rdx + rdx]
     vbroadcasti128 ymm2, xmmword ptr [r12 + r8 * 8 + POSI_AT]
     vpshufb ymm2, \table, ymm2          # (row, column) bytes of each position
@@ -317,8 +339,7 @@
     vpaddq  ymm3, ymm3, ymm1
     vmovdqu [rsi + r9 * 8 + 96], ymm3
     popcnt  edx, edx
-    add     r9, rdx
-    add     r9, rdx
+    lea     r9, [r9 + rdx * 2]
 .endm
 
 # The mask word of the block at r11 in eax, its count in ecx.
@@ -450,6 +471,17 @@ nonzero_2d_bool:
     vmovq   xmm1, r13
     vpinsrq xmm1, xmm1, r15, 1
     vinserti128 ymm1, ymm1, xmm1, 1
+    lea     r8, [r15 + BLOCK]
+    cmp     r8, r10
+    ja      .Lwide_dense_cross
+    ROW_GROUP 0
+    ROW_GROUP 1
+    ROW_GROUP 2
+    ROW_GROUP 3
+    cmp     r10, TABLE_MAX
+    jbe     .Lmid_advance
+    jmp     .Lwide_advance
+.Lwide_dense_cross:
     mov     r8, r15
     WIDE_GROUP 0
     WIDE_GROUP 1
@@ -506,10 +538,10 @@ nonzero_2d_bool:
     xor     r8d, r8d
     jmp     .Ltail
 .Lnarrow_dense:
-    NARROW_GROUP ymm4
-    NARROW_GROUP ymm5
-    NARROW_GROUP ymm6
-    NARROW_GROUP ymm7
+    NARROW_GROUP 0, ymm4
+    NARROW_GROUP 1, ymm5
+    NARROW_GROUP 2, ymm6
+    NARROW_GROUP 3, ymm7
     jmp     .Lnarrow_advance
 
     # rcx = row and r8 = column of element r11, the first not done.

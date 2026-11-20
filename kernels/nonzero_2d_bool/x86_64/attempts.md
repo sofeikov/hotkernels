@@ -18,3 +18,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.135x [1.133 – 1.138]
 - **Kept:** yes
 - **Notes:** micro-benchmark at 4,096: width 22 at 5% 0.081 to 0.055 ns per element, dense widths 32 and 1,000 0.140 to 0.128; width 3 unchanged (it had no multiplication).
+
+## 3. Fewer instructions per dense group
+
+- **Idea:** knock-outs of the dense group (half the stores, stores to one aligned place, no `vpshufb`, no write-position advance, no table load) each gained only 0 to 15%: the group is held by its instruction count, about 100 per block of 32, not by one port or by the stores. So: a dense block that lies in one row (c + 32 <= width) skips the per-group row-end compare and branch; the group's byte comes from `al` or `ah`, one shift per two groups; the write position advances by one `lea r9, [r9 + rcx * 2]` (two cycles on the chain, still under the group's time).
+- **check:** pass
+- **compare:** significantly faster, 1.025x [1.024 – 1.027]
+- **Kept:** yes
+- **Notes:** dense widths 32 and 1,000 1.04x, width 22 1.03x, width 3 no significant difference.
