@@ -336,3 +336,13 @@ there.
 - **Kept:** yes
 - **Notes:** width 64 now takes 0.43 ns a row at 4,096 elements, about 1.37 cycles, against the
   1.33 of four loads a row on three load units. This path has no `ldnp` loop above 8 MB.
+
+## 30. Rows of 49 to 64 above 8 MB: non-temporal pairs
+
+- **Idea:** the loop of attempt 29 with each row's first 32 bytes by `ldnp` from HUGE_N, out of
+  line; the last 32 keep `ldr` with register offsets.
+- **check:** pass; arbitrary-bytes check passes.
+- **compare:** significantly faster, 1.005x [1.005 – 1.005] (load average 3.0); width 64 1.14x at
+  16,777,216 elements on both tables, 1.17x at 64 elements (one row, Lrow1: the code moved), 0.96x
+  to 0.98x at 256 and 1,024 behind the size test.
+- **Kept:** yes

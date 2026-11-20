@@ -151,6 +151,28 @@
     orr     v31.16b, v31.16b, v7.16b
 .endm
 
+// Two rows of 49 to 64 at x10 and x12: the first 32 bytes by \ld (`ldp`, or
+// `ldnp` above HUGE_N) into v16, v17 and v20, v21, the last 32 by register
+// offsets x6 and x7 into v18, v19 and v22, v23. Both move two rows.
+.macro MID64 ld
+    \ld     q0, q1, [x10]
+    ldr     q2, [x10, x6]
+    ldr     q3, [x10, x7]
+    \ld     q4, q5, [x12]
+    ldr     q6, [x12, x6]
+    ldr     q7, [x12, x7]
+    add     x10, x10, x14
+    add     x12, x12, x14
+    orr     v16.16b, v16.16b, v0.16b
+    orr     v17.16b, v17.16b, v1.16b
+    orr     v18.16b, v18.16b, v2.16b
+    orr     v19.16b, v19.16b, v3.16b
+    orr     v20.16b, v20.16b, v4.16b
+    orr     v21.16b, v21.16b, v5.16b
+    orr     v22.16b, v22.16b, v6.16b
+    orr     v23.16b, v23.16b, v7.16b
+.endm
+
 .text
 .globl _any_cols_bool
 .p2align 2
@@ -487,23 +509,11 @@ Lmid64:
     lsl     x14, x3, #1                 // 2 width: one step
     subs    x9, x4, #2
     b.lo    Lmid64_rest
+    mov     x8, #HUGE_N
+    cmp     x2, x8
+    b.hs    Lmid64_nt
 Lmid64_loop:
-    ldp     q0, q1, [x10]
-    ldr     q2, [x10, x6]
-    ldr     q3, [x10, x7]
-    ldp     q4, q5, [x12]
-    ldr     q6, [x12, x6]
-    ldr     q7, [x12, x7]
-    add     x10, x10, x14
-    add     x12, x12, x14
-    orr     v16.16b, v16.16b, v0.16b
-    orr     v17.16b, v17.16b, v1.16b
-    orr     v18.16b, v18.16b, v2.16b
-    orr     v19.16b, v19.16b, v3.16b
-    orr     v20.16b, v20.16b, v4.16b
-    orr     v21.16b, v21.16b, v5.16b
-    orr     v22.16b, v22.16b, v6.16b
-    orr     v23.16b, v23.16b, v7.16b
+    MID64   ldp
     subs    x9, x9, #2
     b.hs    Lmid64_loop
 Lmid64_rest:
@@ -835,6 +845,13 @@ Lrow1:
     b.lo    3b
     stp     q2, q3, [x9]
     b       Ldone
+
+// The loop of rows of 49 to 64 with non-temporal pairs, above HUGE_N.
+Lmid64_nt:
+    MID64   ldnp
+    subs    x9, x9, #2
+    b.hs    Lmid64_nt
+    b       Lmid64_rest
 
 .section __TEXT,__const
 .p2align 4
