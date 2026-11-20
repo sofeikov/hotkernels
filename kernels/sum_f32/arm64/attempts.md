@@ -85,3 +85,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.004x [1.003 – 1.006]
 - **Kept:** yes
 - **Notes:** 1.01x at 1,024 and 16,384, nothing elsewhere: five instructions per group of 1,024 elements. Load average 4.0.
+
+## 11. No loop for 16 to 23 elements
+
+- **Idea:** two vectors and straight to the combining, without the tests that lead into the loop.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.999 – 1.003]
+- **Kept:** no
+- **Notes:** 1.3 ns at 16 either way. Load average 4.5.
