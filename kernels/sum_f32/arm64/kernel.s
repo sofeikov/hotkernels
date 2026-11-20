@@ -320,6 +320,20 @@ Locto:      // 68..128 vectors: eight leaves
     add     x15, x6, x15, lsl #5
     add     x16, x6, x16, lsl #5
     add     x17, x6, x7, lsl #5
+    // Beyond the first-level cache, ask for the first line of each leaf of
+    // the next group, which is as long as this one and starts where it ends.
+    ldr     x0, [sp, #LONG]
+    cbz     x0, Lo_noprefetch
+    sub     x0, x17, x6
+    prfm    pldl1keep, [x6, x0]
+    prfm    pldl1keep, [x10, x0]
+    prfm    pldl1keep, [x11, x0]
+    prfm    pldl1keep, [x12, x0]
+    prfm    pldl1keep, [x13, x0]
+    prfm    pldl1keep, [x14, x0]
+    prfm    pldl1keep, [x15, x0]
+    prfm    pldl1keep, [x16, x0]
+Lo_noprefetch:
     lsl     x1, x8, #5
     ands    x7, x7, #7                  // 0: every leaf has q vectors
     b.eq    Lo_setup

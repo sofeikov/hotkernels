@@ -69,3 +69,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.007x [1.005 – 1.010]
 - **Kept:** yes
 - **Notes:** 1.05x at 1,024, 1.03x at 4,096 and 16,384 (back to attempt 5's figures), unchanged from 65,536 up. Load average 3.3.
+
+## 9. Prefetch the next group's leaf starts beyond the first-level cache
+
+- **Idea:** in an array of at least 32,768 elements, each group of eight asks with `prfm pldl1keep` for the first line of each leaf of the next group, taken to be as long as this one and to start where it ends, so that the eight new streams do not all start on a miss. `prfm` never faults; past the end of the array it does nothing.
+- **check:** pass
+- **compare:** significantly faster, 1.006x [1.003 – 1.009]
+- **Kept:** yes
+- **Notes:** 1.02x at 262,144 and 1,048,576 (55.6 us), 1.01x at 65,536, nothing in the first-level cache or beyond the second. Load average 3.0.
