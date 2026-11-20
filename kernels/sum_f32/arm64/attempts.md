@@ -149,3 +149,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 0.999x [0.998 – 1.001]
 - **Kept:** no
 - **Notes:** nothing at any size. Load average 4.2.
+
+## 19. Loops aligned to 16 bytes
+
+- **Idea:** `.p2align 4` before the loop of the one-leaf path, the diagonal blocks, the plain step of a group of eight and the walk's node label.
+- **check:** pass
+- **compare:** significantly slower, 0.991x [0.990 – 0.992]
+- **Kept:** no
+- **Notes:** 0.90x at 64 (3.3 ns): the padding put `nop`s in the one-leaf path ahead of its loop. Nothing elsewhere. Load average 4.3.
