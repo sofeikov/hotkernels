@@ -16,11 +16,38 @@
 // Above this many elements (128 KB, the first-level cache of a performance
 // core) the leaves are summed one at a time.
 .set LONG_N, 16384
+// Above this many elements (4 MB) their loads are non-temporal, ldnp; x14 is
+// 2 then.
+.set HUGE_N, 524288
 
 // Sum one leaf of x7 >= 1 vectors at x6 into d0: eight running sums, in
 // v16..v19 (lanes 0..1, 2..3, 4..5, 6..7), combined as NumPy combines them.
 // Leaves x6 after the vectors.
 .macro LEAF
+    ldp     q16, q17, [x6]
+    ldp     q18, q19, [x6, #32]
+    add     x6, x6, #VEC
+    subs    x8, x7, #1
+    b.eq    2f
+1:
+    ldp     q0, q1, [x6]
+    ldp     q2, q3, [x6, #32]
+    add     x6, x6, #VEC
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    subs    x8, x8, #1
+    b.ne    1b
+2:
+    faddp   v16.2d, v16.2d, v17.2d
+    faddp   v18.2d, v18.2d, v19.2d
+    faddp   v16.2d, v16.2d, v18.2d
+    faddp   d0, v16.2d
+.endm
+
+// LEAF with non-temporal loads, for arrays beyond the second-level cache.
+.macro LEAF_NT
     ldp     q16, q17, [x6]
     ldp     q18, q19, [x6, #32]
     add     x6, x6, #VEC
@@ -262,9 +289,13 @@ Lbig:
     stp     xzr, xzr, [sp, #ZERO + 16]
     stp     xzr, xzr, [sp, #ZERO + 32]
     stp     xzr, xzr, [sp, #ZERO + 48]
-    // x14: non-zero for an array larger than the first-level cache (LONG_N).
+    // x14: 0 for an array that fits the first-level cache, 1 above LONG_N
+    // elements, 2 above HUGE_N.
     cmp     x1, #LONG_N
     cset    x14, hi
+    mov     x8, #HUGE_N
+    cmp     x1, x8
+    cinc    x14, x14, hi
 Lnode:
     // A node on the right edge holds the tail: a leaf while 8m + t <= 128.
     cbz     x2, Lplain
@@ -292,7 +323,12 @@ Lplain:
     b.ls    Lquad
     b       Lsplit
 Lleaf:
+    cmp     x14, #2
+    b.eq    Lleaf_nt
     LEAF
+    b       Lpush
+Lleaf_nt:
+    LEAF_NT
 Lpush:
     str     d0, [x5], #8
 Lnext:

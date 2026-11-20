@@ -61,3 +61,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.010x [1.005 – 1.015]; again 1.010x [1.002 – 1.019]
 - **Kept:** yes
 - **Notes:** beyond the second-level cache 1.09x to 1.12x at 4,194,304 and 1.06x to 1.07x at 16,777,216; but 0.95x at 262,144 and 0.96x to 0.98x at 65,536, in it. Load average 20 to 24 during both runs, from other work: rough.
+
+## 8. `ldnp` only above 4 MB
+
+- **Idea:** keep attempt 7's gain beyond the second-level cache and drop its loss in it: the walk's leaves load with `ldp` up to 524,288 elements (4 MB) and with `ldnp` above.
+- **check:** pass
+- **compare:** significantly faster, 1.013x [1.006 – 1.019]
+- **Kept:** yes
+- **Notes:** 1.10x at 262,144 and 1.02x at 65,536, recovering attempt 7's loss; unchanged at 1,048,576 and above. Load average 19, from other work: rough.
