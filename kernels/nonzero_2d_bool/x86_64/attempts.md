@@ -58,3 +58,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.027x [1.024 – 1.030]
 - **Kept:** yes
 - **Notes:** sparse widths 22, 3 and 32 1.07x to 1.08x; width 1,000 and every dense distribution no significant difference. Micro-benchmark at 4,096, 5%: 0.041 to 0.036 ns per element.
+
+## 8. Dense blocks through a compacted list: fewer 32-byte stores
+
+- **Idea:** a dense group stores 128 bytes for at most eight pairs, four times per block. Instead each group's picked (row, column) bytes are stored, 16 bytes, at the running end of a 64-byte list in the red zone, and the block's pairs are then emitted from the list two at a time (`vpmovzxbq ymm` from four bytes, the row added, one 32-byte store): a fixed ten stores, covering 20 pairs, and six more only when the block has more than 20 true elements. 4 stores of 16 bytes and 10 of 32 per block instead of 16 of 32, and about 79 instructions instead of 95.
+- **check:** pass
+- **compare:** significantly slower, 0.929x [0.918 – 0.940]
+- **Kept:** no
+- **Notes:** dense widths 22, 3 and 32 0.84x to 0.85x (micro-benchmark 0.21 ns per element against 0.12). The 4-byte loads from the list often span two of the group stores, which cannot be forwarded, so they wait for the stores to reach the cache. Width 1,000 (which does not take the path) 0.97x.
