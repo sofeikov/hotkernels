@@ -97,3 +97,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly slower, 0.92x [0.92 – 0.92]
 - **Kept:** no
 - **Notes:** dense wide tables 0.79x: the four 32-byte loads from a 32 KB table per chunk cost more than the arithmetic they replace; n=16 0.84x from the stack traffic.
+
+## 13. `st1` of four registers in place of two `stp q`
+
+- **Idea:** store the eight pairs of a dense chunk with two `st1 {v3.2d - v6.2d}` of 64 bytes each instead of four `stp q`, fewer store instructions.
+- **check:** pass
+- **compare:** significantly slower, 0.995x [0.994 – 0.995]
+- **Kept:** no
+- **Notes:** n=16 0.94x, the rest level: the store traffic is the same and the extra address register costs a move.
