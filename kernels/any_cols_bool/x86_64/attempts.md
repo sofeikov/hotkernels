@@ -31,3 +31,11 @@ The kernel does the same work whatever the elements are, so the two timing distr
 - **compare:** significantly faster, 1.024x [1.011 – 1.037]
 - **Kept:** yes
 - **Notes:** rows of 31: 1.04x, all of it at 16 elements. Rows of 64: 1.03x. Rows of 8: 1.02x. Rows of 256: 1.01x, not significant.
+
+## 4. A matrix under 32 bytes built in a register
+
+- **Idea:** no copy through the stack. The matrix's first 16, 8 or 4 bytes and its last 16, 8 or 4 are loaded, the last moved down by one `vpshufb` to follow the first with zeros above, and the two joined (`vinserti128`, `vpunpcklqdq`, `vpunpckldq`); one to three bytes go through a general register. The load of 32 bytes that two smaller stores had just written could not be forwarded and waited for them to reach the cache.
+- **check:** pass
+- **compare:** significantly faster, 1.022x [1.003 – 1.040]
+- **Kept:** yes
+- **Notes:** the judge times this path at one point, 16 elements in rows of 8: 4.0 ns against 7.1, 1.82x and 1.76x in the two tables, and 3.3 ns for the reference became 0.67x of the kernel's time where it was 0.85x the other way. Every other point is level. A single row under 32 wide, `(1, 31)`, takes the same path; the judge has no timed point there.

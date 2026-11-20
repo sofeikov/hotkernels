@@ -27,8 +27,7 @@
 #            load at the first of those rows would have put them, with zeros
 #            above. Then the rows inside the register are folded onto the
 #            first, and the first cols bytes are the results. A matrix under
-#            32 bytes is copied to the stack with zeros after it and loaded
-#            from there.
+#            32 bytes is put in the register from two loads that overlap.
 #
 # Moving the bytes of a register down by a count is two `vpshufb`, one for
 # the bytes that stay in their half and one for those that cross from the
@@ -266,45 +265,47 @@ any_cols_bool:
     vzeroupper
     ret
 
-# Fewer than 32 bytes in the matrix, r8 of them, at least one: copied to 32
-# bytes of zeros below the stack pointer, by two moves that overlap, and
-# loaded from there.
+# Fewer than 32 bytes in the matrix, r8 of them, at least one: its first 16,
+# 8 or 4 bytes and its last 16, 8 or 4, which overlap, the last moved down to
+# follow the first with zeros above. ymm0 = the matrix, then zeros.
 .Ltiny:
-    vmovdqu [rsp - 64], ymm0
     cmp     r8, 16
     jae     .Ltiny_16
     cmp     r8, 8
     jae     .Ltiny_8
     cmp     r8, 4
     jae     .Ltiny_4
-    movzx   eax, byte ptr [rdi]         # one to three: the first, the middle, the last
-    mov     [rsp - 64], al
-    mov     rdx, r8
-    shr     rdx, 1
-    movzx   eax, byte ptr [rdi + rdx]
-    mov     [rsp + rdx - 64], al
-    movzx   eax, byte ptr [rdi + r8 - 1]
-    mov     [rsp + r8 - 65], al
-    jmp     .Ltiny_load
+    movzx   eax, byte ptr [rdi]         # one to three bytes
+    cmp     r8, 2
+    jb      .Ltiny_small
+    movzx   eax, word ptr [rdi]
+    je      .Ltiny_small
+    movzx   edx, byte ptr [rdi + 2]
+    shl     edx, 16
+    or      eax, edx
+.Ltiny_small:
+    vmovd   xmm0, eax
+    jmp     .Lfold
 .Ltiny_4:
-    mov     eax, [rdi]
-    mov     edx, [rdi + r8 - 4]
-    mov     [rsp - 64], eax
-    mov     [rsp + r8 - 68], edx
-    jmp     .Ltiny_load
+    vmovd   xmm0, dword ptr [rdi]
+    vmovd   xmm1, dword ptr [rdi + r8 - 4]
+    neg     r8
+    vpshufb xmm1, xmm1, [r9 + r8 + 24]          # down by 8 - r8
+    vpunpckldq xmm0, xmm0, xmm1
+    jmp     .Lfold
 .Ltiny_8:
-    mov     rax, [rdi]
-    mov     rdx, [rdi + r8 - 8]
-    mov     [rsp - 64], rax
-    mov     [rsp + r8 - 72], rdx
-    jmp     .Ltiny_load
+    vmovq   xmm0, qword ptr [rdi]
+    vmovq   xmm1, qword ptr [rdi + r8 - 8]
+    neg     r8
+    vpshufb xmm1, xmm1, [r9 + r8 + 32]          # down by 16 - r8
+    vpunpcklqdq xmm0, xmm0, xmm1
+    jmp     .Lfold
 .Ltiny_16:
-    vmovdqu xmm1, [rdi]
-    vmovdqu xmm2, [rdi + r8 - 16]
-    vmovdqu [rsp - 64], xmm1
-    vmovdqu [rsp + r8 - 80], xmm2
-.Ltiny_load:
-    vmovdqu ymm0, [rsp - 64]
+    vmovdqu xmm0, [rdi]
+    vmovdqu xmm1, [rdi + r8 - 16]
+    neg     r8
+    vpshufb xmm1, xmm1, [r9 + r8 + 48]          # down by 32 - r8
+    vinserti128 ymm0, ymm0, xmm1, 1
     jmp     .Lfold
 
 .section .note.GNU-stack,"",@progbits
