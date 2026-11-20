@@ -29,6 +29,9 @@
 
 # Largest span of the bits path: one bit per value of a 64-bit register.
 .set BITS_SPAN, 64
+# From this many elements the bits path aligns its loads to 32 bytes, so that
+# none straddles two cache lines.
+.set ALIGN_MIN_N, 32
 # What the table path stores for a value that is present: the top bit of
 # the byte, which is the bit vpmovmskb reads.
 .set PRESENT, 0x80
@@ -64,6 +67,18 @@ unique_i64:
     cmp     r9, BITS_SPAN
     ja      .Lbits_general
     mov     r9, rcx
+    # From ALIGN_MIN_N elements the loads are aligned: the first vector is
+    # taken where x starts, and the steps go on from the next multiple of
+    # 32 bytes, over some of the same elements again. Only for an x that
+    # is a multiple of 8 itself, so that a step still starts at an element.
+    cmp     rdx, ALIGN_MIN_N
+    jb      .Lraw_start
+    test    dil, 7
+    jnz     .Lraw_start
+    vpsllvq ymm0, ymm15, [rdi]
+    add     rdi, 32
+    and     rdi, -32
+.Lraw_start:
     cmp     rdi, r11
     ja      .Lraw_singles
 .Lraw16:
@@ -99,6 +114,15 @@ unique_i64:
     vmovq   xmm14, r9
     vpbroadcastq ymm14, xmm14           # -lo in every lane
     xor     r9d, r9d
+    cmp     rdx, ALIGN_MIN_N            # aligned loads, as above
+    jb      .Lbits_start
+    test    dil, 7
+    jnz     .Lbits_start
+    vpaddq  ymm4, ymm14, [rdi]
+    vpsllvq ymm0, ymm15, ymm4
+    add     rdi, 32
+    and     rdi, -32
+.Lbits_start:
     cmp     rdi, r11
     ja      .Lbits_singles
 .Lbits16:
