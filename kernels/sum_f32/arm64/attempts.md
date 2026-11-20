@@ -197,3 +197,7 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.004x [1.002 – 1.006]
 - **Kept:** yes
 - **Notes:** 1.03x at 4,096 (120 ns), 1.01x at 16,384, nothing elsewhere. Load average 5.8.
+
+## Recorded on a quiet machine
+
+`uv run judge run sum_f32 --unlocked --record` on 20 November 2026, load average 1.5, nothing else running: 2.11x [2.10 – 2.11] over the naive C and 18.7x over NumPy. Over the C: 2.75x at 16, 2.55x at 64, 2.44x at 256, 2.84x to 2.97x from 1,024 to 16,384, 1.64x from 65,536 to 1,048,576, 1.51x at 4,194,304, 1.32x at 16,777,216. The figures in the entries above were taken at load averages of 3 to 24 and are indicative.

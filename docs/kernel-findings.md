@@ -20,7 +20,7 @@ The kernels exist for two architectures: ARM64, and x86-64 on Linux, written aft
 - **Twenty-two of the 23 kernels have assembly that the judge reports as significantly faster than naive C.** The exception, `cast_u8_f32`, ties the compiler and ships as its C. Every kernel is faster than NumPy at every size measured. Twenty-one are bit-identical to NumPy. The two float `cumsum` kernels are within a declared tolerance, which is what makes them faster at all.
 - **The second shortlist added six kernels with ARM64 assembly:** `cummax_i64`, `cumsum_bool`, `any_rows_bool`, `bincount_i16`, `bincount_i64` and `where_f64`, 3.27x, 2.90x, 7.71x, 2.45x, 1.60x and 1.82x over naive C across the judge's sizes, all bit-identical to NumPy, recorded on a quiet machine at the top of their stack. Their rows come before the last two kernels'. The other two have ARM64 assembly since their specs were narrowed to what the binding passes ([fmax-references-design.md](fmax-references-design.md)), both recorded `--unlocked` (their specs differ from `main` until the narrowed specs merge) on a quiet machine at the top of their stack, in the last rows: `fmax_reduce_f64` 8.24x over naive C and `cumfmax_f64` 13.8x. The counts in this section are of the first 23.
 - **`unique_i64` was added for `np.unique` on int64 labels** ([issue 189](https://github.com/sofeikov/hotkernels/issues/189)): 1.44x over naive C and 41.6x over NumPy across its four timed cases, bit-identical, on a busy machine. See [Distinct labels](#distinct-labels-npunique-on-int64).
-- **`sum_f32` was added for `np.sum` on float32** ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [coverage-gaps-design.md](coverage-gaps-design.md)): NumPy's own result bit for bit, by making its additions in its order, several of its blocks at a time. 2.08x over naive C and 18.4x over NumPy across the judge's sizes, recorded `--unlocked` on a busy machine. See [`np.sum` on floats](#npsum-on-floats-in-numpys-order).
+- **`sum_f32` was added for `np.sum` on float32** ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [coverage-gaps-design.md](coverage-gaps-design.md)): NumPy's own result bit for bit, by making its additions in its order, several of its blocks at a time. 2.11x over naive C and 18.7x over NumPy across the judge's sizes, recorded `--unlocked` on a quiet machine. See [`np.sum` on floats](#npsum-on-floats-in-numpys-order).
 - **Three kernels are a different algorithm, not NumPy's loop made faster:** `argsort_f64`, `argsort_i64` and `argsort_u64`, a stable `argsort` by radix sort where NumPy merges. They ship as C: 13x to 18x faster than NumPy at a million elements on keys that differ in all their bits, 65x to 78x on small integers. A merge sort in C only ties NumPy, and the one hot loop of the radix sort, written by hand, tied the compiler's. See [Stable `argsort`](#stable-argsort).
 - **The survey's prediction for the "C kernels" was wrong.** It expected assembly to tie the compiler on `clip`, `astype`, `np.sum` on `uint8` and `count_nonzero`, because clang vectorises those loops. Tried, assembly beat the C on five of the six: by 5.9x on `sum_u8`, by 1.3x to 1.4x on the counts, and by 1.36x to 1.38x on `clip` for bounds that allow its fast path. A vectorised loop is not necessarily a good one.
 - **Three results are narrower than their headline number.** `isin_i64` is fast only for test values that lie close together, and the two `clip` kernels only for some bounds and, with a lower bound of zero, only for data without negative zeros. Each is set out below.
@@ -608,25 +608,25 @@ From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/iss
 
 - **Technique.** NumPy's tree is walked with a stack below `sp`, split until a node is a group of 2, 4 or 8 leaves (or a lone leaf, on the right edge or at an irregular node). A group's leaves are summed in one loop, each in its own two registers; eight leaves are sixteen chains, enough to run at the core's three 16-byte loads per cycle. Leaves have `q` or `q + 1` vectors: after the loop the longer ones add their last vector and the shorter ones a vector of `+0.0`, a step skipped when all are equal. Leaf sums are combined across leaves with `faddp`, in the node's order. 8 to 128 elements are one leaf, a straight run of 15 steps entered at its length; one group of two (136 to 256 elements, a multiple of 8) and one of eight (544 to 1,024, a multiple of 64) skip the walk. The log is `kernels/sum_f32/arm64/attempts.md`.
 - **The first-level cache dislikes the same offset in different 256-byte blocks.** The group loop alone ran at the load limit when its eight leaves started 544 bytes apart and 20% slower when they started 256, 512 or 1,024 bytes apart, as they do at every power of two. Taking eight steps in a diagonal order, leaf `j`'s step `k` beside leaf 0's step `k + j`, puts the loads issued together at different offsets and recovers it, 1.14x at 4,096 elements. Beyond the first-level cache, visits of 64 bytes, `ldnp`, and a prefetch of the next group's leaf starts gain 4% to 10% more.
-- **Figures,** `uv run judge run sum_f32 --unlocked --record` at a load average of 5.4, other kernels' runs winding down, so indicative: 2.08x [2.08 – 2.09] over the naive C and 18.4x over NumPy across the eleven sizes.
+- **Figures,** `uv run judge run sum_f32 --unlocked --record` on 20 November 2026 on a quiet machine, at a load average of 1.5: 2.11x [2.10 – 2.11] over the naive C and 18.7x over NumPy across the eleven sizes.
 
 | n | kernel | naive C | vs naive C | vs NumPy |
 |---|---|---|---|---|
-| 16 | 1.3 ns | 3.6 ns | 2.75x | 903x |
-| 64 | 2.5 ns | 6.3 ns | 2.55x | 487x |
-| 256 | 8.9 ns | 21.7 ns | 2.43x | 137x |
-| 1,024 | 30.2 ns | 88.6 ns | 2.93x | 46.3x |
-| 4,096 | 124.2 ns | 356.8 ns | 2.87x | 15.3x |
-| 16,384 | 501.7 ns | 1.4 µs | 2.84x | 7.81x |
-| 65,536 | 3.5 µs | 5.7 µs | 1.63x | 3.58x |
-| 262,144 | 14.5 µs | 22.9 µs | 1.58x | 3.18x |
-| 1,048,576 | 58.5 µs | 93.0 µs | 1.59x | 3.14x |
-| 4,194,304 | 251.3 µs | 376.0 µs | 1.50x | 2.83x |
-| 16,777,216 | 1.15 ms | 1.49 ms | 1.29x | 2.48x |
+| 16 | 1.2 ns | 3.4 ns | 2.75x | 908x |
+| 64 | 2.3 ns | 5.9 ns | 2.55x | 488x |
+| 256 | 8.4 ns | 20.5 ns | 2.44x | 137x |
+| 1,024 | 28.1 ns | 83.5 ns | 2.97x | 47.1x |
+| 4,096 | 116.3 ns | 334.6 ns | 2.88x | 15.4x |
+| 16,384 | 472.7 ns | 1.3 µs | 2.84x | 7.79x |
+| 65,536 | 3.3 µs | 5.4 µs | 1.64x | 3.59x |
+| 262,144 | 13.1 µs | 21.5 µs | 1.64x | 3.31x |
+| 1,048,576 | 52.8 µs | 86.4 µs | 1.64x | 3.22x |
+| 4,194,304 | 240.8 µs | 363.1 µs | 1.51x | 2.87x |
+| 16,777,216 | 1.08 ms | 1.42 ms | 1.32x | 2.59x |
 
 - **The walk mispredicts.** Which of a node and a combine marker comes off the stack next follows the bits of a counter, so the walk's test is mispredicted about once a pass. A node of two or four groups of eight therefore has them summed one after another, the walk passing once per 4,096 elements: 1.02x to 1.03x at 4,096 and 16,384. The same finding made `sum_f64` faster than its C beyond the first-level cache, where its leaves had been summed one pass of the walk each.
-- **Where the room is.** At 4,096 elements the kernel takes about 120 to 124 ns where one stream of loads at the limit takes 109; in the second-level cache 3.4 µs against 3.1 at 65,536. A group of two (256 elements) is four chains, bound by the latency of the additions; up to 128 elements a leaf is one chain per lane, NumPy's own. Every timed size is faster than the C and than NumPy.
-- **From Python,** `uv run delivery time --only sum` at a load average of 5.9, rough: `np.sum(x)` 22.6x faster than NumPy at 16 elements (1.08 µs to 47.6 ns), 10.5x at 4,096 and 2.33x at 1,048,576 (184 µs to 79 µs); `x.sum()` 6.02x, 5.78x and 1.92x. A float64 or strided float32 sum left to NumPy costs within the run's noise, -2.8% to +4.2%.
+- **Where the room is.** At 4,096 elements the kernel takes 116 ns where one stream of loads at the limit took 109 in a microbenchmark; in the second-level cache 3.4 µs against 3.1 at 65,536. A group of two (256 elements) is four chains, bound by the latency of the additions; up to 128 elements a leaf is one chain per lane, NumPy's own. Every timed size is faster than the C and than NumPy.
+- **From Python,** `uv run delivery time --only sum` on 20 November 2026 at a load average of 2.3: `np.sum(x)` 22.8x faster than NumPy at 16 elements (1.05 µs to 46.2 ns), 10.8x at 4,096 and 3.14x at 1,048,576 (172 µs to 54.8 µs); `x.sum()` 5.85x, 5.85x and 3.07x. A strided float32 sum left to NumPy costs 0.0% to +0.3%.
 - **The binding.** The function and method hooks of `sum` take `np.sum(x)` and `x.sum()` with no other argument on a contiguous, aligned, one-dimensional float32 array. A result that is not finite is thrown away and the call passed on. An array not aligned to 4 bytes is NumPy's: NumPy copies it in blocks of 8,192 elements and adds the blocks' sums one after another, which `delivery check` found. After the kernel the four flags NumPy reports are cleared and the inexact flag is left set, as NumPy leaves them.
 
 #### On x86-64
