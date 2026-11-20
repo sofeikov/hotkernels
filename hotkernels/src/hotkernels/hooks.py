@@ -741,6 +741,26 @@ def _searchsorted_right() -> bool:
     return bool(np.array_equal(np.searchsorted(table, needles, side="right"), expected))
 
 
+def _searchsorted_i64(side: str) -> bool:
+    """Probe the method hook: `np.searchsorted` on int64 for needles that are elements.
+
+    Every needle equals one element, so the two sides differ by one at each of
+    them: a call that reached the kernel of the other side fails.
+
+    Args:
+        side: The `side` argument of the call, 'left' or 'right'.
+
+    Returns:
+        Whether the result is an `intp` array holding each needle's own index
+        for 'left', and the index after it for 'right'.
+    """
+    table = np.arange(PROBE_TABLE_N, dtype=np.int64)
+    needles = np.arange(PROBE_N, dtype=np.int64) % PROBE_TABLE_N
+    expected = needles + 1 if side == "right" else needles
+    result = np.searchsorted(table, needles, side=side)
+    return result.dtype == np.intp and bool(np.array_equal(result, expected))
+
+
 def _interp() -> bool:
     """Probe the function hook: `np.interp` through points on the line y = 2x.
 
@@ -897,6 +917,8 @@ HOOKS: tuple[Hook, ...] = (
     Hook("method.searchsorted", METHOD, (
         Probe("searchsorted_f64", _searchsorted),
         Probe("searchsorted_right_f64", _searchsorted_right),
+        Probe("searchsorted_i64", partial(_searchsorted_i64, "left")),
+        Probe("searchsorted_right_i64", partial(_searchsorted_i64, "right")),
     )),
     Hook("method.argmax", METHOD, (
         Probe("argmax_f32", partial(_argext_small_method, np.float32, "argmax", 1.0)),
@@ -992,6 +1014,8 @@ KERNELS: tuple[KernelInfo, ...] = (
     # Indented under the row above: the same call with one argument more, in a
     # column the report keeps to 19 characters.
     KernelInfo("searchsorted_right_f64", "  side='right'", "float64", "searchsorted", ("method.searchsorted",)),
+    KernelInfo("searchsorted_i64", "np.searchsorted", "int64", "searchsorted", ("method.searchsorted",)),
+    KernelInfo("searchsorted_right_i64", "  side='right'", "int64", "searchsorted", ("method.searchsorted",)),
     KernelInfo("interp_f64", "np.interp", "float64", "interp", ("function.interp",)),
     KernelInfo("where_f64", "np.where(c, a, b)", "float64", "where", ("function.where",)),
     # np.maximum.accumulate does not fit the report's column of 19 characters.

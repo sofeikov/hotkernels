@@ -299,42 +299,62 @@ static PyObject *method_cumsum(PyObject *self, PyObject *args, PyObject *kwargs)
 
 // ------------------------------------------------------------ searchsorted
 
-// A search kernel: searchsorted_f64 for side='left', searchsorted_right_f64
-// for side='right'. The two have one signature.
-typedef void (*search_kernel)(const double *a, const double *v, int64_t *out, size_t n, size_t needles);
+// Choose the kernel for a search of `a`, which is float64 or int64, from the
+// `side` argument: absent or 'left' gives the left kernel of that element
+// type, 'right' the right one. Returns HK_KERNEL_COUNT for anything else,
+// including a subclass of str, which is left for NumPy to judge.
+static hk_kernel search_kernel(PyArrayObject *a, PyObject *side) {
+    const bool integers = PyArray_TYPE(a) == NPY_INT64;
+    if (side == NULL || (PyUnicode_CheckExact(side) && hk_text_is(side, "left"))) {
+        return integers ? HK_SEARCHSORTED_I64 : HK_SEARCHSORTED_F64;
+    }
+    if (PyUnicode_CheckExact(side) && hk_text_is(side, "right")) {
+        return integers ? HK_SEARCHSORTED_RIGHT_I64 : HK_SEARCHSORTED_RIGHT_F64;
+    }
+    return HK_KERNEL_COUNT;
+}
 
-// Run the search for one Python number, as `a.searchsorted(2.5)`: NumPy
-// returns the position as an np.intp scalar. `search` is the kernel for the
-// side asked for. Returns NULL with no exception set if `needle` is not a
-// Python float, or a Python int a double holds exactly.
-static PyObject *searchsorted_scalar(PyArrayObject *a, PyObject *needle, search_kernel search) {
-    double value;
-    if (!hk_as_exact_double(needle, &value)) return NULL;
+// Run one of the four search kernels, which have one signature but for the
+// element type: `a` holds n sorted elements and `v` the needles, both float64
+// for the float64 kernels and both int64 for the int64 ones; `out` gets one
+// position per needle.
+static void run_search(hk_kernel kernel, const void *a, const void *v, int64_t *out, size_t n, size_t needles) {
+    switch (kernel) {
+    case HK_SEARCHSORTED_F64: searchsorted_f64(a, v, out, n, needles); break;
+    case HK_SEARCHSORTED_RIGHT_F64: searchsorted_right_f64(a, v, out, n, needles); break;
+    case HK_SEARCHSORTED_I64: searchsorted_i64(a, v, out, n, needles); break;
+    default: searchsorted_right_i64(a, v, out, n, needles); break;
+    }
+}
+
+// Run the search for one number, as `a.searchsorted(2.5)` or, on an int64
+// array, `a.searchsorted(np.int64(7))`: NumPy returns the position as an
+// np.intp scalar. Returns NULL with no exception set if `needle` is not a
+// number the kernel's element type holds as NumPy would convert it: for
+// float64 a Python float, or a Python int a double holds exactly; for int64
+// an np.int64, or a Python int that fits int64.
+static PyObject *searchsorted_scalar(PyArrayObject *a, PyObject *needle, hk_kernel kernel) {
+    // The needle's eight bytes, as the element type of `a`.
+    union {
+        double f64;
+        int64_t i64;
+    } value;
+    if (PyArray_TYPE(a) == NPY_INT64) {
+        if (!hk_as_int64(needle, &value.i64)) return NULL;
+    } else if (!hk_as_exact_double(needle, &value.f64)) {
+        return NULL;
+    }
     npy_intp position;
-    search(PyArray_DATA(a), &value, (int64_t *)&position, (size_t)PyArray_SIZE(a), 1);
+    run_search(kernel, PyArray_DATA(a), &value, (int64_t *)&position, (size_t)PyArray_SIZE(a), 1);
     return hk_scalar(NPY_INTP, &position);
 }
 
-// Choose the kernel for the `side` argument of a search: absent or 'left'
-// gives the left kernel, 'right' the right one. Sets *kernel to the counter
-// the call is recorded under. Returns NULL for anything else, including a
-// subclass of str, which is left for NumPy to judge.
-static search_kernel search_side(PyObject *side, hk_kernel *kernel) {
-    if (side == NULL || (PyUnicode_CheckExact(side) && hk_text_is(side, "left"))) {
-        *kernel = HK_SEARCHSORTED_F64;
-        return searchsorted_f64;
-    }
-    if (PyUnicode_CheckExact(side) && hk_text_is(side, "right")) {
-        *kernel = HK_SEARCHSORTED_RIGHT_F64;
-        return searchsorted_right_f64;
-    }
-    return NULL;
-}
-
-// a.searchsorted(v) for a one-dimensional contiguous float64 array `a` and
-// float64 needles: a contiguous array of any shape, whose shape the result
-// takes, or one Python number. `side` must be absent, 'left' or 'right'; each
-// side has its own kernel. There must be no `sorter`.
+// a.searchsorted(v) for a one-dimensional contiguous float64 or int64 array
+// `a` and needles of the same element type: a contiguous array of any shape,
+// whose shape the result takes, or one number (see searchsorted_scalar).
+// `side` must be absent, 'left' or 'right'; each side has its own kernel.
+// There must be no `sorter`. Needles of another type are NumPy's: it converts
+// them and `a` to a common type by its own rules.
 // np.searchsorted(a, v) calls the method as
 // `a.searchsorted(v, side='left', sorter=None)`, and np.digitize calls
 // np.searchsorted: with side='right' by default, with side='left' for
@@ -351,13 +371,12 @@ static HK_NOINLINE PyObject *try_searchsorted(PyObject *self, PyObject *const *a
     PyObject *bound[PARAMETERS];
     if (!hk_bind_arguments(args, nargs, kwnames, names, PARAMETERS, PARAMETERS, bound)) return NULL;
     if (bound[V] == NULL || !hk_is_absent(bound[SORTER])) return NULL;
-    hk_kernel kernel;
-    const search_kernel search = search_side(bound[SIDE], &kernel);
-    if (search == NULL) return NULL;
-
     PyArrayObject *a = (PyArrayObject *)self;
+    const hk_kernel kernel = search_kernel(a, bound[SIDE]);
+    if (kernel == HK_KERNEL_COUNT) return NULL;
+
     PyObject *result;
-    if (hk_is_flat(bound[V], NPY_DOUBLE)) {
+    if (hk_is_flat(bound[V], PyArray_TYPE(a))) {
         PyArrayObject *v = (PyArrayObject *)bound[V];
         result = PyArray_SimpleNew(PyArray_NDIM(v), PyArray_DIMS(v), NPY_INTP);
         if (result == NULL) {
@@ -366,11 +385,11 @@ static HK_NOINLINE PyObject *try_searchsorted(PyObject *self, PyObject *const *a
         }
         const npy_intp needles = PyArray_SIZE(v);
         HK_BEGIN_NOGIL(needles)
-        search(PyArray_DATA(a), PyArray_DATA(v), PyArray_DATA((PyArrayObject *)result),
-               (size_t)PyArray_SIZE(a), (size_t)needles);
+        run_search(kernel, PyArray_DATA(a), PyArray_DATA(v), PyArray_DATA((PyArrayObject *)result),
+                   (size_t)PyArray_SIZE(a), (size_t)needles);
         HK_END_NOGIL
     } else {
-        result = searchsorted_scalar(a, bound[V], search);
+        result = searchsorted_scalar(a, bound[V], kernel);
         if (result == NULL) return NULL;
     }
     hk_take(kernel);
@@ -380,7 +399,7 @@ static HK_NOINLINE PyObject *try_searchsorted(PyObject *self, PyObject *const *a
 // The array's type is tested before the arguments are looked at: most calls
 // are for another element type, and rejecting those must cost almost nothing.
 static PyObject *method_searchsorted(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames) {
-    if (hk_is_flat_1d(self, NPY_DOUBLE)) {
+    if (hk_is_flat_1d(self, NPY_DOUBLE) || hk_is_flat_1d(self, NPY_INT64)) {
         PyObject *result = try_searchsorted(self, args, nargs, kwnames);
         if (result != NULL) return result;
     }
