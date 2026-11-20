@@ -105,3 +105,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly slower, 0.995x [0.994 – 0.995]
 - **Kept:** no
 - **Notes:** n=16 0.94x, the rest level: the store traffic is the same and the extra address register costs a move.
+
+## 14. A first sparse tier of 4 extractions (rows under 512)
+
+- **Idea:** at 5% true a 64-byte block holds 3.2 true bytes on average and at most 4 in about four blocks of five; extract 4 positions for those, 6 for 5 or 6, 12 for 7 to 12.
+- **check:** pass
+- **compare:** significantly faster, 1.036x [1.035 – 1.037]
+- **Kept:** no
+- **Notes:** the gain is the benchmark's: `compare` times one input over and over, and the predictor learns which blocks take which tier (1.23x at 1,024 elements, 1.07x at 1M). On masks it has not seen, timed outside the judge at width 22 (4M elements, a fresh random mask): 0.090 ns per element at 5% against 0.081 for attempt 11, and 0.148 against 0.105 at 7%, where the count sits on the new boundary; better only at 3% (0.063 against 0.079). Rejected for the same reason as `nonzero_bool` attempt 5 chose 6 and 12.
