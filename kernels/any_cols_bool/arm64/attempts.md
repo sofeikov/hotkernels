@@ -282,3 +282,15 @@ there.
   23.1x / 16.9x, 33 16.2x / 20.3x / 14.2x, 48 18.6x / 24.9x / 15.4x, 65 4.45x / 4.79x / 3.28x, 100
   7.94x / 9.73x / 6.27x, 129 2.46x / 2.83x / 1.96x, 200 2.60x / 3.23x / 2.02x, 1,000 2.35x / 2.30x /
   1.34x.
+
+## 25. Rows of 129 to 256: every column in registers
+
+- **Idea:** width 256 is this spec's weakest table (2.44x over the C). A row of 129 to 256 bytes
+  is its first 128 and its last 128: sixteen accumulators (`v16` to `v31`) hold every column, one
+  row a step, sixteen loads, and one store of each at the end; no tiles and no loads and stores of
+  `out` per block. Out of line, after the other paths.
+- **check:** pass; the arbitrary-bytes check outside the judge passes (1,848 cases).
+- **compare:** significantly faster, 1.025x [1.024 – 1.026] (load average 2.9); width 256 1.08x to
+  1.24x up to 4,194,304 elements, 1.10x over each of its two tables, 0.98x at 16,777,216 (no
+  `ldnp` on this path).
+- **Kept:** yes

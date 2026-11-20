@@ -24,7 +24,8 @@
 //   49..64   every row as its first 32 bytes and its last 32: two rows a step.
 //   65..112  every row as its first 64 bytes and its last 48: one row a step.
 //   113..128 every row as its first 64 bytes and its last 64: one row a step.
-//   129..    tiles of TILE rows; for each block of 128 columns of a tile, the
+//   129..256 every row as its first 128 bytes and its last 128: one row a step.
+//   257..    tiles of TILE rows; for each block of 128 columns of a tile, the
 //            columns' results so far are loaded from out, the rows or'ed in,
 //            and stored back; the first tile starts from zero and the last
 //            stores through `umin` with 1. The last block ends at the last
@@ -132,6 +133,8 @@ _any_cols_bool:
     b.ls    Lmid112
     cmp     x3, #128
     b.ls    Lmid128
+    cmp     x3, #256
+    b.ls    Lmid256
     b       Lwide
 
 // No whole row: width zeros. Over 16, 32-byte pairs, the last pair ending at
@@ -574,7 +577,7 @@ Lmid128:
     stp     q18, q19, [x1, #32]
     b       Ldone
 
-// Rows of more than 128, in blocks of 128 columns. The first tile starts
+// Rows of more than 256, in blocks of 128 columns. The first tile starts
 // from zero and the last one stores its blocks through `umin` with 1: no pass
 // over out of their own.
 Lwide:
@@ -679,6 +682,85 @@ Lnarrow16_nt:
     cmp     x10, x17
     b.ls    Lnarrow16_nt
     b       Lnarrow_one
+
+// Rows of 129 to 256: every row as its first 128 bytes, into v16 to v23, and
+// its last 128, into v24 to v31, one row a step; nothing is stored until the
+// end. Out of line, after the other paths.
+Lmid256:
+    movi    v16.16b, #0
+    movi    v17.16b, #0
+    movi    v18.16b, #0
+    movi    v19.16b, #0
+    movi    v20.16b, #0
+    movi    v21.16b, #0
+    movi    v22.16b, #0
+    movi    v23.16b, #0
+    movi    v24.16b, #0
+    movi    v25.16b, #0
+    movi    v26.16b, #0
+    movi    v27.16b, #0
+    movi    v28.16b, #0
+    movi    v29.16b, #0
+    movi    v30.16b, #0
+    movi    v31.16b, #0
+    sub     x6, x3, #128                // where a row's last 128 bytes start
+    mov     x10, x0
+    add     x11, x0, x6
+1:  ldp     q0, q1, [x10]
+    ldp     q2, q3, [x10, #32]
+    ldp     q4, q5, [x10, #64]
+    ldp     q6, q7, [x10, #96]
+    add     x10, x10, x3
+    orr     v16.16b, v16.16b, v0.16b
+    orr     v17.16b, v17.16b, v1.16b
+    orr     v18.16b, v18.16b, v2.16b
+    orr     v19.16b, v19.16b, v3.16b
+    orr     v20.16b, v20.16b, v4.16b
+    orr     v21.16b, v21.16b, v5.16b
+    orr     v22.16b, v22.16b, v6.16b
+    orr     v23.16b, v23.16b, v7.16b
+    ldp     q0, q1, [x11]
+    ldp     q2, q3, [x11, #32]
+    ldp     q4, q5, [x11, #64]
+    ldp     q6, q7, [x11, #96]
+    add     x11, x11, x3
+    orr     v24.16b, v24.16b, v0.16b
+    orr     v25.16b, v25.16b, v1.16b
+    orr     v26.16b, v26.16b, v2.16b
+    orr     v27.16b, v27.16b, v3.16b
+    orr     v28.16b, v28.16b, v4.16b
+    orr     v29.16b, v29.16b, v5.16b
+    orr     v30.16b, v30.16b, v6.16b
+    orr     v31.16b, v31.16b, v7.16b
+    subs    x4, x4, #1
+    b.ne    1b
+    movi    v0.16b, #1
+    umin    v16.16b, v16.16b, v0.16b
+    umin    v17.16b, v17.16b, v0.16b
+    umin    v18.16b, v18.16b, v0.16b
+    umin    v19.16b, v19.16b, v0.16b
+    umin    v20.16b, v20.16b, v0.16b
+    umin    v21.16b, v21.16b, v0.16b
+    umin    v22.16b, v22.16b, v0.16b
+    umin    v23.16b, v23.16b, v0.16b
+    umin    v24.16b, v24.16b, v0.16b
+    umin    v25.16b, v25.16b, v0.16b
+    umin    v26.16b, v26.16b, v0.16b
+    umin    v27.16b, v27.16b, v0.16b
+    umin    v28.16b, v28.16b, v0.16b
+    umin    v29.16b, v29.16b, v0.16b
+    umin    v30.16b, v30.16b, v0.16b
+    umin    v31.16b, v31.16b, v0.16b
+    add     x7, x1, x6
+    stp     q24, q25, [x7]
+    stp     q26, q27, [x7, #32]
+    stp     q28, q29, [x7, #64]
+    stp     q30, q31, [x7, #96]
+    stp     q16, q17, [x1]
+    stp     q18, q19, [x1, #32]
+    stp     q20, q21, [x1, #64]
+    stp     q22, q23, [x1, #96]
+    b       Ldone
 
 .section __TEXT,__const
 .p2align 4
