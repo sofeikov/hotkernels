@@ -93,3 +93,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.001x [0.999 – 1.003]
 - **Kept:** no
 - **Notes:** 1.3 ns at 16 either way. Load average 4.5.
+
+## 12. Two steps per trip in a group of two
+
+- **Idea:** the loop of a group of two leaves (256 elements is one such group) takes two steps per trip, as the single leaf does since attempt 5.
+- **check:** pass
+- **compare:** no significant difference, 1.000x [0.995 – 1.005]
+- **Kept:** no
+- **Notes:** 9.8 ns at 256 either way. A group of two is four chains of additions, bound by their latency, not by the loop's instructions. Load average 6.3.
