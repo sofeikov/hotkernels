@@ -93,6 +93,17 @@
     faddp   v\a\().2d, v\a\().2d, v\c\().2d
 .endm
 
+// One step of one leaf of a group: its vector \k after the pointer \p into
+// its running sums v\a, v\b, v\c, v\d.
+.macro DSTEP p, k, a, b, c, d
+    ldp     q0, q1, [\p, #\k * VEC]
+    ldp     q2, q3, [\p, #\k * VEC + 32]
+    fadd    v\a\().2d, v\a\().2d, v0.2d
+    fadd    v\b\().2d, v\b\().2d, v1.2d
+    fadd    v\c\().2d, v\c\().2d, v2.2d
+    fadd    v\d\().2d, v\d\().2d, v3.2d
+.endm
+
 .text
 .globl _sum_f64
 .p2align 2
@@ -244,6 +255,54 @@ Lq_setup:
     movi    v29.2d, #0
     movi    v30.2d, #0
     movi    v31.2d, #0
+    // When q is even, leaves whose starts are a multiple of 4 vectors apart
+    // are common, and the L1 serves loads of the same offset in different
+    // 256-byte blocks at once slowly (sum_f32's log). So 8 steps are taken in
+    // a diagonal order: leaf j's step k beside leaf 0's step k + j.
+    tbnz    x8, #0, Lq_step
+    cmp     x8, #8
+    b.lo    Lq_step
+Lq_diag:
+    DSTEP   x6, 0, 16, 17, 18, 19
+    DSTEP   x6, 1, 16, 17, 18, 19
+    DSTEP   x10, 0, 20, 21, 22, 23
+    DSTEP   x6, 2, 16, 17, 18, 19
+    DSTEP   x10, 1, 20, 21, 22, 23
+    DSTEP   x11, 0, 24, 25, 26, 27
+    DSTEP   x6, 3, 16, 17, 18, 19
+    DSTEP   x10, 2, 20, 21, 22, 23
+    DSTEP   x11, 1, 24, 25, 26, 27
+    DSTEP   x12, 0, 28, 29, 30, 31
+    DSTEP   x6, 4, 16, 17, 18, 19
+    DSTEP   x10, 3, 20, 21, 22, 23
+    DSTEP   x11, 2, 24, 25, 26, 27
+    DSTEP   x12, 1, 28, 29, 30, 31
+    DSTEP   x6, 5, 16, 17, 18, 19
+    DSTEP   x10, 4, 20, 21, 22, 23
+    DSTEP   x11, 3, 24, 25, 26, 27
+    DSTEP   x12, 2, 28, 29, 30, 31
+    DSTEP   x6, 6, 16, 17, 18, 19
+    DSTEP   x10, 5, 20, 21, 22, 23
+    DSTEP   x11, 4, 24, 25, 26, 27
+    DSTEP   x12, 3, 28, 29, 30, 31
+    DSTEP   x6, 7, 16, 17, 18, 19
+    DSTEP   x10, 6, 20, 21, 22, 23
+    DSTEP   x11, 5, 24, 25, 26, 27
+    DSTEP   x12, 4, 28, 29, 30, 31
+    DSTEP   x10, 7, 20, 21, 22, 23
+    DSTEP   x11, 6, 24, 25, 26, 27
+    DSTEP   x12, 5, 28, 29, 30, 31
+    DSTEP   x11, 7, 24, 25, 26, 27
+    DSTEP   x12, 6, 28, 29, 30, 31
+    DSTEP   x12, 7, 28, 29, 30, 31
+    add     x6, x6, #8 * VEC
+    add     x10, x10, #8 * VEC
+    add     x11, x11, #8 * VEC
+    add     x12, x12, #8 * VEC
+    sub     x8, x8, #8
+    cmp     x8, #8
+    b.hs    Lq_diag
+    cbz     x8, Lq_extra
 Lq_step:
     STEP    x6, 16, 17, 18, 19
     STEP    x10, 20, 21, 22, 23
@@ -251,6 +310,7 @@ Lq_step:
     STEP    x12, 28, 29, 30, 31
     subs    x8, x8, #1
     b.ne    Lq_step
+Lq_extra:
     cbz     x7, Lq_sum
     ldp     x0, x1, [sp, #EXTRAS]
     ldp     x10, x11, [sp, #EXTRAS + 16]

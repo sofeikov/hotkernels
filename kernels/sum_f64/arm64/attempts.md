@@ -21,3 +21,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.073x [1.072 – 1.074]
 - **Kept:** yes
 - **Notes:** 1.23x at 256, 1.33x at 1,024, 1.29x at 4,096 (272 ns), 1.23x at 16,384; but 0.96x to 0.97x from 65,536 up, beyond the first-level cache, where the baseline's one leaf at a time ran at the speed of the naive C. Load average 4.2.
+
+## 3. Four leaves in a diagonal order when q is even
+
+- **Idea:** float32's attempt 3: when q is even, eight steps at a time in a diagonal order, leaf j's step k beside leaf 0's step k + j, so that loads issued together sit at different offsets of their 256-byte blocks.
+- **check:** pass
+- **compare:** significantly faster, 1.028x [1.019 – 1.036]
+- **Kept:** yes
+- **Notes:** 1.08x at 1,024 and 16,384, 1.09x at 4,096 (251 ns); 1.01x to 1.02x from 65,536 to 1,048,576. Load average 4.0.
