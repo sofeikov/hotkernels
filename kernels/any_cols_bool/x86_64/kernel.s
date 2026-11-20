@@ -50,6 +50,11 @@
 .Lstep:
     .byte 0, 32, 32, 30, 32, 30, 30, 28, 32, 27, 30, 22, 24, 26, 28, 30
     .byte 32, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+# Where .Lstep lies from .Lshift, so that a register holding the address of
+# .Lshift reaches both tables. It is a constant of its own because clang's
+# assembler, which builds the wheels, takes one symbol in a memory operand and
+# refuses the difference of two written there; GNU as, the judge's, takes both.
+.set STEP_AT, .Lstep - .Lshift
 
 # Bytes in one vector, which is the columns in one strip.
 .set VEC, 32
@@ -184,7 +189,7 @@ any_cols_bool:
     xor     edx, edx
     div     rcx
     sub     r8, rdx                     # the bytes in whole rows
-    movzx   r10d, byte ptr [r9 + rcx + (.Lstep - .Lshift)]     # step
+    movzx   r10d, byte ptr [r9 + rcx + STEP_AT]     # step
     cmp     r8, VEC
     jb      .Ltiny
     lea     r11, [rdi + r8 - VEC]       # the last address a vector can be loaded from
