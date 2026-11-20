@@ -386,6 +386,46 @@
     faddp   d0, v16.2d
 .endm
 
+// Sum the eight leaves of a node of x7 = 68..128 vectors at x6 one after
+// another into d0; x6 ends after the node. Uses x0, x1, x6..x8, x10..x17,
+// v0..v3, v16..v27.
+.macro OCTO_SEQ
+    lsr     x13, x7, #1                 // b4
+    lsr     x11, x13, #1                // b2
+    sub     x0, x7, x13
+    add     x15, x13, x0, lsr #1        // b6
+    lsr     x10, x11, #1                // b1
+    sub     x0, x13, x11
+    add     x12, x11, x0, lsr #1        // b3
+    sub     x0, x15, x13
+    add     x1, x13, x0, lsr #1         // b5
+    sub     x0, x7, x15
+    add     x16, x15, x0, lsr #1        // b7
+    add     x10, x6, x10, lsl #6
+    add     x11, x6, x11, lsl #6
+    add     x12, x6, x12, lsl #6
+    add     x13, x6, x13, lsl #6
+    add     x1, x6, x1, lsl #6
+    add     x15, x6, x15, lsl #6
+    add     x16, x6, x16, lsl #6
+    add     x17, x6, x7, lsl #6
+    LEAFAT  x10, 20
+    LEAFAT  x11, 21
+    LEAFAT  x12, 22
+    LEAFAT  x13, 23
+    LEAFAT  x1, 24
+    LEAFAT  x15, 25
+    LEAFAT  x16, 26
+    LEAFAT  x17, 27
+    fadd    d20, d20, d21
+    fadd    d22, d22, d23
+    fadd    d24, d24, d25
+    fadd    d26, d26, d27
+    fadd    d20, d20, d22
+    fadd    d24, d24, d26
+    fadd    d0, d20, d24
+.endm
+
 .text
 .globl _sum_f64
 .p2align 2
@@ -593,6 +633,10 @@ Lplain_long:
     b.ls    Lsplit
     cmp     x7, #128
     b.ls    Locto_seq
+    cmp     x7, #135
+    b.ls    Lsplit
+    cmp     x7, #256
+    b.ls    Locto2_seq
     b       Lsplit
 Lleaf:
     cmp     x14, #2
@@ -818,40 +862,7 @@ Lquad_seq:  // 34..64 vectors: four leaves
     b       Lpush
 
 Locto_seq:  // 68..128 vectors: eight leaves
-    lsr     x13, x7, #1                 // b4
-    lsr     x11, x13, #1                // b2
-    sub     x0, x7, x13
-    add     x15, x13, x0, lsr #1        // b6
-    lsr     x10, x11, #1                // b1
-    sub     x0, x13, x11
-    add     x12, x11, x0, lsr #1        // b3
-    sub     x0, x15, x13
-    add     x1, x13, x0, lsr #1         // b5
-    sub     x0, x7, x15
-    add     x16, x15, x0, lsr #1        // b7
-    add     x10, x6, x10, lsl #6
-    add     x11, x6, x11, lsl #6
-    add     x12, x6, x12, lsl #6
-    add     x13, x6, x13, lsl #6
-    add     x1, x6, x1, lsl #6
-    add     x15, x6, x15, lsl #6
-    add     x16, x6, x16, lsl #6
-    add     x17, x6, x7, lsl #6
-    LEAFAT  x10, 20
-    LEAFAT  x11, 21
-    LEAFAT  x12, 22
-    LEAFAT  x13, 23
-    LEAFAT  x1, 24
-    LEAFAT  x15, 25
-    LEAFAT  x16, 26
-    LEAFAT  x17, 27
-    fadd    d20, d20, d21
-    fadd    d22, d22, d23
-    fadd    d24, d24, d25
-    fadd    d26, d26, d27
-    fadd    d20, d20, d22
-    fadd    d24, d24, d26
-    fadd    d0, d20, d24
+    OCTO_SEQ
     b       Lpush
 
 Lquad4:     // 136..256 vectors: four groups of four, one after the other
@@ -895,6 +906,18 @@ Lquad2:     // 68..128 vectors: two groups of four, one after the other, so
     mov     x7, x16
     QUAD
     fadd    d0, d5, d0
+    b       Lpush
+
+Locto2_seq: // 136..256 vectors: two nodes of eight leaves, one after the other
+    lsr     x8, x7, #1
+    sub     x9, x7, x8                  // the right node, which starts where
+    mov     x7, x8                      // the left one ends
+    OCTO_SEQ
+    fmov    d5, d0
+    mov     x7, x9
+    OCTO_SEQ
+    fadd    d0, d5, d0
+    add     x9, sp, #NODES              // the bottom of the node stack, borrowed
     b       Lpush
 
 Ldone:

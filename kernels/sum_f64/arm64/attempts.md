@@ -131,3 +131,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.005x [1.000 – 1.009]
 - **Kept:** yes
 - **Notes:** 1.02x at 4,096 (239 ns), 1.03x at 16,384, nothing elsewhere. Load average 22, from other work: rough.
+
+## 16. Sixteen leaves in sequence beyond the first-level cache
+
+- **Idea:** attempt 12 one level up: a node of 136 to 256 vectors is two nodes of eight leaves summed one after the other, the walk passing once per 2,048 elements.
+- **check:** pass
+- **compare:** significantly faster, 1.004x [1.004 – 1.004]
+- **Kept:** yes
+- **Notes:** 1.02x at 65,536 and 262,144, 1.01x at 1,048,576, nothing elsewhere. Load average 18.
