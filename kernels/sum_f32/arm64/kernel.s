@@ -50,7 +50,9 @@
 .set SUMS, 96                   // stack of sums, 4 bytes each
 .set NODES, 352                 // node stack, 16 bytes a node
 .set LONG, 2400                 // non-zero when the array is beyond the L1
-.set FRAME, 2416
+.set SAVED, 2408                // the right group of two in sequence: start, length
+.set PART, 2424                 // and the sum of the left one
+.set FRAME, 2432
 // From this many elements (128 KB, the first-level cache of a performance
 // core) the groups of eight read their leaves 64 bytes at a time.
 .set LONG_N, 32768
@@ -143,6 +145,317 @@
     faddp   v18.4s, v18.4s, v19.4s
     faddp   v16.4s, v16.4s, v18.4s      // halves of leaf 0, of leaf 1
     faddp   v16.4s, v16.4s, v16.4s      // leaf 0, leaf 1
+    faddp   s0, v16.2s
+.endm
+
+// Sum a group of eight leaves, x7 = m of 68..128 vectors at x6, into s0.
+// Uses x0, x1, x6..x8, x10..x17, v0..v7, v16..v31 and the frame.
+.macro OCTO
+    lsr     x8, x7, #3                  // q
+    lsr     x13, x7, #1                 // b4
+    lsr     x11, x13, #1                // b2
+    sub     x0, x7, x13
+    add     x15, x13, x0, lsr #1        // b6
+    lsr     x10, x11, #1                // b1
+    sub     x0, x13, x11
+    add     x12, x11, x0, lsr #1        // b3
+    sub     x0, x15, x13
+    add     x14, x13, x0, lsr #1        // b5
+    sub     x0, x7, x15
+    add     x16, x15, x0, lsr #1        // b7
+    add     x10, x6, x10, lsl #5
+    add     x11, x6, x11, lsl #5
+    add     x12, x6, x12, lsl #5
+    add     x13, x6, x13, lsl #5
+    add     x14, x6, x14, lsl #5
+    add     x15, x6, x15, lsl #5
+    add     x16, x6, x16, lsl #5
+    add     x17, x6, x7, lsl #5
+    // Beyond the first-level cache, ask for the first line of each leaf of
+    // the next group, which is as long as this one and starts where it ends.
+    ldr     x0, [sp, #LONG]
+    cbz     x0, 1f
+    sub     x0, x17, x6
+    prfm    pldl1keep, [x6, x0]
+    prfm    pldl1keep, [x10, x0]
+    prfm    pldl1keep, [x11, x0]
+    prfm    pldl1keep, [x12, x0]
+    prfm    pldl1keep, [x13, x0]
+    prfm    pldl1keep, [x14, x0]
+    prfm    pldl1keep, [x15, x0]
+    prfm    pldl1keep, [x16, x0]
+1:
+    lsl     x1, x8, #5
+    ands    x7, x7, #7                  // 0: every leaf has q vectors
+    b.eq    2f
+    add     x7, sp, #ZERO
+    EXTRA   0, x6, x10
+    EXTRA   1, x10, x11
+    EXTRA   2, x11, x12
+    EXTRA   3, x12, x13
+    EXTRA   4, x13, x14
+    EXTRA   5, x14, x15
+    EXTRA   6, x15, x16
+    EXTRA   7, x16, x17
+2:
+    // The running sums start at +0.0, which changes no sum but the sign of
+    // a zero (see the header), so every step is alike.
+    movi    v16.2d, #0
+    movi    v17.2d, #0
+    movi    v18.2d, #0
+    movi    v19.2d, #0
+    movi    v20.2d, #0
+    movi    v21.2d, #0
+    movi    v22.2d, #0
+    movi    v23.2d, #0
+    movi    v24.2d, #0
+    movi    v25.2d, #0
+    movi    v26.2d, #0
+    movi    v27.2d, #0
+    movi    v28.2d, #0
+    movi    v29.2d, #0
+    movi    v30.2d, #0
+    movi    v31.2d, #0
+    // When q is even, leaves whose starts are a multiple of 8 vectors apart
+    // are common, and the L1 serves loads of the same 32 bytes of different
+    // 256-byte blocks at once slowly. So 8 steps are taken in a diagonal
+    // order: leaf j's step k beside leaf 0's step k + j.
+    tbnz    x8, #0, 5f
+    cmp     x8, #8
+    b.lo    5f
+    ldr     x0, [sp, #LONG]
+    cbz     x0, 4f
+    cmp     x8, #16
+    b.lo    4f
+3:
+    DSTEP2  16, 17, x6, 0
+    DSTEP2  16, 17, x6, 1
+    DSTEP2  18, 19, x10, 0
+    DSTEP2  16, 17, x6, 2
+    DSTEP2  18, 19, x10, 1
+    DSTEP2  20, 21, x11, 0
+    DSTEP2  16, 17, x6, 3
+    DSTEP2  18, 19, x10, 2
+    DSTEP2  20, 21, x11, 1
+    DSTEP2  22, 23, x12, 0
+    DSTEP2  16, 17, x6, 4
+    DSTEP2  18, 19, x10, 3
+    DSTEP2  20, 21, x11, 2
+    DSTEP2  22, 23, x12, 1
+    DSTEP2  24, 25, x13, 0
+    DSTEP2  16, 17, x6, 5
+    DSTEP2  18, 19, x10, 4
+    DSTEP2  20, 21, x11, 3
+    DSTEP2  22, 23, x12, 2
+    DSTEP2  24, 25, x13, 1
+    DSTEP2  26, 27, x14, 0
+    DSTEP2  16, 17, x6, 6
+    DSTEP2  18, 19, x10, 5
+    DSTEP2  20, 21, x11, 4
+    DSTEP2  22, 23, x12, 3
+    DSTEP2  24, 25, x13, 2
+    DSTEP2  26, 27, x14, 1
+    DSTEP2  28, 29, x15, 0
+    DSTEP2  16, 17, x6, 7
+    DSTEP2  18, 19, x10, 6
+    DSTEP2  20, 21, x11, 5
+    DSTEP2  22, 23, x12, 4
+    DSTEP2  24, 25, x13, 3
+    DSTEP2  26, 27, x14, 2
+    DSTEP2  28, 29, x15, 1
+    DSTEP2  30, 31, x16, 0
+    DSTEP2  18, 19, x10, 7
+    DSTEP2  20, 21, x11, 6
+    DSTEP2  22, 23, x12, 5
+    DSTEP2  24, 25, x13, 4
+    DSTEP2  26, 27, x14, 3
+    DSTEP2  28, 29, x15, 2
+    DSTEP2  30, 31, x16, 1
+    DSTEP2  20, 21, x11, 7
+    DSTEP2  22, 23, x12, 6
+    DSTEP2  24, 25, x13, 5
+    DSTEP2  26, 27, x14, 4
+    DSTEP2  28, 29, x15, 3
+    DSTEP2  30, 31, x16, 2
+    DSTEP2  22, 23, x12, 7
+    DSTEP2  24, 25, x13, 6
+    DSTEP2  26, 27, x14, 5
+    DSTEP2  28, 29, x15, 4
+    DSTEP2  30, 31, x16, 3
+    DSTEP2  24, 25, x13, 7
+    DSTEP2  26, 27, x14, 6
+    DSTEP2  28, 29, x15, 5
+    DSTEP2  30, 31, x16, 4
+    DSTEP2  26, 27, x14, 7
+    DSTEP2  28, 29, x15, 6
+    DSTEP2  30, 31, x16, 5
+    DSTEP2  28, 29, x15, 7
+    DSTEP2  30, 31, x16, 6
+    DSTEP2  30, 31, x16, 7
+    add     x6, x6, #16 * VEC
+    add     x10, x10, #16 * VEC
+    add     x11, x11, #16 * VEC
+    add     x12, x12, #16 * VEC
+    add     x13, x13, #16 * VEC
+    add     x14, x14, #16 * VEC
+    add     x15, x15, #16 * VEC
+    add     x16, x16, #16 * VEC
+    sub     x8, x8, #16
+    cbz     x8, 7f
+    cmp     x8, #8
+    b.lo    5f
+4:
+    DSTEP   16, 17, x6, 0
+    DSTEP   16, 17, x6, 1
+    DSTEP   18, 19, x10, 0
+    DSTEP   16, 17, x6, 2
+    DSTEP   18, 19, x10, 1
+    DSTEP   20, 21, x11, 0
+    DSTEP   16, 17, x6, 3
+    DSTEP   18, 19, x10, 2
+    DSTEP   20, 21, x11, 1
+    DSTEP   22, 23, x12, 0
+    DSTEP   16, 17, x6, 4
+    DSTEP   18, 19, x10, 3
+    DSTEP   20, 21, x11, 2
+    DSTEP   22, 23, x12, 1
+    DSTEP   24, 25, x13, 0
+    DSTEP   16, 17, x6, 5
+    DSTEP   18, 19, x10, 4
+    DSTEP   20, 21, x11, 3
+    DSTEP   22, 23, x12, 2
+    DSTEP   24, 25, x13, 1
+    DSTEP   26, 27, x14, 0
+    DSTEP   16, 17, x6, 6
+    DSTEP   18, 19, x10, 5
+    DSTEP   20, 21, x11, 4
+    DSTEP   22, 23, x12, 3
+    DSTEP   24, 25, x13, 2
+    DSTEP   26, 27, x14, 1
+    DSTEP   28, 29, x15, 0
+    DSTEP   16, 17, x6, 7
+    DSTEP   18, 19, x10, 6
+    DSTEP   20, 21, x11, 5
+    DSTEP   22, 23, x12, 4
+    DSTEP   24, 25, x13, 3
+    DSTEP   26, 27, x14, 2
+    DSTEP   28, 29, x15, 1
+    DSTEP   30, 31, x16, 0
+    DSTEP   18, 19, x10, 7
+    DSTEP   20, 21, x11, 6
+    DSTEP   22, 23, x12, 5
+    DSTEP   24, 25, x13, 4
+    DSTEP   26, 27, x14, 3
+    DSTEP   28, 29, x15, 2
+    DSTEP   30, 31, x16, 1
+    DSTEP   20, 21, x11, 7
+    DSTEP   22, 23, x12, 6
+    DSTEP   24, 25, x13, 5
+    DSTEP   26, 27, x14, 4
+    DSTEP   28, 29, x15, 3
+    DSTEP   30, 31, x16, 2
+    DSTEP   22, 23, x12, 7
+    DSTEP   24, 25, x13, 6
+    DSTEP   26, 27, x14, 5
+    DSTEP   28, 29, x15, 4
+    DSTEP   30, 31, x16, 3
+    DSTEP   24, 25, x13, 7
+    DSTEP   26, 27, x14, 6
+    DSTEP   28, 29, x15, 5
+    DSTEP   30, 31, x16, 4
+    DSTEP   26, 27, x14, 7
+    DSTEP   28, 29, x15, 6
+    DSTEP   30, 31, x16, 5
+    DSTEP   28, 29, x15, 7
+    DSTEP   30, 31, x16, 6
+    DSTEP   30, 31, x16, 7
+    add     x6, x6, #8 * VEC
+    add     x10, x10, #8 * VEC
+    add     x11, x11, #8 * VEC
+    add     x12, x12, #8 * VEC
+    add     x13, x13, #8 * VEC
+    add     x14, x14, #8 * VEC
+    add     x15, x15, #8 * VEC
+    add     x16, x16, #8 * VEC
+    sub     x8, x8, #8
+    cmp     x8, #8
+    b.hs    4b
+5:
+    cbz     x8, 7f
+6:
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x10], #VEC
+    ldp     q4, q5, [x11], #VEC
+    ldp     q6, q7, [x12], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    fadd    v18.4s, v18.4s, v2.4s
+    fadd    v19.4s, v19.4s, v3.4s
+    fadd    v20.4s, v20.4s, v4.4s
+    fadd    v21.4s, v21.4s, v5.4s
+    fadd    v22.4s, v22.4s, v6.4s
+    fadd    v23.4s, v23.4s, v7.4s
+    ldp     q0, q1, [x13], #VEC
+    ldp     q2, q3, [x14], #VEC
+    ldp     q4, q5, [x15], #VEC
+    ldp     q6, q7, [x16], #VEC
+    fadd    v24.4s, v24.4s, v0.4s
+    fadd    v25.4s, v25.4s, v1.4s
+    fadd    v26.4s, v26.4s, v2.4s
+    fadd    v27.4s, v27.4s, v3.4s
+    fadd    v28.4s, v28.4s, v4.4s
+    fadd    v29.4s, v29.4s, v5.4s
+    fadd    v30.4s, v30.4s, v6.4s
+    fadd    v31.4s, v31.4s, v7.4s
+    subs    x8, x8, #1
+    b.ne    6b
+7:
+    cbz     x7, 8f
+    ldp     x0, x1, [sp, #EXTRAS]
+    ldp     x10, x11, [sp, #EXTRAS + 16]
+    ldp     q0, q1, [x0]
+    ldp     q2, q3, [x1]
+    ldp     q4, q5, [x10]
+    ldp     q6, q7, [x11]
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    fadd    v18.4s, v18.4s, v2.4s
+    fadd    v19.4s, v19.4s, v3.4s
+    fadd    v20.4s, v20.4s, v4.4s
+    fadd    v21.4s, v21.4s, v5.4s
+    fadd    v22.4s, v22.4s, v6.4s
+    fadd    v23.4s, v23.4s, v7.4s
+    ldp     x0, x1, [sp, #EXTRAS + 32]
+    ldp     x10, x11, [sp, #EXTRAS + 48]
+    ldp     q0, q1, [x0]
+    ldp     q2, q3, [x1]
+    ldp     q4, q5, [x10]
+    ldp     q6, q7, [x11]
+    fadd    v24.4s, v24.4s, v0.4s
+    fadd    v25.4s, v25.4s, v1.4s
+    fadd    v26.4s, v26.4s, v2.4s
+    fadd    v27.4s, v27.4s, v3.4s
+    fadd    v28.4s, v28.4s, v4.4s
+    fadd    v29.4s, v29.4s, v5.4s
+    fadd    v30.4s, v30.4s, v6.4s
+    fadd    v31.4s, v31.4s, v7.4s
+8:
+    faddp   v16.4s, v16.4s, v17.4s
+    faddp   v18.4s, v18.4s, v19.4s
+    faddp   v20.4s, v20.4s, v21.4s
+    faddp   v22.4s, v22.4s, v23.4s
+    faddp   v24.4s, v24.4s, v25.4s
+    faddp   v26.4s, v26.4s, v27.4s
+    faddp   v28.4s, v28.4s, v29.4s
+    faddp   v30.4s, v30.4s, v31.4s
+    faddp   v16.4s, v16.4s, v18.4s
+    faddp   v20.4s, v20.4s, v22.4s
+    faddp   v24.4s, v24.4s, v26.4s
+    faddp   v28.4s, v28.4s, v30.4s
+    faddp   v16.4s, v16.4s, v20.4s      // leaves 0..3
+    faddp   v24.4s, v24.4s, v28.4s      // leaves 4..7
+    faddp   v16.4s, v16.4s, v24.4s      // 0 + 1, 2 + 3, 4 + 5, 6 + 7
+    faddp   v16.4s, v16.4s, v16.4s      // (0 + 1) + (2 + 3), (4 + 5) + (6 + 7)
     faddp   s0, v16.2s
 .endm
 
@@ -298,6 +611,11 @@ Lplain:
     sub     x0, x7, #68
     cmp     x0, #128 - 68
     b.ls    Locto
+    // Two groups of eight one after the other: the walk mispredicts which
+    // of a node and a marker it pops next, so it should pass rarely.
+    sub     x0, x7, #136
+    cmp     x0, #256 - 136
+    b.ls    Locto2
     cmp     x7, #128
     b.hi    Lsplit
     cmp     x7, #16
@@ -406,312 +724,23 @@ Lq_sum:
     b       Lpush
 
 Locto:      // 68..128 vectors: eight leaves
-    lsr     x8, x7, #3                  // q
-    lsr     x13, x7, #1                 // b4
-    lsr     x11, x13, #1                // b2
-    sub     x0, x7, x13
-    add     x15, x13, x0, lsr #1        // b6
-    lsr     x10, x11, #1                // b1
-    sub     x0, x13, x11
-    add     x12, x11, x0, lsr #1        // b3
-    sub     x0, x15, x13
-    add     x14, x13, x0, lsr #1        // b5
-    sub     x0, x7, x15
-    add     x16, x15, x0, lsr #1        // b7
-    add     x10, x6, x10, lsl #5
-    add     x11, x6, x11, lsl #5
-    add     x12, x6, x12, lsl #5
-    add     x13, x6, x13, lsl #5
-    add     x14, x6, x14, lsl #5
-    add     x15, x6, x15, lsl #5
-    add     x16, x6, x16, lsl #5
-    add     x17, x6, x7, lsl #5
-    // Beyond the first-level cache, ask for the first line of each leaf of
-    // the next group, which is as long as this one and starts where it ends.
-    ldr     x0, [sp, #LONG]
-    cbz     x0, Lo_noprefetch
-    sub     x0, x17, x6
-    prfm    pldl1keep, [x6, x0]
-    prfm    pldl1keep, [x10, x0]
-    prfm    pldl1keep, [x11, x0]
-    prfm    pldl1keep, [x12, x0]
-    prfm    pldl1keep, [x13, x0]
-    prfm    pldl1keep, [x14, x0]
-    prfm    pldl1keep, [x15, x0]
-    prfm    pldl1keep, [x16, x0]
-Lo_noprefetch:
-    lsl     x1, x8, #5
-    ands    x7, x7, #7                  // 0: every leaf has q vectors
-    b.eq    Lo_setup
-    add     x7, sp, #ZERO
-    EXTRA   0, x6, x10
-    EXTRA   1, x10, x11
-    EXTRA   2, x11, x12
-    EXTRA   3, x12, x13
-    EXTRA   4, x13, x14
-    EXTRA   5, x14, x15
-    EXTRA   6, x15, x16
-    EXTRA   7, x16, x17
-Lo_setup:
-    // The running sums start at +0.0, which changes no sum but the sign of
-    // a zero (see the header), so every step is alike.
-    movi    v16.2d, #0
-    movi    v17.2d, #0
-    movi    v18.2d, #0
-    movi    v19.2d, #0
-    movi    v20.2d, #0
-    movi    v21.2d, #0
-    movi    v22.2d, #0
-    movi    v23.2d, #0
-    movi    v24.2d, #0
-    movi    v25.2d, #0
-    movi    v26.2d, #0
-    movi    v27.2d, #0
-    movi    v28.2d, #0
-    movi    v29.2d, #0
-    movi    v30.2d, #0
-    movi    v31.2d, #0
-    // When q is even, leaves whose starts are a multiple of 8 vectors apart
-    // are common, and the L1 serves loads of the same 32 bytes of different
-    // 256-byte blocks at once slowly. So 8 steps are taken in a diagonal
-    // order: leaf j's step k beside leaf 0's step k + j.
-    tbnz    x8, #0, Lo_plain
-    cmp     x8, #8
-    b.lo    Lo_plain
-    ldr     x0, [sp, #LONG]
-    cbz     x0, Lo_diag
-    cmp     x8, #16
-    b.lo    Lo_diag
-Lo_diag16:
-    DSTEP2  16, 17, x6, 0
-    DSTEP2  16, 17, x6, 1
-    DSTEP2  18, 19, x10, 0
-    DSTEP2  16, 17, x6, 2
-    DSTEP2  18, 19, x10, 1
-    DSTEP2  20, 21, x11, 0
-    DSTEP2  16, 17, x6, 3
-    DSTEP2  18, 19, x10, 2
-    DSTEP2  20, 21, x11, 1
-    DSTEP2  22, 23, x12, 0
-    DSTEP2  16, 17, x6, 4
-    DSTEP2  18, 19, x10, 3
-    DSTEP2  20, 21, x11, 2
-    DSTEP2  22, 23, x12, 1
-    DSTEP2  24, 25, x13, 0
-    DSTEP2  16, 17, x6, 5
-    DSTEP2  18, 19, x10, 4
-    DSTEP2  20, 21, x11, 3
-    DSTEP2  22, 23, x12, 2
-    DSTEP2  24, 25, x13, 1
-    DSTEP2  26, 27, x14, 0
-    DSTEP2  16, 17, x6, 6
-    DSTEP2  18, 19, x10, 5
-    DSTEP2  20, 21, x11, 4
-    DSTEP2  22, 23, x12, 3
-    DSTEP2  24, 25, x13, 2
-    DSTEP2  26, 27, x14, 1
-    DSTEP2  28, 29, x15, 0
-    DSTEP2  16, 17, x6, 7
-    DSTEP2  18, 19, x10, 6
-    DSTEP2  20, 21, x11, 5
-    DSTEP2  22, 23, x12, 4
-    DSTEP2  24, 25, x13, 3
-    DSTEP2  26, 27, x14, 2
-    DSTEP2  28, 29, x15, 1
-    DSTEP2  30, 31, x16, 0
-    DSTEP2  18, 19, x10, 7
-    DSTEP2  20, 21, x11, 6
-    DSTEP2  22, 23, x12, 5
-    DSTEP2  24, 25, x13, 4
-    DSTEP2  26, 27, x14, 3
-    DSTEP2  28, 29, x15, 2
-    DSTEP2  30, 31, x16, 1
-    DSTEP2  20, 21, x11, 7
-    DSTEP2  22, 23, x12, 6
-    DSTEP2  24, 25, x13, 5
-    DSTEP2  26, 27, x14, 4
-    DSTEP2  28, 29, x15, 3
-    DSTEP2  30, 31, x16, 2
-    DSTEP2  22, 23, x12, 7
-    DSTEP2  24, 25, x13, 6
-    DSTEP2  26, 27, x14, 5
-    DSTEP2  28, 29, x15, 4
-    DSTEP2  30, 31, x16, 3
-    DSTEP2  24, 25, x13, 7
-    DSTEP2  26, 27, x14, 6
-    DSTEP2  28, 29, x15, 5
-    DSTEP2  30, 31, x16, 4
-    DSTEP2  26, 27, x14, 7
-    DSTEP2  28, 29, x15, 6
-    DSTEP2  30, 31, x16, 5
-    DSTEP2  28, 29, x15, 7
-    DSTEP2  30, 31, x16, 6
-    DSTEP2  30, 31, x16, 7
-    add     x6, x6, #16 * VEC
-    add     x10, x10, #16 * VEC
-    add     x11, x11, #16 * VEC
-    add     x12, x12, #16 * VEC
-    add     x13, x13, #16 * VEC
-    add     x14, x14, #16 * VEC
-    add     x15, x15, #16 * VEC
-    add     x16, x16, #16 * VEC
-    sub     x8, x8, #16
-    cbz     x8, Lo_extra
-    cmp     x8, #8
-    b.lo    Lo_plain
-Lo_diag:
-    DSTEP   16, 17, x6, 0
-    DSTEP   16, 17, x6, 1
-    DSTEP   18, 19, x10, 0
-    DSTEP   16, 17, x6, 2
-    DSTEP   18, 19, x10, 1
-    DSTEP   20, 21, x11, 0
-    DSTEP   16, 17, x6, 3
-    DSTEP   18, 19, x10, 2
-    DSTEP   20, 21, x11, 1
-    DSTEP   22, 23, x12, 0
-    DSTEP   16, 17, x6, 4
-    DSTEP   18, 19, x10, 3
-    DSTEP   20, 21, x11, 2
-    DSTEP   22, 23, x12, 1
-    DSTEP   24, 25, x13, 0
-    DSTEP   16, 17, x6, 5
-    DSTEP   18, 19, x10, 4
-    DSTEP   20, 21, x11, 3
-    DSTEP   22, 23, x12, 2
-    DSTEP   24, 25, x13, 1
-    DSTEP   26, 27, x14, 0
-    DSTEP   16, 17, x6, 6
-    DSTEP   18, 19, x10, 5
-    DSTEP   20, 21, x11, 4
-    DSTEP   22, 23, x12, 3
-    DSTEP   24, 25, x13, 2
-    DSTEP   26, 27, x14, 1
-    DSTEP   28, 29, x15, 0
-    DSTEP   16, 17, x6, 7
-    DSTEP   18, 19, x10, 6
-    DSTEP   20, 21, x11, 5
-    DSTEP   22, 23, x12, 4
-    DSTEP   24, 25, x13, 3
-    DSTEP   26, 27, x14, 2
-    DSTEP   28, 29, x15, 1
-    DSTEP   30, 31, x16, 0
-    DSTEP   18, 19, x10, 7
-    DSTEP   20, 21, x11, 6
-    DSTEP   22, 23, x12, 5
-    DSTEP   24, 25, x13, 4
-    DSTEP   26, 27, x14, 3
-    DSTEP   28, 29, x15, 2
-    DSTEP   30, 31, x16, 1
-    DSTEP   20, 21, x11, 7
-    DSTEP   22, 23, x12, 6
-    DSTEP   24, 25, x13, 5
-    DSTEP   26, 27, x14, 4
-    DSTEP   28, 29, x15, 3
-    DSTEP   30, 31, x16, 2
-    DSTEP   22, 23, x12, 7
-    DSTEP   24, 25, x13, 6
-    DSTEP   26, 27, x14, 5
-    DSTEP   28, 29, x15, 4
-    DSTEP   30, 31, x16, 3
-    DSTEP   24, 25, x13, 7
-    DSTEP   26, 27, x14, 6
-    DSTEP   28, 29, x15, 5
-    DSTEP   30, 31, x16, 4
-    DSTEP   26, 27, x14, 7
-    DSTEP   28, 29, x15, 6
-    DSTEP   30, 31, x16, 5
-    DSTEP   28, 29, x15, 7
-    DSTEP   30, 31, x16, 6
-    DSTEP   30, 31, x16, 7
-    add     x6, x6, #8 * VEC
-    add     x10, x10, #8 * VEC
-    add     x11, x11, #8 * VEC
-    add     x12, x12, #8 * VEC
-    add     x13, x13, #8 * VEC
-    add     x14, x14, #8 * VEC
-    add     x15, x15, #8 * VEC
-    add     x16, x16, #8 * VEC
-    sub     x8, x8, #8
-    cmp     x8, #8
-    b.hs    Lo_diag
-Lo_plain:
-    cbz     x8, Lo_extra
-Lo_step:
-    ldp     q0, q1, [x6], #VEC
-    ldp     q2, q3, [x10], #VEC
-    ldp     q4, q5, [x11], #VEC
-    ldp     q6, q7, [x12], #VEC
-    fadd    v16.4s, v16.4s, v0.4s
-    fadd    v17.4s, v17.4s, v1.4s
-    fadd    v18.4s, v18.4s, v2.4s
-    fadd    v19.4s, v19.4s, v3.4s
-    fadd    v20.4s, v20.4s, v4.4s
-    fadd    v21.4s, v21.4s, v5.4s
-    fadd    v22.4s, v22.4s, v6.4s
-    fadd    v23.4s, v23.4s, v7.4s
-    ldp     q0, q1, [x13], #VEC
-    ldp     q2, q3, [x14], #VEC
-    ldp     q4, q5, [x15], #VEC
-    ldp     q6, q7, [x16], #VEC
-    fadd    v24.4s, v24.4s, v0.4s
-    fadd    v25.4s, v25.4s, v1.4s
-    fadd    v26.4s, v26.4s, v2.4s
-    fadd    v27.4s, v27.4s, v3.4s
-    fadd    v28.4s, v28.4s, v4.4s
-    fadd    v29.4s, v29.4s, v5.4s
-    fadd    v30.4s, v30.4s, v6.4s
-    fadd    v31.4s, v31.4s, v7.4s
-    subs    x8, x8, #1
-    b.ne    Lo_step
-Lo_extra:
-    cbz     x7, Lo_sum
-    ldp     x0, x1, [sp, #EXTRAS]
-    ldp     x10, x11, [sp, #EXTRAS + 16]
-    ldp     q0, q1, [x0]
-    ldp     q2, q3, [x1]
-    ldp     q4, q5, [x10]
-    ldp     q6, q7, [x11]
-    fadd    v16.4s, v16.4s, v0.4s
-    fadd    v17.4s, v17.4s, v1.4s
-    fadd    v18.4s, v18.4s, v2.4s
-    fadd    v19.4s, v19.4s, v3.4s
-    fadd    v20.4s, v20.4s, v4.4s
-    fadd    v21.4s, v21.4s, v5.4s
-    fadd    v22.4s, v22.4s, v6.4s
-    fadd    v23.4s, v23.4s, v7.4s
-    ldp     x0, x1, [sp, #EXTRAS + 32]
-    ldp     x10, x11, [sp, #EXTRAS + 48]
-    ldp     q0, q1, [x0]
-    ldp     q2, q3, [x1]
-    ldp     q4, q5, [x10]
-    ldp     q6, q7, [x11]
-    fadd    v24.4s, v24.4s, v0.4s
-    fadd    v25.4s, v25.4s, v1.4s
-    fadd    v26.4s, v26.4s, v2.4s
-    fadd    v27.4s, v27.4s, v3.4s
-    fadd    v28.4s, v28.4s, v4.4s
-    fadd    v29.4s, v29.4s, v5.4s
-    fadd    v30.4s, v30.4s, v6.4s
-    fadd    v31.4s, v31.4s, v7.4s
-Lo_sum:
-    faddp   v16.4s, v16.4s, v17.4s
-    faddp   v18.4s, v18.4s, v19.4s
-    faddp   v20.4s, v20.4s, v21.4s
-    faddp   v22.4s, v22.4s, v23.4s
-    faddp   v24.4s, v24.4s, v25.4s
-    faddp   v26.4s, v26.4s, v27.4s
-    faddp   v28.4s, v28.4s, v29.4s
-    faddp   v30.4s, v30.4s, v31.4s
-    faddp   v16.4s, v16.4s, v18.4s
-    faddp   v20.4s, v20.4s, v22.4s
-    faddp   v24.4s, v24.4s, v26.4s
-    faddp   v28.4s, v28.4s, v30.4s
-    faddp   v16.4s, v16.4s, v20.4s      // leaves 0..3
-    faddp   v24.4s, v24.4s, v28.4s      // leaves 4..7
-    faddp   v16.4s, v16.4s, v24.4s      // 0 + 1, 2 + 3, 4 + 5, 6 + 7
-    faddp   v16.4s, v16.4s, v16.4s      // (0 + 1) + (2 + 3), (4 + 5) + (6 + 7)
-    faddp   s0, v16.2s
+    OCTO
+    b       Lpush
+
+Locto2:     // 136..256 vectors: two groups of eight, one after the other
+    lsr     x8, x7, #1
+    sub     x0, x7, x8
+    add     x1, x6, x8, lsl #5
+    str     x1, [sp, #SAVED]
+    str     x0, [sp, #SAVED + 8]
+    mov     x7, x8
+    OCTO
+    str     s0, [sp, #PART]
+    ldr     x6, [sp, #SAVED]
+    ldr     x7, [sp, #SAVED + 8]
+    OCTO
+    ldr     s1, [sp, #PART]
+    fadd    s0, s1, s0
     b       Lpush
 
 Ldone_alone:

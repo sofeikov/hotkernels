@@ -181,3 +181,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.001x [0.996 – 1.005]
 - **Kept:** no
 - **Notes:** 1.01x at 4,096 and 16,384 within the noise of the whole. The setup of a group runs beside the previous group's loads. Load average 5.2.
+
+## 23. Two groups of eight in sequence
+
+- **Idea:** from `sum_f64`'s attempts 11 to 18: the walk pops a node or a combine marker after every group, and which comes next follows the bits of a counter, so its test is mispredicted about once a pass. A node of 136 to 256 vectors now has its two groups of eight summed one after the other, the first group's sum and the second's start kept in the frame, and the walk passes once per 2,048 elements instead of 1,024. The group of eight became a macro.
+- **check:** pass
+- **compare:** significantly faster, 1.005x [1.004 – 1.006]
+- **Kept:** yes
+- **Notes:** 1.02x at 4,096 (122 ns), 1.03x at 16,384, nothing beyond the first-level cache, where float32's groups of eight already pass once per 4 KB. Load average 9.4.
