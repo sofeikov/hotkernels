@@ -18,32 +18,34 @@
 # two 8-byte stores. Past the last set bit `tzcnt` returns 32: a pair the
 # write position does not advance over, and the next store overwrites it.
 #
-# A block with more goes through tables, eight elements (one group) at a
-# time. The group's byte of the word indexes a table of its positions, and
-# `vpshufb` spreads them into four registers of two (row, column) pairs each,
-# stored at the write position, which then advances by twice the group's
-# count. Every group stores 128 bytes for at most eight pairs.
+# A block with more goes eight elements (one group) at a time, and stores
+# four registers of two (row, column) pairs each at the write position, which
+# then advances by twice the group's count: 128 bytes for at most eight pairs.
 #
-# Wide rows (more than 8 elements after the clamp). The row and the column of
-# the block's first element are carried from block to block: the column
-# advances by 32 mod width and the row by 32 / width, plus one where the
-# column passes the width (one `div` on entry, then a compare and a `cmov`
-# per block). A sparse position p of the block is at column c + p of the
-# block's row r. Up to 32 elements a row, a table for the width gives the
-# row within the block and the column of c + p. Wider, a block either lies in
-# one row (c + 32 <= width: the pair is r and c + p, stored as they are) or
-# crosses one row end, where a compare of c + p with the width picks the next
-# row. A dense block adds each group's positions to (r, c), and a group that
-# runs past the end of a row (column + 8 > width, at most one end since
-# width > 8) adds (1, -width) to the pairs of the positions past it, chosen by
-# a byte compare of the positions.
+# The row r and the column c of each block's first element are carried from
+# block to block: the column advances by 32 mod width and the row by
+# 32 / width, plus one where the column passes the width (one `div` on entry,
+# then a compare, `cmov` and `sbb` per block). Position p of a block is at
+# column c + p of row r, until the row ends.
 #
-# Narrow rows (width 1 to 8). A block holds a whole number of rows, the most
-# that fit in 32 bytes (30 for width 3), and the word's bits past them are
-# cleared, so every block starts a row. The row within the block and the
-# column of each of its 32 positions are then fixed for the width and come
-# from tables: `vpshufb` looks them up for a group, and the block's first row
-# is added. A sparse block reads them one byte at a time.
+# Rows of up to 32 elements. c + p is below 64, and a table of 128 bytes for
+# the width holds the row (c + p) / width and the column (c + p) % width of
+# each, a byte each. A sparse position reads its two bytes. A dense group
+# loads the 16 bytes of the table at its first column, the (row, column)
+# bytes of its eight positions; the group's byte of the word indexes a table
+# of its positions, and one `vpshufb` picks the bytes of the positions present
+# out of the window, four more spread them into the four registers, and the
+# block's row is added.
+#
+# Wider rows. A sparse block either lies in one row (c + 32 <= width: the
+# pair is r and c + p, stored as they are) or crosses one row end, where a
+# compare of c + p with the width picks the next row. A dense group's byte
+# indexes a table of its positions, `vpbroadcastq` puts them in every
+# quadword and four `vpshufb` spread them into four registers of two
+# (0, position) pairs, to which (r, column of the group's first element) is
+# added. A group that runs past a row's end (column + 8 > width; only in a
+# block that does) adds (1, -width) to the pairs of the positions past it,
+# chosen by a byte compare of the positions.
 #
 # Stores stay inside the capacity: a block starting at element f is read only
 # when f + 32 <= n, at most 2f int64 are kept before it, and a block writes at
@@ -52,10 +54,9 @@
 
 # A block with more true elements than this goes through the tables.
 .set SPARSE_MAX, 4
-# Elements per block, and the largest width the narrow path takes.
+# Elements per block.
 .set BLOCK, 32
-.set NARROW_MAX, 8
-# The largest width with sparse tables: a block's c + p is below 2 * BLOCK.
+# The largest width with a table: a block's c + p is below 2 * BLOCK.
 .set TABLE_MAX, 32
 
 # One entry of the position table: for byte \m, the positions of its set bits
@@ -71,44 +72,29 @@
     .fill 8 - .Lcount, 1, 0
 .endm
 
-# The same positions for the narrow tables: each position o twice, as o and
-# o + 8, to look up its row (table bytes 0 to 7) and its column (bytes 8 to
-# 15) with one `vpshufb`.
+# The same positions for the table path: each position o as the two bytes
+# 2o and 2o + 1, to pick its (row, column) bytes out of a table window with
+# one `vpshufb`.
 .macro POSI_ENTRY m
     .set .Lcount, 0
     .irp bit, 0, 1, 2, 3, 4, 5, 6, 7
     .if ((\m) >> \bit) & 1
-    .byte \bit, \bit + 8
+    .byte 2 * \bit, 2 * \bit + 1
     .set .Lcount, .Lcount + 1
     .endif
     .endr
     .fill 16 - 2 * .Lcount, 1, 0
 .endm
 
-# The tables of one width \w, WIDTH_SIZE bytes. For narrow widths: for each
-# group k of a block, the row within the block of its eight positions 8k + o,
-# then their columns. For every width up to TABLE_MAX: j / w and j % w for
-# j = 0 to 63, the row and the column of the block's c + p.
-.macro WIDTH_TABLES w
-    .irp k, 0, 1, 2, 3
-    .irp o, 0, 1, 2, 3, 4, 5, 6, 7
-    .byte (8 * \k + \o) / \w
-    .endr
-    .irp o, 0, 1, 2, 3, 4, 5, 6, 7
-    .byte (8 * \k + \o) - ((8 * \k + \o) / \w) * \w
-    .endr
-    .endr
+# The table of one width \w, 128 bytes: for j = 0 to 63, the row j / w and
+# the column j % w, a byte each. A block whose first element is at column c
+# finds the pair of its position p at j = c + p.
+.macro WIDTH_TABLE w
     .set .Lj, 0
     .rept 2 * BLOCK
-    .byte .Lj / \w
+    .byte .Lj / \w, .Lj - (.Lj / \w) * \w
     .set .Lj, .Lj + 1
     .endr
-    .set .Lj, 0
-    .rept 2 * BLOCK
-    .byte .Lj - (.Lj / \w) * \w
-    .set .Lj, .Lj + 1
-    .endr
-    .fill 64, 1, 0
 .endm
 
 .section .rodata
@@ -129,22 +115,14 @@
 .Lwidths:
     .set .Lw, 1
     .rept TABLE_MAX
-    WIDTH_TABLES .Lw
+    WIDTH_TABLE .Lw
     .set .Lw, .Lw + 1
-    .endr
-# For each narrow width: elements in a block (whole rows), rows in a block.
-.Lrows:
-    .irp w, 1, 2, 3, 4, 5, 6, 7, 8
-    .byte (BLOCK / \w) * \w, BLOCK / \w
     .endr
 
 .set POSI_AT, .Lposi - .Ltables
 .set WIDTHS_AT, .Lwidths - .Ltables
-.set ROWS_AT, .Lrows - .Ltables
-# Size of one width's tables (a power of two), and offsets within them.
-.set WIDTH_SHIFT, 8
-.set ROW_OF, 64
-.set COL_OF, 128
+# Size of one width's table, as a power of two.
+.set WIDTH_SHIFT, 7
 
 # Spread controls, one 32-byte vector for each pair of pairs k = 0..3.
 # Wide: from a group's eight positions (in every quadword), position 2k to the
@@ -157,9 +135,9 @@
     .byte 2 * \k + 1
     .fill 7, 1, 0x80
 .endm
-# Narrow: from (row, column) byte pairs, pair 2k to the low lane and 2k + 1 to
+# Table: from (row, column) byte pairs, pair 2k to the low lane and 2k + 1 to
 # the high lane, row in the low quadword and column in the high one.
-.macro SPREAD_NARROW k
+.macro SPREAD_TABLE k
     .byte 4 * \k
     .fill 7, 1, 0x80
     .byte 4 * \k + 1
@@ -181,9 +159,9 @@
     .irp k, 0, 1, 2, 3
     SPREAD_WIDE \k
     .endr
-.Lspread_narrow:
+.Lspread_table:
     .irp k, 0, 1, 2, 3
-    SPREAD_NARROW \k
+    SPREAD_TABLE \k
     .endr
 .Lspread_mask:
     .irp k, 0, 1, 2, 3
@@ -197,15 +175,15 @@
 .set STEP_COL, -8                       # 32 mod width
 .set STEP_ROW, -16                      # -1 - 32 / width, for `sbb`
 
-# Sparse, with tables: the j-th position of eax. rbp = the width's tables
-# plus the block's first column, r13 = the block's first row.
+# Sparse, with a table: the j-th position of eax. r14 = the width's table
+# at the block's first column, r13 = the block's first row.
 .macro TABLE_SPARSE j
     tzcnt   r8d, eax
     blsr    eax, eax
-    movzx   edx, byte ptr [rbp + r8 + ROW_OF]
+    movzx   edx, byte ptr [r14 + r8 * 2]
     add     rdx, r13
     mov     [rsi + r9 * 8 + 16 * \j], rdx
-    movzx   edx, byte ptr [rbp + r8 + COL_OF]
+    movzx   edx, byte ptr [r14 + r8 * 2 + 1]
     mov     [rsi + r9 * 8 + 16 * \j + 8], rdx
 .endm
 
@@ -319,13 +297,15 @@
     jmp     .Lwide_next\j
 .endm
 
-# Narrow, dense: group j. \table holds the group's rows and columns;
-# ymm1 = (first row, 0, first row, 0).
-.macro NARROW_GROUP j, table
+# Dense, with a table: group j. The 16 bytes of the table from the group's
+# first column are the (row, column) bytes of its eight positions; the
+# positions present pick theirs out. ymm1 = (first row, 0, first row, 0).
+.macro TABLE_GROUP j
     GROUP_BYTE \j, edx
     lea     r8d, [rdx + rdx]
     vbroadcasti128 ymm2, xmmword ptr [r12 + r8 * 8 + POSI_AT]
-    vpshufb ymm2, \table, ymm2          # (row, column) bytes of each position
+    vbroadcasti128 ymm3, xmmword ptr [r14 + 16 * \j]
+    vpshufb ymm2, ymm3, ymm2
     vpshufb ymm3, ymm2, ymm8
     vpaddq  ymm3, ymm3, ymm1
     vmovdqu [rsi + r9 * 8], ymm3
@@ -378,15 +358,9 @@ nonzero_2d_bool:
     xor     r15d, r15d                  # and column
     lea     rbp, [r10 - 1]
     shl     rbp, WIDTH_SHIFT
-    lea     rbp, [r12 + rbp + WIDTHS_AT] # the width's tables, if it has them
-    vmovdqa ymm8, [rip + .Lspread_wide]
-    vmovdqa ymm9, [rip + .Lspread_wide + 32]
-    vmovdqa ymm10, [rip + .Lspread_wide + 64]
-    vmovdqa ymm11, [rip + .Lspread_wide + 96]
-    cmp     r10, NARROW_MAX
-    jbe     .Lnarrow_rows
+    lea     rbp, [r12 + rbp + WIDTHS_AT] # the width's table, if it has one
 
-    # Wide rows: the block's first element at row r13, column r15.
+    # The block's first element is at row r13, column r15.
     mov     eax, BLOCK                  # over 32 elements a row: 32 columns, no row
     xor     edx, edx
     cmp     r10, BLOCK
@@ -397,6 +371,51 @@ nonzero_2d_bool:
     mov     [rsp + STEP_COL], rax
     not     rdx
     mov     [rsp + STEP_ROW], rdx
+    cmp     r10, TABLE_MAX
+    ja      .Lwide_rows
+
+    # Rows of up to 32 elements: tables.
+    vmovdqa ymm8, [rip + .Lspread_table]
+    vmovdqa ymm9, [rip + .Lspread_table + 32]
+    vmovdqa ymm10, [rip + .Lspread_table + 64]
+    vmovdqa ymm11, [rip + .Lspread_table + 96]
+.p2align 5
+.Ltable_block:
+    BLOCK_WORD
+    popcnt  ecx, eax
+    lea     r14, [rbp + r15 * 2]        # the table at the block's column
+    cmp     ecx, SPARSE_MAX
+    ja      .Ltable_dense
+    TABLE_SPARSE 0
+    TABLE_SPARSE 1
+    TABLE_SPARSE 2
+    TABLE_SPARSE 3
+    lea     r9, [r9 + rcx * 2]
+.Ltable_advance:
+    add     r15, [rsp + STEP_COL]
+    mov     r14, r15
+    sub     r14, r10
+    cmovae  r15, r14
+    sbb     r13, [rsp + STEP_ROW]       # row + 32 / width + 1 - carry
+    add     r11, BLOCK
+    cmp     r11, rbx
+    jbe     .Ltable_block
+    jmp     .Lwide_tail
+.Ltable_dense:
+    vmovq   xmm1, r13
+    vinserti128 ymm1, ymm1, xmm1, 1
+    TABLE_GROUP 0
+    TABLE_GROUP 1
+    TABLE_GROUP 2
+    TABLE_GROUP 3
+    jmp     .Ltable_advance
+
+    # Rows of more than 32 elements.
+.Lwide_rows:
+    vmovdqa ymm8, [rip + .Lspread_wide]
+    vmovdqa ymm9, [rip + .Lspread_wide + 32]
+    vmovdqa ymm10, [rip + .Lspread_wide + 64]
+    vmovdqa ymm11, [rip + .Lspread_wide + 96]
     mov     eax, 1
     vmovq   xmm12, rax
     mov     rax, r10
@@ -405,33 +424,6 @@ nonzero_2d_bool:
     vinserti128 ymm12, ymm12, xmm12, 1  # (1, -width, 1, -width)
     vmovdqa ymm13, [rip + .Leight]
     vpaddq  ymm14, ymm12, ymm13
-    cmp     r10, TABLE_MAX
-    ja      .Lwide_block
-.p2align 5
-.Lmid_block:
-    BLOCK_WORD
-    popcnt  ecx, eax
-    cmp     ecx, SPARSE_MAX
-    ja      .Lwide_dense
-    mov     r14, rbp
-    add     rbp, r15
-    TABLE_SPARSE 0
-    TABLE_SPARSE 1
-    TABLE_SPARSE 2
-    TABLE_SPARSE 3
-    mov     rbp, r14
-    add     r9, rcx
-    add     r9, rcx
-.Lmid_advance:
-    add     r15, [rsp + STEP_COL]
-    mov     r14, r15
-    sub     r14, r10
-    cmovae  r15, r14
-    sbb     r13, [rsp + STEP_ROW]       # row + 32 / width + 1 - carry
-    add     r11, BLOCK
-    cmp     r11, rbx
-    jbe     .Lmid_block
-    jmp     .Lwide_tail
 .p2align 5
 .Lwide_block:
     BLOCK_WORD
@@ -466,7 +458,6 @@ nonzero_2d_bool:
     add     r9, rcx
     jmp     .Lwide_advance
 
-    # A dense block of either wide loop.
 .Lwide_dense:
     vmovq   xmm1, r13
     vpinsrq xmm1, xmm1, r15, 1
@@ -478,8 +469,6 @@ nonzero_2d_bool:
     ROW_GROUP 1
     ROW_GROUP 2
     ROW_GROUP 3
-    cmp     r10, TABLE_MAX
-    jbe     .Lmid_advance
     jmp     .Lwide_advance
 .Lwide_dense_cross:
     mov     r8, r15
@@ -487,8 +476,6 @@ nonzero_2d_bool:
     WIDE_GROUP 1
     WIDE_GROUP 2
     WIDE_GROUP 3
-    cmp     r10, TABLE_MAX
-    jbe     .Lmid_advance
     jmp     .Lwide_advance
     WIDE_CROSS 0
     WIDE_CROSS 1
@@ -499,50 +486,6 @@ nonzero_2d_bool:
     mov     rcx, r13
     mov     r8, r15
     jmp     .Ltail
-
-    # Narrow rows: blocks of r14 elements, rdx rows each.
-.Lnarrow_rows:
-    movzx   r14d, byte ptr [r12 + r10 * 2 + ROWS_AT - 2]
-    movzx   r15d, byte ptr [r12 + r10 * 2 + ROWS_AT - 1]
-    vbroadcasti128 ymm4, xmmword ptr [rbp]
-    vbroadcasti128 ymm5, xmmword ptr [rbp + 16]
-    vbroadcasti128 ymm6, xmmword ptr [rbp + 32]
-    vbroadcasti128 ymm7, xmmword ptr [rbp + 48]
-    vmovdqa ymm8, [rip + .Lspread_narrow]
-    vmovdqa ymm9, [rip + .Lspread_narrow + 32]
-    vmovdqa ymm10, [rip + .Lspread_narrow + 64]
-    vmovdqa ymm11, [rip + .Lspread_narrow + 96]
-    vpxor   xmm1, xmm1, xmm1
-    vmovq   xmm13, r15
-    vinserti128 ymm13, ymm13, xmm13, 1  # (rows, 0, rows, 0)
-.p2align 5
-.Lnarrow_block:
-    BLOCK_WORD
-    bzhi    eax, eax, r14d              # whole rows only
-    popcnt  ecx, eax
-    cmp     ecx, SPARSE_MAX
-    ja      .Lnarrow_dense
-    TABLE_SPARSE 0
-    TABLE_SPARSE 1
-    TABLE_SPARSE 2
-    TABLE_SPARSE 3
-    add     r9, rcx
-    add     r9, rcx
-.Lnarrow_advance:
-    vpaddq  ymm1, ymm1, ymm13
-    add     r13, r15
-    add     r11, r14
-    cmp     r11, rbx
-    jbe     .Lnarrow_block
-    mov     rcx, r13
-    xor     r8d, r8d
-    jmp     .Ltail
-.Lnarrow_dense:
-    NARROW_GROUP 0, ymm4
-    NARROW_GROUP 1, ymm5
-    NARROW_GROUP 2, ymm6
-    NARROW_GROUP 3, ymm7
-    jmp     .Lnarrow_advance
 
     # rcx = row and r8 = column of element r11, the first not done.
 .Ltail:

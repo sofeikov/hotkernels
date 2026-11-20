@@ -34,3 +34,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.006x [1.001 – 1.012]
 - **Kept:** yes
 - **Notes:** the only timed size it reaches is 16 elements: width 3 1.22x and 1.25x there, the other widths no significant difference.
+
+## 5. One table path for every width up to 32: a window of (row, column) bytes per dense group
+
+- **Idea:** with the block's column c carried, every position of a block is at c + p < 64. A table of 128 bytes per width (4 KB for widths 1 to 32) holds the row and the column of each c + p as two bytes. A dense group loads the 16 bytes of the table at its first column, the pairs of its eight positions, and one `vpshufb` with a table of byte indices (2o, 2o + 1 per position o present) picks those of its true elements; four `vpshufb` spread them into the four registers and the block's row is added. Sparse blocks read the same table. This replaces both the row-end path of widths 9 to 32, which width 22 took in a third of its groups, and the narrow blocks of whole rows, which left up to 4 of 32 bytes unused (30 for width 3).
+- **check:** pass
+- **compare:** significantly faster, 1.042x [1.036 – 1.049]
+- **Kept:** yes
+- **Notes:** sparse width 3 1.17x, dense width 22 1.07x, dense width 3 1.06x, sparse width 22 1.03x; widths 32 and 1,000 no significant difference (they do not take the new path, or take it as before). Micro-benchmark at 4,096, dense: width 22 0.158 to 0.122 ns per element, width 3 0.144 to 0.114.
