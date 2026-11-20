@@ -17,6 +17,10 @@
 # positions out of the word with `tzcnt` and `blsr`, and stores each pair with
 # two 8-byte stores. Past the last set bit `tzcnt` returns 32: a pair the
 # write position does not advance over, and the next store overwrites it.
+# After a sparse block the kernel looks at a window of two blocks, a 64-bit
+# word, and takes PAIR_MAX positions out of it if it has no more; a window
+# with more is taken one block at a time, and so is everything after a dense
+# block until the next sparse one. A dense stretch never pays for the window.
 #
 # A block with more goes eight elements (one group) at a time, and stores
 # four registers of two (row, column) pairs each at the write position, which
@@ -28,7 +32,7 @@
 # then a compare, `cmov` and `sbb` per block). Position p of a block is at
 # column c + p of row r, until the row ends.
 #
-# Rows of up to 32 elements. c + p is below 64, and a table of 128 bytes for
+# Rows of up to 64 elements. c + p is below 128, and a table of 256 bytes for
 # the width holds the row (c + p) / width and the column (c + p) % width of
 # each, a byte each. A sparse position reads its two bytes. A dense group
 # loads the 16 bytes of the table at its first column, the (row, column)
@@ -37,8 +41,9 @@
 # out of the window, four more spread them into the four registers, and the
 # block's row is added.
 #
-# Wider rows. A sparse block either lies in one row (c + 32 <= width: the
-# pair is r and c + p, stored as they are) or crosses one row end, where a
+# Wider rows. A sparse block or window either lies in one row (c + 32 or
+# c + 64 <= width: the pair is r and c + p, stored as they are) or crosses one
+# row end, where a
 # compare of c + p with the width picks the next row. A dense group's byte
 # indexes a table of its positions, `vpbroadcastq` puts them in every
 # quadword and four `vpshufb` spread them into four registers of two
@@ -48,16 +53,19 @@
 # chosen by a byte compare of the positions.
 #
 # Stores stay inside the capacity: a block starting at element f is read only
-# when f + 32 <= n, at most 2f int64 are kept before it, and a block writes at
-# most 2 * 32 int64 past that. The last 0 to 31 elements and matrices under
+# when f + 32 <= n (a window when f + 64 <= n), at most 2f int64 are kept
+# before it, and a block writes at most 2 * 32 int64 past that (a window
+# 2 * PAIR_MAX). The last 0 to 31 elements and matrices under
 # 32 elements are done one element at a time, as the reference does it.
 
 # A block with more true elements than this goes through the tables.
 .set SPARSE_MAX, 4
+# A window of two blocks with more than this is taken one block at a time.
+.set PAIR_MAX, 6
 # Elements per block.
 .set BLOCK, 32
-# The largest width with a table: a block's c + p is below 2 * BLOCK.
-.set TABLE_MAX, 32
+# The largest width with a table: a window's c + p is below 4 * BLOCK.
+.set TABLE_MAX, 64
 
 # One entry of the position table: for byte \m, the positions of its set bits
 # in ascending order, one byte each, zero past the count.
@@ -86,12 +94,12 @@
     .fill 16 - 2 * .Lcount, 1, 0
 .endm
 
-# The table of one width \w, 128 bytes: for j = 0 to 63, the row j / w and
+# The table of one width \w, 256 bytes: for j = 0 to 127, the row j / w and
 # the column j % w, a byte each. A block whose first element is at column c
 # finds the pair of its position p at j = c + p.
 .macro WIDTH_TABLE w
     .set .Lj, 0
-    .rept 2 * BLOCK
+    .rept 4 * BLOCK
     .byte .Lj / \w, .Lj - (.Lj / \w) * \w
     .set .Lj, .Lj + 1
     .endr
@@ -122,7 +130,7 @@
 .set POSI_AT, .Lposi - .Ltables
 .set WIDTHS_AT, .Lwidths - .Ltables
 # Size of one width's table, as a power of two.
-.set WIDTH_SHIFT, 7
+.set WIDTH_SHIFT, 8
 
 # Spread controls, one 32-byte vector for each pair of pairs k = 0..3.
 # Wide: from a group's eight positions (in every quadword), position 2k to the
@@ -174,12 +182,25 @@
 # Red-zone slots of the wide path, below the six saved registers.
 .set STEP_COL, -8                       # 32 mod width
 .set STEP_ROW, -16                      # -1 - 32 / width, for `sbb`
+.set PAIR_COL, -24                      # 64 mod width
+.set PAIR_ROW, -32                      # -1 - 64 / width
+
+# The row r13 and column r15 of the next block's first element, from the
+# block's or window's step: column + step mod width, row + step / width, plus
+# one where the column passes the width.
+.macro CARRY col, row
+    add     r15, [rsp + \col]
+    mov     r14, r15
+    sub     r14, r10
+    cmovae  r15, r14
+    sbb     r13, [rsp + \row]          # row + step / width + 1 - carry
+.endm
 
 # Sparse, with a table: the j-th position of eax. r14 = the width's table
 # at the block's first column, r13 = the block's first row.
-.macro TABLE_SPARSE j
-    tzcnt   r8d, eax
-    blsr    eax, eax
+.macro TABLE_SPARSE j, word=eax, pos=r8d
+    tzcnt   \pos, \word
+    blsr    \word, \word
     movzx   edx, byte ptr [r14 + r8 * 2]
     add     rdx, r13
     mov     [rsi + r9 * 8 + 16 * \j], rdx
@@ -188,9 +209,9 @@
 .endm
 
 # Sparse, wide, a block inside one row: row r13, column r15 + p.
-.macro ROW_SPARSE j
-    tzcnt   r8d, eax
-    blsr    eax, eax
+.macro ROW_SPARSE j, word=eax, pos=r8d
+    tzcnt   \pos, \word
+    blsr    \word, \word
     add     r8, r15
     mov     [rsi + r9 * 8 + 16 * \j], r13
     mov     [rsi + r9 * 8 + 16 * \j + 8], r8
@@ -198,9 +219,9 @@
 
 # Sparse, wide, a block that crosses a row's end: c + p past the width is
 # column c + p - width of the next row.
-.macro CROSS_SPARSE j
-    tzcnt   r8d, eax
-    blsr    eax, eax
+.macro CROSS_SPARSE j, word=eax, pos=r8d
+    tzcnt   \pos, \word
+    blsr    \word, \word
     add     r8, r15                     # c + p
     mov     r14, r8
     sub     r14, r10                    # carry: still in the block's row
@@ -322,11 +343,22 @@
     lea     r9, [r9 + rdx * 2]
 .endm
 
-# The mask word of the block at r11 in eax, its count in ecx.
+# The mask word of the block at r11 in eax.
 .macro BLOCK_WORD
     vpcmpeqb ymm3, ymm0, [rdi + r11]    # 0xff where the mask byte is zero
     vpmovmskb eax, ymm3
     not     eax                         # one bit per true element
+.endm
+
+# The mask word of the two blocks at r11 in rax, the first in the low half.
+.macro PAIR_WORD
+    vpcmpeqb ymm3, ymm0, [rdi + r11]
+    vpcmpeqb ymm4, ymm0, [rdi + r11 + BLOCK]
+    vpmovmskb eax, ymm3
+    vpmovmskb ecx, ymm4
+    shl     rcx, 32
+    or      rax, rcx
+    not     rax
 .endm
 
 .text
@@ -371,19 +403,57 @@ nonzero_2d_bool:
     mov     [rsp + STEP_COL], rax
     not     rdx
     mov     [rsp + STEP_ROW], rdx
+    mov     eax, 2 * BLOCK
+    xor     edx, edx
+    cmp     r10, 2 * BLOCK
+    ja      .Lpair_steps
+    div     r10d
+    xchg    eax, edx
+.Lpair_steps:
+    mov     [rsp + PAIR_COL], rax
+    not     rdx
+    mov     [rsp + PAIR_ROW], rdx
     cmp     r10, TABLE_MAX
     ja      .Lwide_rows
 
-    # Rows of up to 32 elements: tables.
+    # Rows of up to 64 elements: tables. Two loop heads: a window of two
+    # blocks while they are sparse, one block while they are dense.
     vmovdqa ymm8, [rip + .Lspread_table]
     vmovdqa ymm9, [rip + .Lspread_table + 32]
     vmovdqa ymm10, [rip + .Lspread_table + 64]
     vmovdqa ymm11, [rip + .Lspread_table + 96]
 .p2align 5
+.Ltable_pair:
+    lea     rax, [r11 + BLOCK]
+    cmp     rax, rbx
+    ja      .Ltable_block               # no room for two blocks
+    PAIR_WORD
+    popcnt  rcx, rax
+    lea     r14, [rbp + r15 * 2]        # the table at the window's column
+    cmp     ecx, PAIR_MAX
+    ja      .Ltable_split
+    TABLE_SPARSE 0, rax, r8
+    TABLE_SPARSE 1, rax, r8
+    TABLE_SPARSE 2, rax, r8
+    TABLE_SPARSE 3, rax, r8
+    TABLE_SPARSE 4, rax, r8
+    TABLE_SPARSE 5, rax, r8
+    lea     r9, [r9 + rcx * 2]
+    CARRY   PAIR_COL, PAIR_ROW
+    add     r11, 2 * BLOCK
+    jmp     .Ltable_pair
+.Ltable_split:
+    popcnt  ecx, eax                    # the first block alone
+    jmp     .Ltable_word
 .Ltable_block:
+    cmp     r11, rbx
+    ja      .Lwide_tail
+.p2align 5
+.Ltable_next:
     BLOCK_WORD
     popcnt  ecx, eax
     lea     r14, [rbp + r15 * 2]        # the table at the block's column
+.Ltable_word:
     cmp     ecx, SPARSE_MAX
     ja      .Ltable_dense
     TABLE_SPARSE 0
@@ -391,16 +461,9 @@ nonzero_2d_bool:
     TABLE_SPARSE 2
     TABLE_SPARSE 3
     lea     r9, [r9 + rcx * 2]
-.Ltable_advance:
-    add     r15, [rsp + STEP_COL]
-    mov     r14, r15
-    sub     r14, r10
-    cmovae  r15, r14
-    sbb     r13, [rsp + STEP_ROW]       # row + 32 / width + 1 - carry
+    CARRY   STEP_COL, STEP_ROW
     add     r11, BLOCK
-    cmp     r11, rbx
-    jbe     .Ltable_block
-    jmp     .Lwide_tail
+    jmp     .Ltable_pair
 .Ltable_dense:
     vmovq   xmm1, r13
     vinserti128 ymm1, ymm1, xmm1, 1
@@ -408,9 +471,13 @@ nonzero_2d_bool:
     TABLE_GROUP 1
     TABLE_GROUP 2
     TABLE_GROUP 3
-    jmp     .Ltable_advance
+    CARRY   STEP_COL, STEP_ROW
+    add     r11, BLOCK
+    cmp     r11, rbx
+    jbe     .Ltable_next
+    jmp     .Lwide_tail
 
-    # Rows of more than 32 elements.
+    # Rows of more than 64 elements: a window crosses at most one row end.
 .Lwide_rows:
     vmovdqa ymm8, [rip + .Lspread_wide]
     vmovdqa ymm9, [rip + .Lspread_wide + 32]
@@ -425,9 +492,47 @@ nonzero_2d_bool:
     vmovdqa ymm13, [rip + .Leight]
     vpaddq  ymm14, ymm12, ymm13
 .p2align 5
+.Lwide_pair:
+    lea     rax, [r11 + BLOCK]
+    cmp     rax, rbx
+    ja      .Lwide_block
+    PAIR_WORD
+    popcnt  rcx, rax
+    cmp     ecx, PAIR_MAX
+    ja      .Lwide_split
+    lea     r8, [r15 + 2 * BLOCK]
+    cmp     r8, r10
+    ja      .Lwide_pair_cross
+    ROW_SPARSE 0, rax, r8
+    ROW_SPARSE 1, rax, r8
+    ROW_SPARSE 2, rax, r8
+    ROW_SPARSE 3, rax, r8
+    ROW_SPARSE 4, rax, r8
+    ROW_SPARSE 5, rax, r8
+.Lwide_pair_advance:
+    lea     r9, [r9 + rcx * 2]
+    CARRY   PAIR_COL, PAIR_ROW
+    add     r11, 2 * BLOCK
+    jmp     .Lwide_pair
+.Lwide_pair_cross:
+    CROSS_SPARSE 0, rax, r8
+    CROSS_SPARSE 1, rax, r8
+    CROSS_SPARSE 2, rax, r8
+    CROSS_SPARSE 3, rax, r8
+    CROSS_SPARSE 4, rax, r8
+    CROSS_SPARSE 5, rax, r8
+    jmp     .Lwide_pair_advance
+.Lwide_split:
+    popcnt  ecx, eax
+    jmp     .Lwide_word
 .Lwide_block:
+    cmp     r11, rbx
+    ja      .Lwide_tail
+.p2align 5
+.Lwide_next:
     BLOCK_WORD
     popcnt  ecx, eax
+.Lwide_word:
     cmp     ecx, SPARSE_MAX
     ja      .Lwide_dense
     lea     r8, [r15 + BLOCK]
@@ -437,25 +542,16 @@ nonzero_2d_bool:
     ROW_SPARSE 1
     ROW_SPARSE 2
     ROW_SPARSE 3
-    add     r9, rcx
-    add     r9, rcx
 .Lwide_advance:
-    add     r15, [rsp + STEP_COL]
-    mov     r14, r15
-    sub     r14, r10
-    cmovae  r15, r14
-    sbb     r13, [rsp + STEP_ROW]
+    lea     r9, [r9 + rcx * 2]
+    CARRY   STEP_COL, STEP_ROW
     add     r11, BLOCK
-    cmp     r11, rbx
-    jbe     .Lwide_block
-    jmp     .Lwide_tail
+    jmp     .Lwide_pair
 .Lwide_sparse_cross:
     CROSS_SPARSE 0
     CROSS_SPARSE 1
     CROSS_SPARSE 2
     CROSS_SPARSE 3
-    add     r9, rcx
-    add     r9, rcx
     jmp     .Lwide_advance
 
 .Lwide_dense:
@@ -469,14 +565,19 @@ nonzero_2d_bool:
     ROW_GROUP 1
     ROW_GROUP 2
     ROW_GROUP 3
-    jmp     .Lwide_advance
+.Lwide_dense_advance:
+    CARRY   STEP_COL, STEP_ROW
+    add     r11, BLOCK
+    cmp     r11, rbx
+    jbe     .Lwide_next
+    jmp     .Lwide_tail
 .Lwide_dense_cross:
     mov     r8, r15
     WIDE_GROUP 0
     WIDE_GROUP 1
     WIDE_GROUP 2
     WIDE_GROUP 3
-    jmp     .Lwide_advance
+    jmp     .Lwide_dense_advance
     WIDE_CROSS 0
     WIDE_CROSS 1
     WIDE_CROSS 2

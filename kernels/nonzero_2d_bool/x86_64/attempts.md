@@ -42,3 +42,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.042x [1.036 – 1.049]
 - **Kept:** yes
 - **Notes:** sparse width 3 1.17x, dense width 22 1.07x, dense width 3 1.06x, sparse width 22 1.03x; widths 32 and 1,000 no significant difference (they do not take the new path, or take it as before). Micro-benchmark at 4,096, dense: width 22 0.158 to 0.122 ns per element, width 3 0.144 to 0.114.
+
+## 6. Sparse windows of two blocks: six positions from a 64-bit word
+
+- **Idea:** a sparse block of 32 cost about 42 instructions, of which 14 are the block's own (the word, the count, the branch, carrying the row and column, the loop) and 28 its four positions. After a sparse block the kernel now reads two blocks into one 64-bit word and, if it has at most six true elements (95% of windows at 5%), takes six positions out of it with 64-bit `tzcnt` and `blsr`: 1.5 blocks' worth of positions for one block's overhead. A window with more goes one block at a time, starting with its first block, whose word it already has; after a dense block the kernel stays with single blocks until the next sparse one, so a dense stretch never reads a window. The tables grow to widths up to 64 (256 bytes each, 16 KB in all; a window's c + p is below 128), so that a wider row is crossed at most once per window. The loop heads of the dense loops are aligned to 32 bytes; without it dense width 3 measured 0.129 ns per element in the micro-benchmark instead of 0.114.
+- **check:** pass
+- **compare:** significantly faster, 1.098x [1.090 – 1.106]
+- **Kept:** yes
+- **Notes:** sparse 1.20x (width 22), 1.19x (3), 1.20x (32), 1.27x (1,000); dense no significant difference except width 3, 0.98x [0.96 – 0.99]. Width 32 now goes through the tables instead of the wide path, with no significant change.
