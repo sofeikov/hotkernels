@@ -74,7 +74,7 @@ Importing the package changes nothing; only `install()` does. Calling it twice i
 `print(hotkernels.report())` after your code has run:
 
 ```text
-hotkernels 0.3.1: installed, 37 of 39 kernels (NumPy 2.5.5)
+hotkernels 0.3.1: installed, 39 of 41 kernels (NumPy 2.5.5)
 
 NumPy call         Elements Kernel    Result            Kernel calls  Left to NumPy
 np.argmax          float32  assembly  exact                        0              0
@@ -127,6 +127,7 @@ A kernel takes a call only when the array is a plain, contiguous `ndarray` of th
 | `np.unique(x)` | int64 | At least one element, of any shape or layout; no `return_index`, `return_inverse` or `return_counts` (or each `False`), no `axis`, `sorted` left at `True`. The largest element minus the smallest is less than 256 or than the number of elements |
 | `np.isin(x, values)` | int64 | At most eight test values; flags at their defaults |
 | `np.searchsorted(a, v)`, `a.searchsorted(v)`, `np.digitize(x, bins)` | float64 | `a` is one-dimensional; `v` is an array of any shape or a Python number; either `side`; no `sorter`. For `np.digitize`, with or without `right=True`, when the bins increase |
+| `np.searchsorted(a, v)`, `a.searchsorted(v)`, `np.digitize(x, bins)` | int64 | `a` is one-dimensional; `v` is an int64 array of any shape, an `np.int64` (an element of an int64 array is one), or a Python int that fits int64; either `side`; no `sorter`. Needles of any other type stay with NumPy: see below |
 | `np.interp(x, xp, fp)` | float64 | `xp` and `fp` are one-dimensional and the same length; no `left`, `right` or `period`; `xp` holds no NaN; at most 64 sample points per query |
 | `bottleneck.nanmean(a, axis)`, `bottleneck.nanstd(a, axis, ddof)`, `bottleneck.nanmin(a, axis)`, `bottleneck.nanmax(a, axis)`, and pandas and empyrical calling them | float64 | `a` is two-dimensional, and the axis that is kept has its elements next to each other: `axis=0` of a C-ordered array or of a rolling-window view, `axis=1` of a Fortran-ordered one. `axis` and `ddof` are Python ints. The result is bottleneck's own, bit for bit. One-dimensional arrays and `axis=None` stay with bottleneck: see below |
 
@@ -164,6 +165,7 @@ How much faster each one is, from Python and at three sizes, is in [the results]
 - **`np.median` gives NumPy's result bit for bit**: the middle element, or the two middle elements added and halved, as NumPy's mean of them does. Some calls go to NumPy, which then answers and warns as it always did: an array holding a NaN; two middle elements whose sum overflows, or that are infinities of both signs; a half that is too small to be exact; and a median of zero when the array holds a negative zero anywhere, since which zero NumPy returns then depends on how its partition orders equal elements (NumPy 2.5 returns `+0.0`). `np.median(x, axis=None)` is served as `np.median(x)` is; any other `axis`, and every other argument, `out`, `keepdims` and `overwrite_input` included, are NumPy's.
 - **`np.isin` is fastest when the test values are close together**: all between 0 and 65,534, or all within 32,767 of the first one. Otherwise it runs at the speed of compiled C, which is still ahead of NumPy.
 - **`np.searchsorted` and `np.interp` trust you that the array is sorted, as NumPy does.** Neither checks. On an array that is not sorted both return a meaningless result, and the kernel's is not the same meaningless result as NumPy's. Sorted data, including NaNs at the end of `a`, gives NumPy's answer bit for bit.
+- **`np.searchsorted` on an int64 array takes int64 needles only.** An int64 array of needles, an `np.int64`, which is what indexing an int64 array gives you, or a Python int that fits int64. A needle of another type, such as an `np.int32`, a float or a list, goes to NumPy, which converts it and the array to a common type first; convert the needles with `v.astype(np.int64)` to have them served. On x86-64 one needle is about twice as fast as NumPy whatever the length of the array, because most of such a call is NumPy's call path; with many needles the gain is 3x to 4x on arrays that fit the cache and less beyond. On Apple Silicon the kernels are plain C for now, and nothing was measured there.
 - **`np.digitize` is served when its bins increase.** It calls `np.searchsorted`, on either side. With decreasing bins it searches them reversed, as a view no kernel takes, and runs at NumPy's speed.
 - **`np.interp` with a few queries against a long table stays with NumPy.** A NaN among the sample points is something the kernel cannot handle, so `xp` is read once before every call. With more than 64 sample points per query that pass would cost more than the kernel saves.
 - **bottleneck's own functions are served too, when bottleneck is installed.** pandas and empyrical, among others, send NaN-aware reductions to [bottleneck](https://github.com/pydata/bottleneck) instead of NumPy, so no NumPy hook sees them. hotkernels serves `nanmean`, `nanstd`, `nanmin` and `nanmax` along one axis of a two-dimensional float64 array, with bottleneck's result bit for bit, however your code or the library got hold of the function. At 252 × 4,789, the rolling windows of a year over twenty years of daily returns, they are about 4x to 7x faster than bottleneck on an Apple M1 Pro. hotkernels never imports bottleneck: if it is not imported when you call `install()`, its functions are served from the moment it is, and `report()` says "waiting" until then. `install(bottleneck=False)` leaves them alone. In `report()` they are the `bn.*` rows, and on those rows "Left to NumPy" counts calls left to bottleneck, such as one-dimensional arrays, `axis=None`, float32 and pandas' `Series.std()`. If your bottleneck was built so that it rounds `nanstd` differently from the kernel, which `install()` checks against bottleneck's own answer, `nanstd` stays with bottleneck and `report()` lists it under the hooks that are not in place.
@@ -177,7 +179,7 @@ From a clone of the repository:
 
 ```bash
 uv run delivery demo          # run examples/workload.py with and without hotkernels, and compare
-uv run delivery check         # 221,347 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
+uv run delivery check         # 242,302 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
 uv run delivery time          # time each statement from Python on your machine
 uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two
 ```

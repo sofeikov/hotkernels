@@ -132,7 +132,7 @@ The candidates the design lists for this family (`docs/x86-64-design.md`):
 |---|---|
 | A gather loads four probes in one instruction, the compare and the move of the base stay in vectors | Kept (attempts 1 and 2), `vpgatherqq` |
 | Scalar loads with `cmov`, sixteen or more searches interleaved | Measured outside the judge with the positions in `out`: slower than the gathers. Kept for one to three needles |
-| Gathers are slow on older AMD processors and on Intel processors with the gather mitigation | Used, in every path from four needles up, from the fourth step of a search on. Untested elsewhere |
+| Gathers are slow on older AMD processors and on Intel processors with the gather mitigation | Used, in every path from four needles up: from the fourth step of a search on, and at every step for the last needles of a count that is not a multiple of four. Untested elsewhere |
 | Masked loads and stores for leftover elements | Not needed: a leftover is one more vector that overlaps the one before |
 | Non-temporal stores; alignment of data | Not tried: the output is as small as the needles, and the probes are single elements |
 | An output just behind the input | No cost in the judge's close table that repeats |
@@ -143,6 +143,8 @@ The candidates the design lists for this family (`docs/x86-64-design.md`):
 **For a caller.**
 
 - **One needle** is searched in general registers, about eight cycles a step. The judge times no call with fewer than 64 needles, so nothing here was tuned for it; from Python the call path is the cost.
+- **From Python,** `uv run delivery time --only searchsorted` at a load average of 1.4: `np.searchsorted(a, f)` with one `np.int64` takes 264 ns against NumPy's 559 at 16 elements, 269 against 561 at 4,096 and 293 against 599 at 1,048,576. With as many needles as elements the call is 1.5x, 3.3x and 1.2x faster at those sizes, and with a million needles against 1,000 elements 1.9x.
+- **Four to fifteen needles** are one to four vectors of searches, each a chain of gathers with nothing else in flight. By a script outside the repository, from Python, four needles against 65,536 elements and more are 1.00x to 1.14x of NumPy, where one needle is 1.4x and sixteen 1.25x to 1.4x. No count was slower than NumPy at any length from 16 to 16,777,216 elements, with random or sorted needles.
 - **Unsorted input:** the result is meaningless, and the kernel stays inside its buffers by construction: `lo + len <= n` holds at every step for any data, and the candidates of the first pass are at fixed positions inside `a`.
 - **`out` is used as working storage** during the call: an element holds the search's current position until its last step.
 

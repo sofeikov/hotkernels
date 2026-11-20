@@ -223,7 +223,7 @@ The judge proves a kernel right as a native function. It says nothing about the 
 | Spellings | Positional, keyword, `out=`, `axis=`, method and function forms |
 | Values | The judge's value classes: NaN, infinities, signed zeros, ties |
 
-That is **221,347 calls over the 23 hooked NumPy operations and bottleneck's four functions** (on x86-64 and on the Apple M1 Pro; 96,734 over 15 when the first kernels were bound), and all agree.
+That is **242,302 calls over the 23 hooked NumPy operations and bottleneck's four functions** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
 
 **Each case also states whether a kernel should have run**, and the counters are checked against it. Without that, a check that quietly stopped matching would pass every comparison, since NumPy's fallback is always right, while delivering nothing.
 
@@ -237,6 +237,6 @@ The binding runs without guard pages. A wrong length passed to a correct kernel 
 
 ## Where that leaves things
 
-Of the 39 kernels, 37 are installed by `install()` and the other 2 with `install(inexact=True)`; 4 of the 37 serve bottleneck's functions, and are applied once bottleneck is imported. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. The stable `argsort` kernels came from a study of whole applications, where sorting was the largest cost no kernel touched; they are reached through a hook on the `argsort` method, because NumPy 2.5 no longer sorts through the per-type table that `argmax` is hooked into. An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
+Of the 41 kernels, 39 are installed by `install()` and the other 2 with `install(inexact=True)`; 4 of the 39 serve bottleneck's functions, and are applied once bottleneck is imported. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. The stable `argsort` kernels came from a study of whole applications, where sorting was the largest cost no kernel touched; they are reached through a hook on the `argsort` method, because NumPy 2.5 no longer sorts through the per-type table that `argmax` is hooked into. The search on int64 came from a production pipeline, whose calls with one `np.int64` needle all reached the hook and went to NumPy ([issue 160](https://github.com/sofeikov/hotkernels/issues/160)). An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
 
 The last chapter collects every number, and is candid about which of them mean less than they appear to.
