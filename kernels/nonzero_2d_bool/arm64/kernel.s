@@ -22,6 +22,12 @@
 // paired with the row by `zip`, and stored: eight (row, column) pairs at the
 // write pointer, of which the first `count` are kept.
 //
+// Narrow rows (dense, width under 8): chunks of as many whole rows as fit in
+// 8 bytes, so a chunk always starts a row. The positions of the true bytes
+// index two small tables, built for the width, of the row within the chunk
+// and the column; the two are interleaved byte by byte, widened to 64 bits
+// with the chunk's first row added, and stored as eight pairs.
+//
 // After a dense stretch, which ends at the end of a row, the share of true
 // bytes in it decides what handles the next bytes: sparse if at most one in
 // eight was true, else a longer dense stretch.
@@ -92,6 +98,18 @@ _nonzero_2d_bool:
     dup     v18.2d, x8                  // 8, twice: the column step of a chunk
     cmp     x3, x2
     csel    x3, x3, x2, lo              // a width above n is as good as n
+    cmp     x3, #8
+    b.hs    Lwide_setup
+    adrp    x8, Lnarrow_tables@PAGE     // rows and columns of 8 positions
+    add     x8, x8, Lnarrow_tables@PAGEOFF
+    add     x8, x8, x3, lsl #4
+    ldp     d29, d30, [x8, #-16]        // v29 = rows, v30 = columns
+    adrp    x8, Lnarrow_rows@PAGE
+    add     x8, x8, Lnarrow_rows@PAGEOFF
+    ldrb    w8, [x8, x3]                // whole rows per chunk
+    movi    v31.2d, #0
+    mov     v31.d[0], x8                // v31 = (rows per chunk, 0)
+Lwide_setup:
     mov     x7, x4                      // dense to the end, unless sparse is used
     sub     x2, x4, #8                  // x2 = last place a chunk can start
     sub     x8, x4, x0
@@ -106,6 +124,7 @@ _nonzero_2d_bool:
     mov     v19.d[1], x0                // v19 = (M, start of the mask)
     adrp    x8, Lbit_shifts@PAGE
     ldr     q28, [x8, Lbit_shifts@PAGEOFF]
+    b       Lsparse_enter
 Lsparse_enter:                          // x0 = the next byte
     fmov    x6, d19
     mov     x15, #0x8000000000000000
@@ -158,6 +177,11 @@ Lsparse_leave:                          // row and start of row of x0, from 2f i
 Lstretch:
     sub     x16, x5, x0, lsl #1         // x16 = 16 * true - 2 * bytes, offset
 Lrow:                                   // x0 in row x6, which starts at x17
+    cmp     x3, #8
+    b.hs    Lrow_wide
+    cmp     x0, x17
+    b.eq    Lnarrow
+Lrow_wide:
     add     x12, x17, x3
     cmp     x12, x4
     csel    x12, x12, x4, lo            // x12 = end of the row, or of the mask
@@ -203,6 +227,7 @@ Lrow_end:
     mov     x17, x0
     cmp     x0, x7
     b.lo    Lrow
+Lstretch_end:                           // x0 >= x7, at the start of a row
     cmp     x0, x4
     b.hs    Ldone
     sub     x8, x5, x0, lsl #1          // was at most one byte in eight true?
@@ -212,6 +237,59 @@ Lrow_end:
     cmp     x7, x4
     csel    x7, x7, x4, lo
     b       Lstretch
+Lnarrow:                                // x0 = x17 starts row x6; width under 8
+    umov    w12, v31.b[0]
+    mul     x12, x12, x3                // x12 = bytes per chunk
+    neg     x17, x12, lsl #3
+    mov     x13, #-1
+    lsr     x17, x13, x17               // x17 = those bytes of a word
+    add     x13, x2, #1
+    cmp     x13, x7
+    csel    x13, x13, x7, lo            // x13 = stop before here
+    cmp     x0, x13
+    b.hs    Lnarrow_done
+    movi    v16.2d, #0
+    mov     v16.d[0], x6                // v16 = (row, 0)
+Lnarrow_loop:
+    ldr     x14, [x0]
+    add     x0, x0, x12
+    and     x14, x14, x17
+    mul     x15, x14, x10
+    mul     x8, x14, x11
+    lsr     x15, x15, #56               // 8-bit mask
+    lsr     x8, x8, #56                 // 8 * (number of true bytes)
+    ldr     d0, [x9, x15, lsl #3]       // positions of the true bytes
+    tbl     v1.8b, {v29.16b}, v0.8b     // their rows within the chunk
+    tbl     v2.8b, {v30.16b}, v0.8b     // and columns
+    zip1    v1.16b, v1.16b, v2.16b      // row, column, row, column, ...
+    ushll   v2.8h, v1.8b, #0
+    ushll2  v3.8h, v1.16b, #0
+    ushll   v4.4s, v2.4h, #0
+    ushll2  v5.4s, v2.8h, #0
+    ushll   v6.4s, v3.4h, #0
+    ushll2  v7.4s, v3.8h, #0
+    uaddw   v21.2d, v16.2d, v4.2s
+    uaddw2  v22.2d, v16.2d, v4.4s
+    uaddw   v23.2d, v16.2d, v5.2s
+    uaddw2  v24.2d, v16.2d, v5.4s
+    stp     q21, q22, [x5]
+    stp     q23, q24, [x5, #32]
+    uaddw   v25.2d, v16.2d, v6.2s
+    uaddw2  v26.2d, v16.2d, v6.4s
+    uaddw   v27.2d, v16.2d, v7.2s
+    uaddw2  v0.2d, v16.2d, v7.4s
+    stp     q25, q26, [x5, #64]
+    stp     q27, q0, [x5, #96]
+    add     x5, x5, x8, lsl #1
+    add     v16.2d, v16.2d, v31.2d
+    cmp     x0, x13
+    b.lo    Lnarrow_loop
+    fmov    x6, d16
+Lnarrow_done:
+    mov     x17, x0
+    cmp     x0, x7
+    b.hs    Lstretch_end
+    b       Lrow_wide                   // fewer than 8 bytes left
 Ltail:                                  // 1 to 7 bytes left in the mask
     sub     x7, x0, x17                 // column
     cmp     x0, x4
@@ -232,6 +310,27 @@ Ldone:
     ret
 
 .section __TEXT,__const
+.p2align 4
+// For each width w from 1 to 7: the row and the column, within a chunk of
+// whole rows, of each of the chunk's 8 bytes. Bytes past the chunk are 0.
+Lnarrow_tables:
+    .byte 0,1,2,3,4,5,6,7  // width 1: rows
+    .byte 0,0,0,0,0,0,0,0  //          columns
+    .byte 0,0,1,1,2,2,3,3  // width 2: rows
+    .byte 0,1,0,1,0,1,0,1  //          columns
+    .byte 0,0,0,1,1,1,0,0  // width 3: rows
+    .byte 0,1,2,0,1,2,0,0  //          columns
+    .byte 0,0,0,0,1,1,1,1  // width 4: rows
+    .byte 0,1,2,3,0,1,2,3  //          columns
+    .byte 0,0,0,0,0,0,0,0  // width 5: rows
+    .byte 0,1,2,3,4,0,0,0  //          columns
+    .byte 0,0,0,0,0,0,0,0  // width 6: rows
+    .byte 0,1,2,3,4,5,0,0  //          columns
+    .byte 0,0,0,0,0,0,0,0  // width 7: rows
+    .byte 0,1,2,3,4,5,6,0  //          columns
+// Whole rows of width w in 8 bytes, for w from 0 (unused) to 7.
+Lnarrow_rows:
+    .byte 0,8,4,2,2,1,1,1
 .p2align 4
 // Left-shift amounts that give each of 8 consecutive bytes its own bit.
 Lbit_shifts:

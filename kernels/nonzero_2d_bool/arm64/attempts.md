@@ -41,3 +41,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.81x [1.76 – 1.87]
 - **Kept:** yes
 - **Notes:** sparse 2.3x at the default width, 6.8x at width 3, 3.4x at width 32, 2.6x at width 1,000 (about 0.1 ns per element); dense 0.94 to 0.95x at widths 22, 32 and 1,000, all of it at small sizes (n=16 to 1,024: the failed first sparse block), and 1.02x at width 3.
+
+## 6. Narrow rows: chunks of whole rows with row and column tables
+
+- **Idea:** for widths under 8 the row loop handles one row per masked chunk. Instead, take as many whole rows as fit in 8 bytes (8 at width 1, 6 at width 3, 5 at width 5) as one chunk, which always starts a row. The positions from the table index two 8-byte tables built for the width (`tbl`): the row within the chunk and the column. `zip1` interleaves them byte by byte, three rounds of widening give 64-bit (row, column) pairs with the chunk's first row added by the last `uaddw`, and four `stp` store eight pairs. The row loop hands over to this loop at the start of a row, and takes back the last bytes of the mask.
+- **check:** pass
+- **compare:** significantly faster, 1.13x [1.13 – 1.13]
+- **Kept:** yes
+- **Notes:** width 3 dense 2.05x (0.38 ns per element, from 0.80), sparse 1.33x, n=16 1.38x; the other widths unchanged but for 0.97x at n=16 (one more compare and branch per row).
