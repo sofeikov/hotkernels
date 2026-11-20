@@ -186,6 +186,10 @@ These kernels were first written with one length for the sorted array and the ne
 `np.searchsorted(a, v, side='right')`, which `np.digitize` asks for by default, is a second kernel, `searchsorted_right_f64`. It is the same search with the comparison turned round, `a[i] <= key` in place of `a[i] < key`, so the two differ only for a needle that equals an element, and for a NaN needle, whose answer is the length of the array. The judge checks it like any other kernel, with needles drawn from the array at every size, so that some equal its elements.
 :::
 
+::: note Any along the other axis
+`any_cols_bool` serves `m.any(axis=0)`, the call beside `m.any(axis=1)`: whether each column of a boolean matrix holds a True. It keeps the results in vector registers for the whole call and makes them 0 or 1 once at the end, where a compiled loop or's each row into memory. It was written for x86-64 and ships as its C on ARM64 for now. On an Intel Core i5-14600KF a mask of 30 rows by 31 columns takes about 95 ns from Python against NumPy's 840 ns.
+:::
+
 ::: note The search on int64
 `searchsorted_i64` and `searchsorted_right_i64` are the same two searches for a sorted int64 array and int64 needles, with no NaN to order. They were written for x86-64, where a pass takes two steps of each search and the first steps need no gather, and they ship as their C on ARM64 for now. NumPy's int64 search is about three times faster than its float64 search, so the gain with many needles is smaller: 4x to 5x over NumPy up to 4,096 elements on an Intel Core i5-14600KF, and 1.2x beyond the caches. The call they were added for passes one `np.int64` at a time, and there the gain is NumPy's call path: about 2x from Python at any length.
 :::
