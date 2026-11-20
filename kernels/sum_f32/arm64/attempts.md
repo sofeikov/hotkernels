@@ -101,3 +101,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.000x [0.995 – 1.005]
 - **Kept:** no
 - **Notes:** 9.8 ns at 256 either way. A group of two is four chains of additions, bound by their latency, not by the loop's instructions. Load average 6.3.
+
+## 13. One group of two without the walk
+
+- **Idea:** 136 to 256 elements that are a multiple of 8 are a single group of two leaves; they are summed straight from the entry, without the frame, the node stack and the stack of sums. The group's code became a macro used in both places.
+- **check:** pass
+- **compare:** significantly faster, 1.008x [1.007 – 1.010]
+- **Kept:** yes
+- **Notes:** 1.11x at 256 (8.8 ns), nothing elsewhere. Load average 5.6.

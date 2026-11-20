@@ -80,6 +80,35 @@
     fadd    v\hi\().4s, v\hi\().4s, v1.4s
 .endm
 
+// Sum a group of two leaves, x7 = m of 17..32 vectors at x6, into s0.
+.macro PAIR
+    lsr     x8, x7, #1                  // q
+    add     x10, x6, x8, lsl #5         // right leaf
+    add     x11, x6, x7, lsl #5         // end
+    ldp     q16, q17, [x6], #VEC
+    ldp     q18, q19, [x10], #VEC
+    sub     x8, x8, #1
+7:
+    ldp     q0, q1, [x6], #VEC
+    ldp     q2, q3, [x10], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    fadd    v18.4s, v18.4s, v2.4s
+    fadd    v19.4s, v19.4s, v3.4s
+    subs    x8, x8, #1
+    b.ne    7b
+    tbz     x7, #0, 8f                  // m odd: the right leaf has q + 1
+    ldp     q2, q3, [x11, #-VEC]
+    fadd    v18.4s, v18.4s, v2.4s
+    fadd    v19.4s, v19.4s, v3.4s
+8:
+    faddp   v16.4s, v16.4s, v17.4s
+    faddp   v18.4s, v18.4s, v19.4s
+    faddp   v16.4s, v16.4s, v18.4s      // halves of leaf 0, of leaf 1
+    faddp   v16.4s, v16.4s, v16.4s      // leaf 0, leaf 1
+    faddp   s0, v16.2s
+.endm
+
 .text
 .globl _sum_f32
 .p2align 2
@@ -126,7 +155,19 @@ Lf_tail:
 
 Lnot_leaf:
     cmp     x1, #8
-    b.hs    Lbig
+    b.lo    Lsmall
+    // 136..256 elements, a multiple of 8, are one group of two leaves.
+    sub     x2, x1, #136
+    cmp     x2, #256 - 136
+    b.hi    Lbig
+    tst     x1, #7
+    b.ne    Lbig
+    mov     x6, x0
+    lsr     x7, x1, #3
+    PAIR
+    movi    d1, #0
+    fadd    s0, s0, s1
+    ret
 
 Lsmall:
     movi    d0, #0
@@ -208,31 +249,7 @@ Lsplit:
 // ---- Groups. x6 = p, x7 = m. Each pushes its sum and goes to Lnext.
 
 Lpair:      // 17..32 vectors: two leaves, m/2 and the rest
-    lsr     x8, x7, #1                  // q
-    add     x10, x6, x8, lsl #5         // right leaf
-    add     x11, x6, x7, lsl #5         // end
-    ldp     q16, q17, [x6], #VEC
-    ldp     q18, q19, [x10], #VEC
-    sub     x8, x8, #1
-1:
-    ldp     q0, q1, [x6], #VEC
-    ldp     q2, q3, [x10], #VEC
-    fadd    v16.4s, v16.4s, v0.4s
-    fadd    v17.4s, v17.4s, v1.4s
-    fadd    v18.4s, v18.4s, v2.4s
-    fadd    v19.4s, v19.4s, v3.4s
-    subs    x8, x8, #1
-    b.ne    1b
-    tbz     x7, #0, Lp_sum              // m odd: the right leaf has q + 1
-    ldp     q2, q3, [x11, #-VEC]
-    fadd    v18.4s, v18.4s, v2.4s
-    fadd    v19.4s, v19.4s, v3.4s
-Lp_sum:
-    faddp   v16.4s, v16.4s, v17.4s
-    faddp   v18.4s, v18.4s, v19.4s
-    faddp   v16.4s, v16.4s, v18.4s      // halves of leaf 0, of leaf 1
-    faddp   v16.4s, v16.4s, v16.4s      // leaf 0, leaf 1
-    faddp   s0, v16.2s
+    PAIR
     b       Lpush
 
 Lquad:      // 34..64 vectors: four leaves
