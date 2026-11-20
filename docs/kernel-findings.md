@@ -631,7 +631,7 @@ From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/iss
 
 #### On x86-64
 
-Not built. The call stays with NumPy, and `report()` lists the kernel as not installed, until it is measured there ([coverage-gaps-design.md](coverage-gaps-design.md#x86-64)). `naive.c` is portable C and CI checks it against NumPy on Linux.
+Not built. The call stays with NumPy, and `report()` lists the kernel as not installed, until it is written and measured there ([coverage-gaps-design.md](coverage-gaps-design.md#built-on-arm64)). `naive.c` is portable C and CI checks it against NumPy on Linux.
 
 ### bottleneck's NaN-aware reductions
 
