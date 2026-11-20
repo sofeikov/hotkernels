@@ -140,7 +140,7 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 
 ## Stopped
 
-Six attempts in a row (12 to 17) gave nothing worth keeping. The dense step stores eight 16-byte pairs per 8 mask bytes, about 6 cycles per chunk, which looks like the limit of the stores; the sparse step runs at about 4 instructions per cycle. Not tried: a sparse step for the last partial 64-byte block of a matrix (the workload's 880-byte matrices end with 48 bytes that go to the dense code), since every size `compare` times is a multiple of 64 and would not see it.
+Six attempts in a row (12 to 17) gave nothing worth keeping. The dense step stores eight 16-byte pairs per 8 mask bytes, about 6 cycles per chunk, which looks like the limit of the stores; the sparse step runs at about 4 instructions per cycle. Left for later then, and tried in attempt 18: a sparse step for the last partial 64-byte block of a matrix, which no size `compare` times reaches.
 
 ## 18. The last partial 64-byte block as a sparse block (timed outside the judge)
 

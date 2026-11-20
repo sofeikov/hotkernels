@@ -35,11 +35,17 @@
 // bytes in it decides what handles the next bytes: sparse if at most one in
 // eight was true, else a longer dense stretch.
 //
-// Stores stay inside the capacity: a step starting at element f writes at
-// most 8 pairs and is taken only when f + 8 <= n, and at most f pairs have
-// been kept before it. The last 0 to 7 bytes of the mask, when a chunk cannot
-// be read there, are handled one at a time. The sparse code runs only when
-// n < 2^31, which keeps f * w below 2^63 with w taken as at most n.
+// Stores stay inside the capacity: a dense step starting at element f writes
+// at most 8 pairs and is taken only when f + 8 <= n, a sparse one at most 12
+// when f + 64 <= n, and at most f pairs have been kept before either. The
+// last 0 to 7 bytes of the mask, when a chunk cannot be read there, are
+// handled one at a time. The sparse code runs only when n < 2^31, which
+// keeps f * w below 2^63 with w taken as at most n.
+//
+// What the caller must know: `out` is scratch, 2n int64, and holds rubbish
+// past the reported pairs; every mask byte is 0 or 1 (the counts are sums of
+// the bytes, and a larger byte would move the write pointer outside `out`);
+// width is at least 1 when n is above 0. A partial last row is a row.
 
 // Widen the 8 positions in d0, add the column in v17, pair each with the row
 // in v20 and store the 8 pairs at x5. Uses v0 to v6 and v21 to v27.
