@@ -118,6 +118,38 @@
     orr     v22.16b, v22.16b, v6.16b
 .endm
 
+// One row of 129 to 256: its first 128 bytes at x10 into v16 to v23, its
+// last 128 at x11 into v24 to v31, by \ld (`ldp`, or `ldnp` above HUGE_N).
+// Both move one row.
+.macro MID256 ld
+    \ld     q0, q1, [x10]
+    \ld     q2, q3, [x10, #32]
+    \ld     q4, q5, [x10, #64]
+    \ld     q6, q7, [x10, #96]
+    add     x10, x10, x3
+    orr     v16.16b, v16.16b, v0.16b
+    orr     v17.16b, v17.16b, v1.16b
+    orr     v18.16b, v18.16b, v2.16b
+    orr     v19.16b, v19.16b, v3.16b
+    orr     v20.16b, v20.16b, v4.16b
+    orr     v21.16b, v21.16b, v5.16b
+    orr     v22.16b, v22.16b, v6.16b
+    orr     v23.16b, v23.16b, v7.16b
+    \ld     q0, q1, [x11]
+    \ld     q2, q3, [x11, #32]
+    \ld     q4, q5, [x11, #64]
+    \ld     q6, q7, [x11, #96]
+    add     x11, x11, x3
+    orr     v24.16b, v24.16b, v0.16b
+    orr     v25.16b, v25.16b, v1.16b
+    orr     v26.16b, v26.16b, v2.16b
+    orr     v27.16b, v27.16b, v3.16b
+    orr     v28.16b, v28.16b, v4.16b
+    orr     v29.16b, v29.16b, v5.16b
+    orr     v30.16b, v30.16b, v6.16b
+    orr     v31.16b, v31.16b, v7.16b
+.endm
+
 .text
 .globl _any_cols_bool
 .p2align 2
@@ -706,34 +738,13 @@ Lmid256:
     sub     x6, x3, #128                // where a row's last 128 bytes start
     mov     x10, x0
     add     x11, x0, x6
-1:  ldp     q0, q1, [x10]
-    ldp     q2, q3, [x10, #32]
-    ldp     q4, q5, [x10, #64]
-    ldp     q6, q7, [x10, #96]
-    add     x10, x10, x3
-    orr     v16.16b, v16.16b, v0.16b
-    orr     v17.16b, v17.16b, v1.16b
-    orr     v18.16b, v18.16b, v2.16b
-    orr     v19.16b, v19.16b, v3.16b
-    orr     v20.16b, v20.16b, v4.16b
-    orr     v21.16b, v21.16b, v5.16b
-    orr     v22.16b, v22.16b, v6.16b
-    orr     v23.16b, v23.16b, v7.16b
-    ldp     q0, q1, [x11]
-    ldp     q2, q3, [x11, #32]
-    ldp     q4, q5, [x11, #64]
-    ldp     q6, q7, [x11, #96]
-    add     x11, x11, x3
-    orr     v24.16b, v24.16b, v0.16b
-    orr     v25.16b, v25.16b, v1.16b
-    orr     v26.16b, v26.16b, v2.16b
-    orr     v27.16b, v27.16b, v3.16b
-    orr     v28.16b, v28.16b, v4.16b
-    orr     v29.16b, v29.16b, v5.16b
-    orr     v30.16b, v30.16b, v6.16b
-    orr     v31.16b, v31.16b, v7.16b
+    mov     x7, #HUGE_N
+    cmp     x2, x7
+    b.hs    Lmid256_nt
+1:  MID256  ldp
     subs    x4, x4, #1
     b.ne    1b
+Lmid256_end:
     movi    v0.16b, #1
     umin    v16.16b, v16.16b, v0.16b
     umin    v17.16b, v17.16b, v0.16b
@@ -761,6 +772,13 @@ Lmid256:
     stp     q20, q21, [x1, #64]
     stp     q22, q23, [x1, #96]
     b       Ldone
+
+// The loop of rows of 129 to 256 with non-temporal loads, above HUGE_N.
+Lmid256_nt:
+    MID256  ldnp
+    subs    x4, x4, #1
+    b.ne    Lmid256_nt
+    b       Lmid256_end
 
 .section __TEXT,__const
 .p2align 4

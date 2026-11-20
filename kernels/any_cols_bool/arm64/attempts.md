@@ -294,3 +294,11 @@ there.
   1.24x up to 4,194,304 elements, 1.10x over each of its two tables, 0.98x at 16,777,216 (no
   `ldnp` on this path).
 - **Kept:** yes
+
+## 26. Rows of 129 to 256 above 8 MB: non-temporal loads
+
+- **Idea:** the loop of attempt 25 with `ldnp` from HUGE_N, out of line, as the other paths do.
+- **check:** pass; arbitrary-bytes check passes.
+- **compare:** significantly faster, 1.001x [1.001 – 1.001] (load average 2.4); width 256 1.12x at
+  16,777,216 elements on the sparse table, 0.96x to 0.98x at 256 and 1,024 behind the size test.
+- **Kept:** yes
