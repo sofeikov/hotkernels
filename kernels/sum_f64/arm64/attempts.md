@@ -123,3 +123,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.011x [1.010 – 1.012]
 - **Kept:** yes
 - **Notes:** 1.04x at 1,024 and 4,096 (238 ns), 1.03x at 16,384, nothing elsewhere. Load average 14.
+
+## 15. Four groups of four in sequence
+
+- **Idea:** attempt 14 one level up: a node of 136 to 256 vectors has its four groups of four summed one after another and combined as the tree does, ((Q0 + Q1) + (Q2 + Q3)), so the walk passes once per 2,048 elements.
+- **check:** pass
+- **compare:** significantly faster, 1.005x [1.000 – 1.009]
+- **Kept:** yes
+- **Notes:** 1.02x at 4,096 (239 ns), 1.03x at 16,384, nothing elsewhere. Load average 22, from other work: rough.
