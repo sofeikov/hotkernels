@@ -18,7 +18,7 @@
 //
 // Paths, by n:
 //   0..7       one after another from +0.0
-//   8..128     one leaf, two vectors per trip
+//   8..128     one leaf, 15 steps written out and entered at its length
 //   136..256   a multiple of 8: one group of two leaves, straight in
 //   544..1024  a multiple of 64: one group of eight equal leaves, straight in
 //   others     the walk: a stack of nodes below sp, split until a node is a
@@ -155,23 +155,58 @@ _sum_f32:
     cmp     x2, #120
     b.hi    Lnot_leaf
     ldp     q16, q17, [x0], #VEC
-    lsr     x8, x2, #3                  // vectors after the first
-    tbz     x8, #0, Lf_pairs
+    lsr     x8, x2, #3                  // vectors after the first, 0..15
+    // Into a straight run of 15 steps of 12 bytes, at the step that leaves
+    // exactly x8 of them.
+    adr     x9, Lf_sum
+    sub     x9, x9, x8, lsl #3
+    sub     x9, x9, x8, lsl #2
+    br      x9
     ldp     q0, q1, [x0], #VEC
     fadd    v16.4s, v16.4s, v0.4s
     fadd    v17.4s, v17.4s, v1.4s
-Lf_pairs:
-    lsr     x8, x8, #1
-    cbz     x8, Lf_sum
-Lf_loop:
-    ldp     q0, q1, [x0], #2 * VEC
-    ldp     q2, q3, [x0, #-VEC]
+    ldp     q0, q1, [x0], #VEC
     fadd    v16.4s, v16.4s, v0.4s
     fadd    v17.4s, v17.4s, v1.4s
-    fadd    v16.4s, v16.4s, v2.4s
-    fadd    v17.4s, v17.4s, v3.4s
-    subs    x8, x8, #1
-    b.ne    Lf_loop
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
 Lf_sum:
     faddp   v16.4s, v16.4s, v17.4s
     faddp   v16.4s, v16.4s, v16.4s

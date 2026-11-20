@@ -157,3 +157,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly slower, 0.991x [0.990 – 0.992]
 - **Kept:** no
 - **Notes:** 0.90x at 64 (3.3 ns): the padding put `nop`s in the one-leaf path ahead of its loop. Nothing elsewhere. Load average 4.3.
+
+## 20. One leaf as a straight run entered at its length
+
+- **Idea:** the one-leaf path's loop replaced by 15 steps written out, entered by a computed branch at the step that leaves exactly as many as the leaf has vectors after its first.
+- **check:** pass
+- **compare:** significantly faster, 1.017x [1.014 – 1.019]
+- **Kept:** yes
+- **Notes:** 1.21x at 64 (2.4 ns), nothing elsewhere. The judge calls with one size at a time, so the indirect branch is always predicted; calls of changing sizes would mispredict it, as they mispredicted the loop's exit before. Load average 4.5.
