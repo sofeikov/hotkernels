@@ -1,6 +1,12 @@
 # NumPy's test suite in CI
 
-This is a proposal for review. It answers [issue 92](https://github.com/sofeikov/hotkernels/issues/92): run NumPy's own test suite with hotkernels installed on every change that could break NumPy behaviour, and before every release.
+This began as a proposal and is now implemented: `delivery/numpy_suite.py`, and a step in `ci.yml` and `release.yml`. Where the building departed from the proposal, [What changed in the building](#what-changed-in-the-building) says so. It answers [issue 92](https://github.com/sofeikov/hotkernels/issues/92): run NumPy's own test suite with hotkernels installed on every change that could break NumPy behaviour, and before every release.
+
+## What changed in the building
+
+| Proposed | Built | Why |
+|---|---|---|
+| A test is reported only if it differs in the second pair of runs too | Also reported, with its first outcomes, if neither second run reported it at all | A node id the second runs could not collect would otherwise pass unseen |
 
 ## Summary
 

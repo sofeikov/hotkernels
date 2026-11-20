@@ -91,7 +91,7 @@ It:
 
 Then, on the maintainer's machine:
 
-4. `uv run judge selftest`, `uv run delivery check` and `uv run delivery numpy-tests`.
+4. `uv run judge selftest` and `uv run delivery check`. NumPy's own test suite is not on this list: `release.yml` runs `delivery numpy-tests` against every wheel ([numpy-tests-ci-design.md](numpy-tests-ci-design.md)).
 5. The timings: `uv run delivery time`, and `uv run judge run` for any kernel whose note claims a speed. The results files under `delivery/results/` and `kernels/` are updated in the same pull request, and the README's tables if they changed.
 6. The highlights: a few paragraphs on what this release means for a user, with the re-measured numbers. This is where the notes become longer than any one pull request. An agent can draft it from the notes and the pull request descriptions; the maintainer edits it.
 
@@ -166,7 +166,7 @@ A new workflow, `.github/workflows/release.yml`.
 |---|---|---|
 | `version` | Ubuntu | Checks the tag against the version in `meson.build` at the tagged commit, that the commit is on `main`, that `release-notes/<version>.md` exists and that `upcoming/` is empty. Any mismatch stops the release before anything is built |
 | `build` | macOS 15, Apple Silicon | Builds the source distribution and one wheel per supported Python with [cibuildwheel](https://cibuildwheel.pypa.io/). What the wheel contains and the compiler flags it uses are [issue 19](https://github.com/sofeikov/hotkernels/issues/19) |
-| `test` | macOS 15, Apple Silicon | Installs each wheel into a clean environment, outside the checkout, and runs `delivery check` against it. This is the test that the wheel works without the repository next to it |
+| `test` | macOS 15, Apple Silicon | Installs each wheel into a clean environment, outside the checkout, and runs `delivery check` and `delivery numpy-tests` against it. This is the test that the wheel works without the repository next to it |
 | `publish` | Ubuntu, environment `pypi` | Waits for the maintainer's approval, then uploads with [trusted publishing](https://docs.pypi.org/trusted-publishers/) |
 | `release` | Ubuntu | Creates a GitHub release for the tag with `release-notes/<version>.md` as its text and the wheels attached |
 

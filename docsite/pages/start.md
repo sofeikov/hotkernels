@@ -179,7 +179,7 @@ From a clone of the repository:
 uv run delivery demo          # run examples/workload.py with and without hotkernels, and compare
 uv run delivery check         # 221,347 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
 uv run delivery time          # time each statement from Python on your machine
-uv run delivery numpy-tests   # NumPy's own test suite, both ways; about ten minutes
+uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two
 ```
 
 `delivery demo` is the quickest way to see the effect: an ordinary NumPy program on two million elements that runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.

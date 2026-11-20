@@ -148,8 +148,9 @@ jobs:
           python -c "import hotkernels; hotkernels.install(); r = hotkernels.report(); print(r); assert not r.installed and 'macOS on ARM64 or Linux on x86-64' in r.unsupported, r"
           python -m hotkernels --help
 
-  # Every hooked NumPy call, with and without hotkernels, against each wheel
-  # as built for release rather than the package built from the checkout.
+  # Every hooked NumPy call, and NumPy's own test suite, with and without
+  # hotkernels, against each wheel as built for release rather than the
+  # package built from the checkout.
   # Where the macOS jobs run: the maintainer's Mac when it is online, except
   # for a tag, whose wheels are published and are built and tested hosted.
   runner:
@@ -184,8 +185,10 @@ jobs:
           # Replace the package built from the checkout with the release wheel.
           uv pip install --reinstall dist/hotkernels-*-"$WHEEL_TAG"-"$WHEEL_TAG"-*.whl
           uv run --no-sync delivery check
+          # NumPy's own test suite, both ways, against the same wheel.
+          uv run --no-sync delivery numpy-tests
 
-  # The same check against each Linux wheel.
+  # The same checks against each Linux wheel.
   test-linux:
     needs: build-linux
     runs-on: ubuntu-latest
@@ -214,6 +217,8 @@ jobs:
           # Replace the package built from the checkout with the release wheel.
           uv pip install --reinstall dist/hotkernels-*-"$WHEEL_TAG"-"$WHEEL_TAG"-*.whl
           uv run --no-sync delivery check
+          # NumPy's own test suite, both ways, against the same wheel.
+          uv run --no-sync delivery numpy-tests
 
   pypi:
     if: github.ref_type == 'tag'

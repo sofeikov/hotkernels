@@ -235,7 +235,7 @@ uv run delivery time          # time statements from Python; add --record to kee
 uv run --group workloads delivery workloads   # library and benchmark-suite code, both ways
 uv run --group workloads delivery workloads --size M,L --history DIR   # also keep the run under DIR/history/
 uv run delivery history       # the kept runs of this machine, from the perf-history branch
-uv run delivery numpy-tests   # NumPy's own test suite, both ways; about ten minutes
+uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two, and CI runs it
 uv run --group apps delivery apps --profile   # five whole applications at two sizes, both ways, and where their time goes
 uv run --group apps delivery apps --set second --profile   # five more, recorded apart
 ```

@@ -487,13 +487,15 @@ def numpy_tests(
 ) -> None:
     """Run NumPy's own tests with and without hotkernels and compare every outcome.
 
-    Takes several minutes. Only the exact kernels are installed.
+    About a minute or two. Only the exact kernels are installed. A test whose
+    outcome differs is run again both ways, and reported only if it differs again.
 
     Args:
         select: A pytest `-k` expression restricting the run.
     """
     comparison = numpy_suite.compare(select)
-    log.info("%s", render("numpy_tests.txt.j2", comparison=comparison).rstrip("\n"))
+    log.info("%s", render("numpy_tests.txt.j2", comparison=comparison,
+                          limit=numpy_suite.RERUN_LIMIT).rstrip("\n"))
     raise typer.Exit(EXIT_OK if not comparison.differences else EXIT_FAILED)
 
 

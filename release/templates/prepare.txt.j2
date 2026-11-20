@@ -8,7 +8,7 @@ Merged since {{ previous if previous else "the start of the repository" }} ({{ m
 
 Left to do, in the release pull request:
   1. Write the highlights at the top of {{ notes_path }}, and the machine line.
-  2. uv run judge selftest, uv run delivery check, uv run delivery numpy-tests.
+  2. uv run judge selftest, uv run delivery check. (release.yml runs NumPy's test suite on every wheel.)
   3. Re-measure on native hardware; update the results files and the README if they changed.
   4. Commit, open the pull request, merge it.
 Then, on an up-to-date main: uv run release tag  (pushes {{ tag }}, which publishes after approval)

@@ -32,6 +32,10 @@ jobs:
       # Every hooked NumPy call, with and without hotkernels installed, on the
       # NumPy in uv.lock.
       - run: uv run delivery check
+      # NumPy's own test suite, with and without hotkernels installed; a test
+      # whose outcome differs is run again before it fails the job. About two
+      # minutes. See docs/numpy-tests-ci-design.md.
+      - run: uv run delivery numpy-tests
 
   # The same check at both ends of the NumPy range hotkernels claims: exactly
   # the floor of `numpy` in hotkernels/pyproject.toml, and the newest release
@@ -76,6 +80,8 @@ jobs:
       # Every hooked NumPy call, with and without hotkernels installed, on the
       # NumPy in uv.lock, with the x86-64 kernels.
       - run: uv run delivery check
+      # NumPy's own test suite, both ways, as in the macOS job.
+      - run: uv run delivery numpy-tests
       # The tests of the delivery tool's own code: the sizes and records of
       # `delivery apps` and the parsing of the Linux profile. They time nothing.
       - run: uv run --group dev pytest tests

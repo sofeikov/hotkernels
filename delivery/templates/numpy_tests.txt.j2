@@ -1,15 +1,30 @@
-{# The result of `delivery numpy-tests`: totals, then every test whose outcome changed. #}
+{# The result of `delivery numpy-tests`: totals, every test whose outcome changed, then the tests that differed once and agreed when run again. #}
 NumPy's test suite, plain and with hotkernels installed
 
 tests reported:              {{ comparison.tests | thousands | rjust(8) }}
 passed on plain NumPy:       {{ comparison.passed_plain | thousands | rjust(8) }}
 passed with hotkernels:      {{ comparison.passed_installed | thousands | rjust(8) }}
 outcomes that differ:        {{ comparison.differences | length | thousands | rjust(8) }}
+differed once, then agreed:  {{ comparison.unrepeated | length | thousands | rjust(8) }}
+{% if comparison.differences and not comparison.rerun %}
+
+More than {{ limit }} outcomes differ; they were not run again.
+{% endif %}
 {% for difference in comparison.differences %}
 
   {{ difference.test }}
     plain NumPy:     {{ difference.plain }}
     with hotkernels: {{ difference.installed }}
 {% endfor %}
+{% if comparison.unrepeated %}
+
+Differed in the first runs and agreed when run again:
+{% for difference in comparison.unrepeated %}
+
+  {{ difference.test }}
+    plain NumPy:     {{ difference.plain }}
+    with hotkernels: {{ difference.installed }}
+{% endfor %}
+{% endif %}
 
 RESULT: {{ "pass" if not comparison.differences else "FAIL" }}
