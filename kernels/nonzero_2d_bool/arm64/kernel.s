@@ -2,57 +2,25 @@
 // Writes the row and column of every true byte of m (rows of width) to out as
 // int64 pairs, in C order. Returns how many int64 it wrote.
 //
-// The mask is read in chunks of up to 8 bytes that never cross the end of a
-// row: 8 bytes, or what is left of the row if that is fewer. A chunk is loaded
-// as one 64-bit word and the bytes past its end are masked off. One
-// multiplication packs it into an 8-bit number, another gives the true count
-// (times 8). The 8-bit number indexes a table whose entry lists the positions
-// of the true bytes, in order, as eight bytes; those are widened to 64 bits
-// and added to the chunk's first column, and `st2` stores them interleaved
-// with the row: eight (row, column) pairs at the write pointer, of which the
-// first `count` are kept.
+// The mask is read a row at a time, in chunks of 8 bytes and a last chunk of
+// what is left of the row, so that no chunk crosses a row. A chunk is loaded
+// as one 64-bit word; in the last chunk of a row the bytes past its end are
+// masked off. One multiplication packs it into an 8-bit number, another gives
+// the true count (times 8). The 8-bit number indexes a table whose entry lists
+// the positions of the true bytes, in order, as eight bytes; those are widened
+// to 64 bits and added to the chunk's first column, and `st2` stores them
+// interleaved with the row: eight (row, column) pairs at the write pointer, of
+// which the first `count` are kept.
 //
 // Stores stay inside the capacity: a chunk starting at element f is read only
 // when f + 8 <= n, at most f pairs have been kept before it, and it writes 8
-// pairs. The last 0 to 7 bytes are handled one at a time.
-.text
-.globl _nonzero_2d_bool
-.p2align 2
-_nonzero_2d_bool:
-    mov     x5, x1                      // x5 = write pointer
-    mov     x6, #0                      // x6 = row of the next element
-    mov     x7, #0                      // x7 = its column
-    add     x4, x0, x2                  // x4 = end of the mask
-    cmp     x2, #8
-    b.lo    Ltail
-    sub     x2, x4, #8                  // x2 = last place an 8-byte chunk can start
-    adrp    x9, Lpositions@PAGE
-    add     x9, x9, Lpositions@PAGEOFF
-    mov     x10, #0x4080                // 0x0102040810204080: gathers the low
-    movk    x10, #0x1020, lsl #16       // bit of each byte into the top byte
-    movk    x10, #0x0408, lsl #32
-    movk    x10, #0x0102, lsl #48
-    mov     x11, #0x0808080808080808    // sums the bytes, times 8, into the top byte
-    mov     x13, #8
-    mov     x16, #-1
-Lchunk:
-    sub     x12, x3, x7                 // what is left of the row
-    cmp     x12, #8
-    csel    x12, x12, x13, lo           // x12 = chunk length, 1 to 8
-    ldr     x14, [x0]
-    neg     x15, x12, lsl #3            // 64 - 8 * length, modulo 64
-    lsr     x15, x16, x15               // the chunk's bytes
-    and     x14, x14, x15
-    mul     x15, x14, x10
-    mul     x8, x14, x11
-    lsr     x15, x15, #56               // 8-bit mask
-    lsr     x8, x8, #56                 // 8 * (number of true bytes)
-    ldr     d0, [x9, x15, lsl #3]       // positions of the true bytes
-    dup     v17.2d, x7                  // the chunk's first column
-    dup     v20.2d, x6                  // its row, beside each column register
-    dup     v22.2d, x6
-    dup     v24.2d, x6
-    dup     v26.2d, x6
+// pairs. The last 0 to 7 bytes of the mask, when a chunk cannot be read there,
+// are handled one at a time.
+
+// Widen the 8 positions in d0, add the column in v17, and store 8 pairs with
+// the row (in v20, v22, v24, v26) at x5. Uses v0 to v2, the odd registers
+// v21 to v27, and x15.
+.macro PAIRS
     ushll   v0.8h, v0.8b, #0
     ushll   v1.4s, v0.4h, #0
     ushll2  v2.4s, v0.8h, #0
@@ -65,15 +33,80 @@ Lchunk:
     st2     {v22.2d, v23.2d}, [x15], #32
     st2     {v24.2d, v25.2d}, [x15], #32
     st2     {v26.2d, v27.2d}, [x15]
+.endm
+
+.text
+.globl _nonzero_2d_bool
+.p2align 2
+_nonzero_2d_bool:
+    mov     x5, x1                      // x5 = write pointer
+    mov     x6, #0                      // x6 = row
+    mov     x17, x0                     // x17 = start of the row
+    add     x4, x0, x2                  // x4 = end of the mask
+    cmp     x2, #8
+    b.lo    Ltail
+    sub     x2, x4, #8                  // x2 = last place a chunk can start
+    adrp    x9, Lpositions@PAGE
+    add     x9, x9, Lpositions@PAGEOFF
+    mov     x10, #0x4080                // 0x0102040810204080: gathers the low
+    movk    x10, #0x1020, lsl #16       // bit of each byte into the top byte
+    movk    x10, #0x0408, lsl #32
+    movk    x10, #0x0102, lsl #48
+    mov     x11, #0x0808080808080808    // sums the bytes, times 8, into the top byte
+    mov     x16, #-1
+    mov     w8, #8
+    dup     v18.2d, x8                  // 8, twice: the column step of a chunk
+Lrow:                                   // x0 = x17 = start of row x6, below the end
+    sub     x12, x4, x0
+    cmp     x12, x3
+    csel    x12, x12, x3, lo
+    add     x12, x0, x12                // x12 = end of the row, or of the mask
+    sub     x13, x12, #8                // x13 = last place a whole chunk can start
+    dup     v20.2d, x6                  // the row, beside each column register
+    dup     v22.2d, x6
+    dup     v24.2d, x6
+    dup     v26.2d, x6
+    movi    v17.2d, #0                  // column of the chunk
+    cmp     x0, x13
+    b.hi    Lpart
+Lfull:                                  // 8 bytes, all in this row
+    ldr     x14, [x0], #8
+    mul     x15, x14, x10
+    mul     x8, x14, x11
+    lsr     x15, x15, #56               // 8-bit mask
+    lsr     x8, x8, #56                 // 8 * (number of true bytes)
+    ldr     d0, [x9, x15, lsl #3]       // positions of the true bytes
+    PAIRS
     add     x5, x5, x8, lsl #1
-    add     x0, x0, x12
-    add     x7, x7, x12
-    cmp     x7, x3                      // end of the row?
-    csel    x7, x7, xzr, ne
-    cinc    x6, x6, eq
+    add     v17.2d, v17.2d, v18.2d
+    cmp     x0, x13
+    b.ls    Lfull
+Lpart:                                  // 0 to 7 bytes left in the row
+    cmp     x0, x12
+    b.eq    Lrow_end
     cmp     x0, x2
-    b.ls    Lchunk
-Ltail:                                  // 0 to 7 bytes left
+    b.hi    Ltail                       // a chunk cannot be read here
+    sub     x12, x12, x0                // length, 1 to 7
+    ldr     x14, [x0]
+    add     x0, x0, x12
+    neg     x15, x12, lsl #3            // 64 - 8 * length
+    lsr     x15, x16, x15               // the row's bytes of the word
+    and     x14, x14, x15
+    mul     x15, x14, x10
+    mul     x8, x14, x11
+    lsr     x15, x15, #56
+    lsr     x8, x8, #56
+    ldr     d0, [x9, x15, lsl #3]
+    PAIRS
+    add     x5, x5, x8, lsl #1
+Lrow_end:
+    add     x6, x6, #1
+    mov     x17, x0
+    cmp     x0, x4
+    b.lo    Lrow
+    b       Ldone
+Ltail:                                  // 1 to 7 bytes left in the mask
+    sub     x7, x0, x17                 // column
     cmp     x0, x4
     b.hs    Ldone
 Ltail_loop:

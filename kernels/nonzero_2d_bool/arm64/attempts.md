@@ -17,3 +17,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.57x [1.50 – 1.64]
 - **Kept:** yes
 - **Notes:** width 32 and 1,000 about 2.6x (0.38 ns per element), width 3 0.95x: a chunk is 3 bytes there and costs more than three scalar steps. Even at width 32 the loop runs at about 10 cycles per chunk, which is the chain through the column: length, add, compare, select, every chunk.
+
+## 3. A loop over rows, with an inner loop of whole 8-byte chunks
+
+- **Idea:** take the chain through the column out of the chunk loop. An outer loop per row sets the row registers and the row's end; an inner loop runs whole 8-byte chunks with no masking and only pointer increments and a vector add for the column; one masked chunk takes what is left of the row.
+- **check:** pass
+- **compare:** significantly faster, 1.18x [1.18 – 1.19]
+- **Kept:** yes
+- **Notes:** default width 1.52x sparse and 1.22x dense, width 1,000 1.34x dense, width 3 0.96x (one masked chunk per row of 3, plus the row's bookkeeping). The sparse tables at widths 32 and 1,000 read about 1.9 ms at 1M elements for both versions, against 0.3 ms at the default width; noise from the other agents' runs, to be rechecked.
