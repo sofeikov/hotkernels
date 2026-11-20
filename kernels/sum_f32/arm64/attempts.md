@@ -125,3 +125,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.009x [1.003 – 1.015]
 - **Kept:** yes
 - **Notes:** 1.10x at 4,194,304 (265 us) and 1.05x at 16,777,216, beyond the second-level cache; 0.98x [0.96 – 1.00] at 262,144, nothing elsewhere. Load average 4.1.
+
+## 16. A diagonal of 16 single steps in the first-level cache
+
+- **Idea:** in the first-level cache, a diagonal block of 16 steps of one vector (23 diagonals) instead of two blocks of 8 (15 each), so that fewer diagonals are short ones at a block's ends.
+- **check:** pass
+- **compare:** no significant difference, 1.000x [0.999 – 1.002]
+- **Kept:** no
+- **Notes:** 124.9 ns at 4,096 against 124.4. The out-of-order core already fills the short diagonals from the next block. Load average 4.6.
