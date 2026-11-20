@@ -29,3 +29,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.061x [1.058 – 1.065]
 - **Kept:** yes
 - **Notes:** 1.14x at 1,024 and 4,096 (137 ns), 1.15x at 16,384, 1.06x in the second-level cache. Load average 4.4.
+
+## 4. No extra step when every leaf of a group has q vectors
+
+- **Idea:** a group of 8 leaves whose vectors are a multiple of 8 (of 4 for four leaves, of 2 for two) has leaves of q vectors each, so the step that adds the longer leaves' last vector, and the work of finding those vectors, is skipped. A group of two needs no search at all: its right leaf is the longer one exactly when m is odd.
+- **check:** pass
+- **compare:** significantly faster, 1.045x [1.044 – 1.046]
+- **Kept:** yes
+- **Notes:** 1.06x at 256, 1.11x at 1,024, 1.09x at 4,096 (125 ns), 1.05x in the second-level cache. Every timed size from 256 up is a power of two, whose groups all have equal leaves; other sizes keep the cost. Load average 4.0.

@@ -160,9 +160,6 @@ Lpair:      // 17..32 vectors: two leaves, m/2 and the rest
     lsr     x8, x7, #1                  // q
     add     x10, x6, x8, lsl #5         // right leaf
     add     x11, x6, x7, lsl #5         // end
-    lsl     x1, x8, #5
-    add     x7, sp, #ZERO
-    EXTRA   1, x10, x11
     ldp     q16, q17, [x6], #VEC
     ldp     q18, q19, [x10], #VEC
     sub     x8, x8, #1
@@ -175,10 +172,11 @@ Lpair:      // 17..32 vectors: two leaves, m/2 and the rest
     fadd    v19.4s, v19.4s, v3.4s
     subs    x8, x8, #1
     b.ne    1b
-    ldr     x0, [sp, #EXTRAS + 8]
-    ldp     q2, q3, [x0]
+    tbz     x7, #0, Lp_sum              // m odd: the right leaf has q + 1
+    ldp     q2, q3, [x11, #-VEC]
     fadd    v18.4s, v18.4s, v2.4s
     fadd    v19.4s, v19.4s, v3.4s
+Lp_sum:
     faddp   v16.4s, v16.4s, v17.4s
     faddp   v18.4s, v18.4s, v19.4s
     faddp   v16.4s, v16.4s, v18.4s      // halves of leaf 0, of leaf 1
@@ -197,11 +195,14 @@ Lquad:      // 34..64 vectors: four leaves
     add     x12, x6, x12, lsl #5
     add     x13, x6, x7, lsl #5
     lsl     x1, x8, #5
+    ands    x7, x7, #3                  // 0: every leaf has q vectors
+    b.eq    Lq_setup
     add     x7, sp, #ZERO
     EXTRA   0, x6, x10
     EXTRA   1, x10, x11
     EXTRA   2, x11, x12
     EXTRA   3, x12, x13
+Lq_setup:
     ldp     q16, q17, [x6], #VEC
     ldp     q18, q19, [x10], #VEC
     ldp     q20, q21, [x11], #VEC
@@ -222,6 +223,7 @@ Lquad:      // 34..64 vectors: four leaves
     fadd    v23.4s, v23.4s, v7.4s
     subs    x8, x8, #1
     b.ne    1b
+    cbz     x7, Lq_sum
     ldp     x0, x1, [sp, #EXTRAS]
     ldp     x10, x11, [sp, #EXTRAS + 16]
     ldp     q0, q1, [x0]
@@ -236,6 +238,7 @@ Lquad:      // 34..64 vectors: four leaves
     fadd    v21.4s, v21.4s, v5.4s
     fadd    v22.4s, v22.4s, v6.4s
     fadd    v23.4s, v23.4s, v7.4s
+Lq_sum:
     faddp   v16.4s, v16.4s, v17.4s
     faddp   v18.4s, v18.4s, v19.4s
     faddp   v20.4s, v20.4s, v21.4s
@@ -269,6 +272,8 @@ Locto:      // 68..128 vectors: eight leaves
     add     x16, x6, x16, lsl #5
     add     x17, x6, x7, lsl #5
     lsl     x1, x8, #5
+    ands    x7, x7, #7                  // 0: every leaf has q vectors
+    b.eq    Lo_setup
     add     x7, sp, #ZERO
     EXTRA   0, x6, x10
     EXTRA   1, x10, x11
@@ -278,6 +283,7 @@ Locto:      // 68..128 vectors: eight leaves
     EXTRA   5, x14, x15
     EXTRA   6, x15, x16
     EXTRA   7, x16, x17
+Lo_setup:
     // The running sums start at +0.0, which changes no sum but the sign of
     // a zero (see the header), so every step is alike.
     movi    v16.2d, #0
@@ -409,6 +415,7 @@ Lo_step:
     subs    x8, x8, #1
     b.ne    Lo_step
 Lo_extra:
+    cbz     x7, Lo_sum
     ldp     x0, x1, [sp, #EXTRAS]
     ldp     x10, x11, [sp, #EXTRAS + 16]
     ldp     q0, q1, [x0]
@@ -437,6 +444,7 @@ Lo_extra:
     fadd    v29.4s, v29.4s, v5.4s
     fadd    v30.4s, v30.4s, v6.4s
     fadd    v31.4s, v31.4s, v7.4s
+Lo_sum:
     faddp   v16.4s, v16.4s, v17.4s
     faddp   v18.4s, v18.4s, v19.4s
     faddp   v20.4s, v20.4s, v21.4s
