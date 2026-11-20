@@ -147,3 +147,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** no significant difference, 1.001x [0.997 – 1.005]
 - **Kept:** no
 - **Notes:** 1.01x at 1,024 (58.5 ns against 59.1). Load average 11.
+
+## 18. Eight groups of four in sequence
+
+- **Idea:** attempt 15 one level up again: a node of 272 to 512 vectors is two nodes of four groups, the right one's start and length kept in two words of the frame.
+- **check:** pass
+- **compare:** significantly faster, 1.002x [1.000 – 1.004]
+- **Kept:** yes
+- **Notes:** 1.01x at 4,096 (227 ns) and 16,384, nothing elsewhere. The walk now passes once per 4,096 elements in the cache; a level more would not show at the timed sizes. Load average 6.5.

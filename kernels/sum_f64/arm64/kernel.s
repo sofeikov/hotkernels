@@ -45,7 +45,8 @@
 .set ZERO, 32                   // 64 bytes of +0.0
 .set SUMS, 96                   // stack of sums, 8 bytes each
 .set NODES, 608                 // node stack, 16 bytes a node
-.set FRAME, 2656
+.set SAVED, 2656                // two words kept across a QUAD4
+.set FRAME, 2672
 // Above this many elements (128 KB, the first-level cache of a performance
 // core) the leaves are summed one at a time.
 .set LONG_N, 16384
@@ -426,6 +427,38 @@
     fadd    d0, d20, d24
 .endm
 
+// Sum the four groups of four of a node of x7 = 136..256 vectors at x6 into
+// d0, one after another. Uses what QUAD does and x8, x9, x15..x17, v5, v6;
+// restores x9.
+.macro QUAD4
+    lsr     x8, x7, #1                  // left half
+    sub     x9, x7, x8                  // right half
+    add     x17, x6, x8, lsl #6         // its start
+    lsr     x16, x8, #1                 // the left half's left group
+    add     x15, x6, x16, lsl #6
+    sub     x16, x8, x16                // the left half's right group
+    lsr     x7, x8, #1
+    QUAD
+    fmov    d5, d0
+    mov     x6, x15
+    mov     x7, x16
+    QUAD
+    fadd    d5, d5, d0                  // left half
+    lsr     x16, x9, #1
+    add     x15, x17, x16, lsl #6
+    sub     x9, x9, x16
+    mov     x6, x17
+    mov     x7, x16
+    QUAD
+    fmov    d6, d0
+    mov     x6, x15
+    mov     x7, x9
+    QUAD
+    fadd    d6, d6, d0                  // right half
+    fadd    d0, d5, d6
+    add     x9, sp, #NODES              // the bottom of the node stack, borrowed
+.endm
+
 .text
 .globl _sum_f64
 .p2align 2
@@ -621,6 +654,10 @@ Lplain:
     b.ls    Lsplit
     cmp     x7, #256
     b.ls    Lquad4
+    cmp     x7, #271
+    b.ls    Lsplit
+    cmp     x7, #512
+    b.ls    Lquad8
     b       Lsplit
 Lplain_long:
     cmp     x7, #32
@@ -865,33 +902,23 @@ Locto_seq:  // 68..128 vectors: eight leaves
     OCTO_SEQ
     b       Lpush
 
+Lquad8:     // 272..512 vectors: eight groups of four, one after the other
+    lsr     x8, x7, #1
+    sub     x9, x7, x8
+    add     x17, x6, x8, lsl #6
+    str     x17, [sp, #SAVED]           // the right half, for after the left
+    str     x9, [sp, #SAVED + 8]
+    mov     x7, x8
+    QUAD4
+    fmov    d7, d0
+    ldr     x6, [sp, #SAVED]
+    ldr     x7, [sp, #SAVED + 8]
+    QUAD4
+    fadd    d0, d7, d0
+    b       Lpush
+
 Lquad4:     // 136..256 vectors: four groups of four, one after the other
-    lsr     x8, x7, #1                  // left half
-    sub     x9, x7, x8                  // right half
-    add     x17, x6, x8, lsl #6         // its start
-    lsr     x16, x8, #1                 // the left half's left group
-    add     x15, x6, x16, lsl #6
-    sub     x16, x8, x16                // the left half's right group
-    lsr     x7, x8, #1
-    QUAD
-    fmov    d5, d0
-    mov     x6, x15
-    mov     x7, x16
-    QUAD
-    fadd    d5, d5, d0                  // left half
-    lsr     x16, x9, #1
-    add     x15, x17, x16, lsl #6
-    sub     x9, x9, x16
-    mov     x6, x17
-    mov     x7, x16
-    QUAD
-    fmov    d6, d0
-    mov     x6, x15
-    mov     x7, x9
-    QUAD
-    fadd    d6, d6, d0                  // right half
-    fadd    d0, d5, d6
-    add     x9, sp, #NODES              // the bottom of the node stack, borrowed
+    QUAD4
     b       Lpush
 
 Lquad2:     // 68..128 vectors: two groups of four, one after the other, so
