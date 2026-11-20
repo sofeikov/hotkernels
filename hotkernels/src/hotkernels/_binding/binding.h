@@ -67,6 +67,8 @@ typedef enum {
     HK_WHERE_F64, HK_CUMMAX_I64, HK_CUMFMAX_F64, HK_FMAX_REDUCE_F64, HK_ANY_ROWS_BOOL,
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
+    // Taken on ARM64 only (docs/coverage-gaps-design.md).
+    HK_SUM_F32,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.
@@ -388,6 +390,22 @@ static inline void hk_clear_float_flags(void) {
     feclearexcept(FE_ALL_EXCEPT);
 #endif
 }
+
+#if defined(__aarch64__)
+// Clear the four floating-point status flags NumPy reports (invalid
+// operation, divide by zero, overflow, underflow: IOC, DZC, OFC and UFC, bits
+// 0 to 3 of FPSR) and leave the others. After np.sum, NumPy leaves these four
+// clear and the inexact flag as its additions left it, set or not; a kernel
+// that makes the same additions sets the same inexact flag. FPSR is written
+// only when one of the four is set.
+static inline void hk_clear_reported_float_flags(void) {
+    // IOC, DZC, OFC and UFC.
+    const uint64_t reported = 0xf;
+    uint64_t fpsr;
+    __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr) : : "memory");
+    if (fpsr & reported) __asm__ volatile("msr fpsr, %0" : : "r"(fpsr & ~reported) : "memory");
+}
+#endif
 
 // True when a floating-point exception that NumPy reports, as a warning or an
 // error by np.errstate, has been raised since the flags were last cleared:

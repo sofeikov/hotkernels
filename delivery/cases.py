@@ -215,6 +215,8 @@ VARIANTS: tuple[Variant, ...] = (
     Variant("zero_d", lambda a: np.array(a[0]), plain=False, dims=0, min_n=1),
 )
 CONTIGUOUS = VARIANTS[0]
+# The variant whose elements are not aligned to their size.
+_MISALIGNED = next(variant for variant in VARIANTS if variant.name == "misaligned")
 
 
 def spec(kernel: str) -> Kernel:
@@ -2050,20 +2052,132 @@ def _late_bad_mask(n: int, byte: int) -> np.ndarray:
     return raw.view(np.bool_)
 
 
+# The spellings of sum that no kernel takes, whatever the array: an axis given
+# at all, even None or 0, and every other argument.
+_SUM_LEFT_SPELLINGS = (
+    Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
+    Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
+    Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
+    Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
+    Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
+    Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
+    Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+    Spelling("x.sum(0)", lambda x: x.sum(0), NEVER),
+    Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
+)
+# The float sum kernels, by element type: on ARM64 only, until measured on
+# x86-64 (docs/coverage-gaps-design.md).
+SUM_FLOAT_KERNELS = {"f32": "sum_f32"} if ON_ARM64 else {}
+# Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
+# do not give it: leaves of different lengths, a node of 33 or 65 to 67
+# vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a
+# tree of several levels, and long arrays that are not a power of two.
+SUM_TREE_SIZES = (130, 136, 263, 264, 271, 520, 527, 528, 536, 544, 1032, 1039, 1088, 2056, 4104,
+                  8200, 65544, 65551, 1048583)
+# Element counts of the arrays of negative zeros, whose sum is +0.0.
+SUM_NEGATIVE_ZERO_SIZES = (1, 7, 8, 9, 16, 129, 1024, 4096)
+# Element count of a misaligned array that NumPy sums in more than two blocks
+# of its buffer size (8,192 elements), each summed in NumPy's pairwise order
+# and the blocks' sums added in turn.
+SUM_BUFFERED_N = 20000
+# Element count of the arrays whose sum overflows, and the share of the
+# largest finite value each of their elements is.
+SUM_OVERFLOW_N = 3
+SUM_OVERFLOW_SHARE = 0.75
+
+
+def _sum_expect(kernel: str, maker: Callable[[], np.ndarray]) -> str | None:
+    """Say whether a float sum kernel takes an array: when its sum is finite.
+
+    The binding passes a call on to NumPy when the kernel's sum is a NaN or an
+    infinity, so that NumPy gives its own NaN and its own warning.
+
+    Args:
+        kernel: The kernel for the array's element type.
+        maker: Builds the array.
+
+    Returns:
+        `kernel` when NumPy's sum of the array is finite, otherwise None.
+    """
+    with np.errstate(all="ignore"):
+        finite = bool(np.isfinite(np.add.reduce(maker())))
+    return kernel if finite else None
+
+
+def _negative_zeros(dtype: str, n: int) -> np.ndarray:
+    """Return `n` negative zeros of a float type."""
+    return np.full(n, -0.0, np_dtype(dtype))
+
+
+def _sum_overflowing(dtype: str) -> np.ndarray:
+    """Return SUM_OVERFLOW_N finite values of a float type whose sum overflows."""
+    return np.full(SUM_OVERFLOW_N, np.finfo(np_dtype(dtype)).max * SUM_OVERFLOW_SHARE, np_dtype(dtype))
+
+
+def _sum_out(x: object) -> object:
+    """Return `np.sum(x, out=o)` for a zero-dimensional `o` of the array's type."""
+    return np.sum(x, out=np.empty((), np.asarray(x).dtype))
+
+
+def _float_sum_cases() -> Iterator[Case]:
+    """Yield the cases of `sum` on float32 and float64.
+
+    A kernel takes `np.sum(x)` and `x.sum()` on a contiguous one-dimensional
+    array with no other argument, and only when the sum is finite; a matrix,
+    a strided array and every other spelling go to NumPy. On x86-64 no kernel
+    takes them.
+    """
+    spellings = (
+        Spelling("np.sum(x)", np.sum, any_shape=False, sweep_values=False),
+        Spelling("x.sum()", lambda x: x.sum(), any_shape=False, sweep_values=False),
+        *_SUM_LEFT_SPELLINGS,
+        Spelling("np.sum(x, out=o)", _sum_out, NEVER),
+    )
+    neighbours = tuple(dtype for dtype in ("f32", "f64") if dtype not in SUM_FLOAT_KERNELS)
+    for case in unary_cases("sum", SUM_FLOAT_KERNELS, neighbours, spellings):
+        # NumPy sums an array whose elements are not aligned to their size in
+        # blocks of its buffer size, another order, so the binding leaves it
+        # to NumPy.
+        if f"layout={_MISALIGNED.name}" in case.label:
+            case = replace(case, expect=None)
+        yield case
+    for dtype, kernel in SUM_FLOAT_KERNELS.items():
+        for spelling in spellings[:2]:
+            # Every value class: those whose sum is not finite go to NumPy.
+            for n, cls, label, maker in value_arrays(dtype):
+                yield Case("sum", f"{spelling.text} {dtype} {label}", partial(_made, maker), spelling.call,
+                           _sum_expect(kernel, maker))
+            for n in SUM_TREE_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=random",
+                           partial(_made, partial(values, dtype, n)), spelling.call, kernel)
+            for n in SUM_NEGATIVE_ZERO_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=all negative zeros",
+                           partial(_made, partial(_negative_zeros, dtype, n)), spelling.call, kernel)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_BUFFERED_N} layout=misaligned",
+                       partial(_built, dtype, SUM_BUFFERED_N, _MISALIGNED), spelling.call, None)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_OVERFLOW_N} x=overflows",
+                       partial(_made, partial(_sum_overflowing, dtype)), spelling.call, None)
+            for n in FEW_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=signalling and negative NaNs",
+                           partial(_made, partial(unusual_nans, dtype, n)), spelling.call, None)
+                # NumPy clears the four flags it reports and leaves the
+                # inexact flag as its additions leave it: set for random
+                # values, as it was before the call for equal ones.
+                for cls in (judge_cases.RANDOM, "equal"):
+                    yield Case("sum", f"{spelling.text} {dtype} n={n} x={cls} flags after",
+                               partial(_made, partial(values, dtype, n, cls)),
+                               partial(_float_flags_after, spelling.call), kernel)
+
+
 def sum_cases() -> Iterator[Case]:
-    """Yield the cases of `sum` on uint8 and on booleans, which the same kernel serves."""
+    """Yield the cases of `sum`: on uint8 and on booleans, which one kernel serves, and on floats."""
     spellings = (
         Spelling("np.sum(x)", np.sum),
         Spelling("x.sum()", lambda x: x.sum()),
-        Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
-        Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
-        Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
-        Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
-        Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
-        Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
-        Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+        *_SUM_LEFT_SPELLINGS,
     )
-    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16", "f64"), spellings)
+    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16"), spellings)
+    yield from _float_sum_cases()
     # A mask holding a byte other than 0 or 1 counts once per element in NumPy.
     for n, byte, spelling in itertools.product(LAYOUT_SIZES, BAD_MASK_BYTES, spellings[:2]):
         yield Case("sum", f"{spelling.text} bool n={n} mask bytes are {byte}",
@@ -3664,6 +3778,34 @@ def _invalid_flag_after(call: Callable[..., object], *arguments: object) -> tupl
     _LIBM.feclearexcept(_FE_INVALID)
     result = call(*arguments)
     return result, bool(_LIBM.fetestexcept(_FE_INVALID))
+
+
+# The inexact flag of fenv.h, and all of its flags: their values differ
+# between ARM64 macOS and x86-64 Linux.
+_FE_INEXACT = 0x10 if ON_ARM64 else 0x20
+_FE_ALL_EXCEPT = 0x9F if ON_ARM64 else 0x3D
+
+
+def _float_flags_after(call: Callable[..., object], *arguments: object) -> tuple:
+    """Make a call with the invalid and inexact flags raised, and return the flags it left.
+
+    NumPy's float sum clears the flags it reports (invalid, divide by zero,
+    overflow, underflow) and leaves the inexact flag, which its additions
+    set when one of them rounds. A kernel must leave the same flags.
+
+    Args:
+        call: Makes the call on the arguments.
+        arguments: The call's arguments.
+
+    Returns:
+        (the call's result, every flag of fenv.h set afterwards).
+    """
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    _LIBM.feraiseexcept(_FE_INVALID | _FE_INEXACT)
+    result = call(*arguments)
+    flags = _LIBM.fetestexcept(_FE_ALL_EXCEPT)
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    return result, flags
 
 
 # ---------------------------------------------------------------- reduceat

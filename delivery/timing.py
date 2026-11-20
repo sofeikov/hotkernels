@@ -470,6 +470,9 @@ def _subtract_scalar(w: np.ndarray) -> None:
 # where they are built: ARM64 only. Elsewhere the statements are timed as
 # calls left to NumPy, and so they are below INPLACE_MIN_N elements.
 INPLACE_MIN_N = 131072
+# The float sum kernels take their calls on ARM64 only, until measured on
+# x86-64 (docs/coverage-gaps-design.md).
+SUM_F32 = "sum_f32" if ON_ARM64 else None
 SUBTRACT_IN_PLACE = "subtract_inplace_f64" if ON_ARM64 else None
 ADD_IN_PLACE = "add_inplace_f64" if ON_ARM64 else None
 
@@ -549,6 +552,8 @@ TAKEN: tuple[Timed, ...] = (
     Timed("sum", "x.sum()", "uint8", _bytes, lambda x: x.sum(), "sum_u8"),
     Timed("sum", "np.sum(mask)", "bool, half selected", partial(_mask, HALF), np.sum, "sum_u8"),
     Timed("sum", "mask.sum()", "bool, half selected", partial(_mask, HALF), lambda m: m.sum(), "sum_u8"),
+    Timed("sum", "np.sum(x)", "float32", partial(_floats, np.float32), np.sum, SUM_F32),
+    Timed("sum", "x.sum()", "float32", partial(_floats, np.float32), lambda x: x.sum(), SUM_F32),
     Timed("count_nonzero", "np.count_nonzero(x)", "int64", partial(_ints, np.int64), np.count_nonzero, "count_nonzero_i64"),
     Timed("count_nonzero", "np.count_nonzero(x)", "float64", partial(_ints, np.float64), np.count_nonzero, "count_nonzero_f64"),
     Timed("histogram", "np.histogram(x, 50, (-3.0, 3.0))", "float64", partial(_floats, np.float64), lambda x: np.histogram(x, BINS, RANGE), "histogram_f64"),
@@ -601,6 +606,7 @@ LEFT: tuple[Timed, ...] = (
     Timed("astype", "x.astype(np.float64)", "uint8", _bytes, lambda x: x.astype(np.float64), None),
     Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, None),
     Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), None),
+    Timed("sum", "np.sum(x[::2])", "float32, strided", partial(_floats, np.float32), lambda x: np.sum(x[::2]), None),
     Timed("count_nonzero", "np.count_nonzero(x)", "int32", partial(_ints, np.int32), np.count_nonzero, None),
     Timed("cumsum", "np.cumsum(x)", "float64, exact kernels only", partial(_floats, np.float64), np.cumsum, None),
     Timed("accumulate", "np.add.accumulate(x)", "int64", partial(_ints, np.int64), np.add.accumulate, None),
