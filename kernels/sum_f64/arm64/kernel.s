@@ -27,8 +27,8 @@
     subs    x8, x7, #1
     b.eq    2f
 1:
-    ldp     q0, q1, [x6]
-    ldp     q2, q3, [x6, #32]
+    ldnp    q0, q1, [x6]
+    ldnp    q2, q3, [x6, #32]
     add     x6, x6, #VEC
     fadd    v16.2d, v16.2d, v0.2d
     fadd    v17.2d, v17.2d, v1.2d

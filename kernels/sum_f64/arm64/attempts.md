@@ -53,3 +53,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** no significant difference, 1.001x [0.995 – 1.006]
 - **Kept:** no
 - **Notes:** 1.01x at 256 (16.2 ns): at this width a group of two is eight chains of 16 additions, and their latency, not the walk around them, is what 256 elements cost. Load average 8.2.
+
+## 7. `ldnp` in the leaves of the walk
+
+- **Idea:** the non-temporal load pair in the loop of the leaf the walk uses, which since attempt 4 sums every leaf of an array beyond the first-level cache (and the odd leaves of shorter ones).
+- **check:** pass
+- **compare:** significantly faster, 1.010x [1.005 – 1.015]; again 1.010x [1.002 – 1.019]
+- **Kept:** yes
+- **Notes:** beyond the second-level cache 1.09x to 1.12x at 4,194,304 and 1.06x to 1.07x at 16,777,216; but 0.95x at 262,144 and 0.96x to 0.98x at 65,536, in it. Load average 20 to 24 during both runs, from other work: rough.
