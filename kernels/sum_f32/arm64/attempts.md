@@ -77,3 +77,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.006x [1.003 – 1.009]
 - **Kept:** yes
 - **Notes:** 1.02x at 262,144 and 1,048,576 (55.6 us), 1.01x at 65,536, nothing in the first-level cache or beyond the second. Load average 3.0.
+
+## 10. Test for a group of eight first
+
+- **Idea:** a node is tested for a group of eight (68 to 128 vectors) with one unsigned compare before anything else, since nearly all of a long array is such groups; the other classes follow.
+- **check:** pass
+- **compare:** significantly faster, 1.004x [1.003 – 1.006]
+- **Kept:** yes
+- **Notes:** 1.01x at 1,024 and 16,384, nothing elsewhere: five instructions per group of 1,024 elements. Load average 4.0.

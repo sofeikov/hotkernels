@@ -167,6 +167,12 @@ Lnode:
 Lplain:
     // A node of up to 128 vectors whose leaves are all at one depth below
     // it is summed as a group: its 2, 4 or 8 leaves side by side.
+    // Eight first: nearly all of a long array is groups of eight.
+    sub     x0, x7, #68
+    cmp     x0, #128 - 68
+    b.ls    Locto
+    cmp     x7, #128
+    b.hi    Lsplit
     cmp     x7, #16
     b.ls    Lleaf
     cmp     x7, #32
@@ -175,10 +181,6 @@ Lplain:
     b.eq    Lsplit
     cmp     x7, #64
     b.ls    Lquad
-    cmp     x7, #67
-    b.ls    Lsplit
-    cmp     x7, #128
-    b.ls    Locto
     b       Lsplit
 Lleaf:
     LEAF
