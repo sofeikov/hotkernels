@@ -15,8 +15,9 @@
 #
 # A block with at most SPARSE_MAX true elements takes a fixed SPARSE_MAX
 # positions out of the word with `tzcnt` and `blsr`, and stores each pair
-# (one 16-byte store or two of 8 bytes, by the path below). Past the last set bit `tzcnt` returns 32: a pair the
-# write position does not advance over, and the next store overwrites it.
+# (one 16-byte store or two of 8 bytes, by the path below). Past the last set
+# bit `tzcnt` returns 32: a pair the write position does not advance over,
+# and the next store overwrites it.
 # After a sparse block the kernel looks at a window of two blocks, a 64-bit
 # word, and takes PAIR_MAX positions out of it if it has no more; a window
 # with more is taken one block at a time, and so is everything after a dense
@@ -28,8 +29,8 @@
 #
 # The row r and the column c of each block's first element are carried from
 # block to block: the column advances by 32 mod width and the row by
-# 32 / width, plus one where the column passes the width (one `div` on entry,
-# then a compare, `cmov` and `sbb` per block). Position p of a block is at
+# 32 / width, plus one where the column passes the width (a window by 64:
+# two `div` on entry, then a compare, `cmov` and `sbb` per block or window). Position p of a block is at
 # column c + p of row r, until the row ends.
 #
 # Rows of up to 64 elements. c + p is below 128, and a table of 256 bytes for
@@ -44,8 +45,7 @@
 #
 # Wider rows. A sparse block or window either lies in one row (c + 32 or
 # c + 64 <= width: the pair is r and c + p, stored as they are) or crosses one
-# row end, where a
-# compare of c + p with the width picks the next row. A dense group's byte
+# row end, where a compare of c + p with the width picks the next row. A dense group's byte
 # indexes a table of its positions, `vpbroadcastq` puts them in every
 # quadword and four `vpshufb` spread them into four registers of two
 # (0, position) pairs, to which (r, column of the group's first element) is
@@ -56,8 +56,8 @@
 # Stores stay inside the capacity: a block starting at element f is read only
 # when f + 32 <= n (a window when f + 64 <= n), at most 2f int64 are kept
 # before it, and a block writes at most 2 * 32 int64 past that (a window
-# 2 * PAIR_MAX). The last 0 to 31 elements and matrices under
-# 32 elements are done one element at a time, as the reference does it.
+# 2 * PAIR_MAX). The last 0 to 31 elements and matrices under 32 elements
+# are done one element at a time, as the reference does it.
 
 # A block with more true elements than this goes through the tables.
 .set SPARSE_MAX, 4
