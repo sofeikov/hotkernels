@@ -77,3 +77,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** no significant difference, 1.001x [0.999 – 1.003]
 - **Kept:** no
 - **Notes:** 1.01x at 4,096 within the noise. A group of four here is 512 elements, half of float32's group of eight, and the tests are a smaller share still of its loads than float32's were. Load average 17.
+
+## 10. Groups of two beyond the first-level cache
+
+- **Idea:** two neighbouring leaves are two streams 1 KB apart; perhaps few enough for the caches beyond the first, where attempt 4 sums leaves one at a time.
+- **check:** pass
+- **compare:** significantly slower, 0.989x [0.984 – 0.994]
+- **Kept:** no
+- **Notes:** 0.93x at 4,194,304 and 0.96x at 16,777,216 (where the pairs' loads are not the non-temporal ones of attempt 8), nothing elsewhere. Load average 12.
