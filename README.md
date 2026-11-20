@@ -97,6 +97,14 @@ One `uv run judge run <kernel> --record` per kernel, one after another, at a loa
 
 One `uv run judge run unique_i64 --record`, `--unlocked` because its spec is not yet on `main`, at a load average of 22: rough. The report is in [`results/`](results). From Python, where the array is first read for its range, `np.unique(x)` on two values is about 18x faster than NumPy at a million elements and 13x at 16. On x86-64, on the Intel Core i5-14600KF, the kernel is 1.3x to 1.9x over the C and 70x to 83x over NumPy at 1,048,576 elements, and 2.9x to 5.6x over the C at 4,096 ([docs/kernel-findings.md](docs/kernel-findings.md#distinct-labels-npunique-on-int64)); from Python `np.unique(x)` is about 39x faster than NumPy at a million elements there and 49x at 4,096.
 
+`sum_f32`, for `np.sum(x)` and `x.sum()` on float32, comes from the calls a production pipeline left to NumPy ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [docs/coverage-gaps-design.md](docs/coverage-gaps-design.md)). It returns NumPy's result bit for bit: NumPy adds in a fixed order, eight running sums over blocks of up to 128 elements with the blocks' sums added in pairs, and the kernel makes the same additions in the same order, running several blocks side by side, which a compiler cannot do with NumPy's recursion. It is installed on ARM64 only, until it is measured on x86-64. On the Apple M1 Pro at 1,048,576 elements:
+
+| Call | Elements | vs NumPy | vs `clang -O3` |
+|---|---|---|---|
+| `np.sum(x)` | float32 | 3.18x | 1.62x |
+
+One `uv run judge run sum_f32 --record`, `--unlocked` because its spec is not yet on `main`, at a load average of 3.9 with other kernels' runs in progress: indicative. The report is in [`results/`](results). The clang loop is NumPy's order written in C; it is 2.8x to 3.0x behind from 1,024 to 16,384 elements, where the data fits the first-level cache. From Python, at a load average of 5.9, `np.sum(x)` is about 23x faster than NumPy at 16 elements, 10x at 4,096 and 2.3x at a million ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-floats-in-numpys-order)).
+
 The stable `argsort` kernels, on the Apple M1 Pro at 1,048,576 elements. They are a radix sort where NumPy merges, written in C: a merge sort in C only ties NumPy, and the radix sort's one hot loop tied the compiler's when written by hand.
 
 | Stable argsort | Elements | vs NumPy | |
