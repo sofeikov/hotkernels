@@ -64,8 +64,8 @@
 // Two steps of a leaf of a group of eight: its vectors 2k and 2k + 1 after
 // the pointer \p, 64 bytes, into its running sums v\lo and v\hi.
 .macro DSTEP2 lo, hi, p, k
-    ldp     q0, q1, [\p, #\k * 2 * VEC]
-    ldp     q2, q3, [\p, #\k * 2 * VEC + VEC]
+    ldnp    q0, q1, [\p, #\k * 2 * VEC]
+    ldnp    q2, q3, [\p, #\k * 2 * VEC + VEC]
     fadd    v\lo\().4s, v\lo\().4s, v0.4s
     fadd    v\hi\().4s, v\hi\().4s, v1.4s
     fadd    v\lo\().4s, v\lo\().4s, v2.4s

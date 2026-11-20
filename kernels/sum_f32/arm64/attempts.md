@@ -117,3 +117,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.002x [1.001 – 1.003]
 - **Kept:** yes
 - **Notes:** 1.02x at 1,024 (29.0 ns), nothing elsewhere. Load average 5.0.
+
+## 15. `ldnp` in the 64-byte diagonal
+
+- **Idea:** the non-temporal load pair in the blocks that only arrays of 32,768 elements and more take (attempt 8).
+- **check:** pass
+- **compare:** significantly faster, 1.009x [1.003 – 1.015]
+- **Kept:** yes
+- **Notes:** 1.10x at 4,194,304 (265 us) and 1.05x at 16,777,216, beyond the second-level cache; 0.98x [0.96 – 1.00] at 262,144, nothing elsewhere. Load average 4.1.
