@@ -141,3 +141,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 ## Stopped
 
 Six attempts in a row (12 to 17) gave nothing worth keeping. The dense step stores eight 16-byte pairs per 8 mask bytes, about 6 cycles per chunk, which looks like the limit of the stores; the sparse step runs at about 4 instructions per cycle. Not tried: a sparse step for the last partial 64-byte block of a matrix (the workload's 880-byte matrices end with 48 bytes that go to the dense code), since every size `compare` times is a multiple of 64 and would not see it.
+
+## 18. The last partial 64-byte block as a sparse block (timed outside the judge)
+
+- **Idea:** the sparse path hands the last 1 to 63 bytes of a mask to the dense code; the workload's matrices of 40 rows of 22 (880 bytes) end with 48 such bytes. Instead, when at least 24 bytes are left, load the last 64 bytes of the mask, clear the bits of those already done, count, and extract 12 positions if at most 12 are true (dense otherwise). Below 24 bytes the dense code stays cheaper: a first version from 12 bytes up was slower at 1,100 elements (12 left) than the dense code. `compare` cannot see this: every size it times is a multiple of 64.
+- **check:** pass
+- **compare:** significantly slower, 0.998x [0.998 – 0.999] (no timed size reaches the new code)
+- **Kept:** no
+- **Notes:** timer outside the judge, 5% true, ns per element, before / after: width 22 at 880 elements 0.090 to 0.094 / 0.082 to 0.086; width 3 at 880 0.093 / 0.083; width 22 at 924 0.084 / 0.083; width 3 at 924 0.094 / 0.085; 1,000 and 1,100 elements unchanged. At most 10 ns per call at the workload's shape, against about 540 ns for the whole call from Python: not a clear gain, and `compare` is a little slower.
