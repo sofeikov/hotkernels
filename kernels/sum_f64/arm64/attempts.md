@@ -115,3 +115,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.003x [1.000 – 1.006]
 - **Kept:** yes
 - **Notes:** 1.02x at 4,194,304 and 16,777,216; 0.99x [0.99 – 1.00] at 65,536, a path this change does not touch (one more compare per leaf). Outside timer against the naive C: 1.067x at 1,048,576, 1.070x at 4,194,304, 1.030x at 16,777,216. Load average 7.5.
+
+## 14. Two groups of four in sequence in the first-level cache
+
+- **Idea:** what attempt 11 found applies in the cache too: the walk mispredicts its marker test about once per group. A node of 68 to 128 vectors (two groups of four) has both groups summed one after the other, the first group's sum kept in a register, so the walk passes once per 1,024 elements instead of once per 512. The group of four became a macro used in both places.
+- **check:** pass
+- **compare:** significantly faster, 1.011x [1.010 – 1.012]
+- **Kept:** yes
+- **Notes:** 1.04x at 1,024 and 4,096 (238 ns), 1.03x at 16,384, nothing elsewhere. Load average 14.

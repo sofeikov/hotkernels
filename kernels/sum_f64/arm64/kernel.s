@@ -273,6 +273,119 @@
     faddp   d0, v16.2d
 .endm
 
+// Sum a group of four leaves, x7 = m of 34..64 vectors at x6, into d0.
+// Uses x0, x1, x6..x8, x10..x13, v0..v3 and v16..v31.
+.macro QUAD
+    lsr     x8, x7, #2                  // q
+    lsr     x11, x7, #1                 // b2
+    lsr     x10, x11, #1                // b1
+    sub     x0, x7, x11
+    add     x12, x11, x0, lsr #1        // b3
+    add     x10, x6, x10, lsl #6
+    add     x11, x6, x11, lsl #6
+    add     x12, x6, x12, lsl #6
+    add     x13, x6, x7, lsl #6
+    lsl     x1, x8, #6
+    ands    x7, x7, #3                  // 0: every leaf has q vectors
+    b.eq    1f
+    add     x7, sp, #ZERO
+    EXTRA   0, x6, x10
+    EXTRA   1, x10, x11
+    EXTRA   2, x11, x12
+    EXTRA   3, x12, x13
+1:
+    // The running sums start at +0.0, which changes no sum but the sign of
+    // a zero, so every step is alike.
+    movi    v16.2d, #0
+    movi    v17.2d, #0
+    movi    v18.2d, #0
+    movi    v19.2d, #0
+    movi    v20.2d, #0
+    movi    v21.2d, #0
+    movi    v22.2d, #0
+    movi    v23.2d, #0
+    movi    v24.2d, #0
+    movi    v25.2d, #0
+    movi    v26.2d, #0
+    movi    v27.2d, #0
+    movi    v28.2d, #0
+    movi    v29.2d, #0
+    movi    v30.2d, #0
+    movi    v31.2d, #0
+    // When q is even, leaves whose starts are a multiple of 4 vectors apart
+    // are common, and the L1 serves loads of the same offset in different
+    // 256-byte blocks at once slowly (sum_f32's log). So 8 steps are taken in
+    // a diagonal order: leaf j's step k beside leaf 0's step k + j.
+    tbnz    x8, #0, 3f
+    cmp     x8, #8
+    b.lo    3f
+2:
+    DSTEP   x6, 0, 16, 17, 18, 19
+    DSTEP   x6, 1, 16, 17, 18, 19
+    DSTEP   x10, 0, 20, 21, 22, 23
+    DSTEP   x6, 2, 16, 17, 18, 19
+    DSTEP   x10, 1, 20, 21, 22, 23
+    DSTEP   x11, 0, 24, 25, 26, 27
+    DSTEP   x6, 3, 16, 17, 18, 19
+    DSTEP   x10, 2, 20, 21, 22, 23
+    DSTEP   x11, 1, 24, 25, 26, 27
+    DSTEP   x12, 0, 28, 29, 30, 31
+    DSTEP   x6, 4, 16, 17, 18, 19
+    DSTEP   x10, 3, 20, 21, 22, 23
+    DSTEP   x11, 2, 24, 25, 26, 27
+    DSTEP   x12, 1, 28, 29, 30, 31
+    DSTEP   x6, 5, 16, 17, 18, 19
+    DSTEP   x10, 4, 20, 21, 22, 23
+    DSTEP   x11, 3, 24, 25, 26, 27
+    DSTEP   x12, 2, 28, 29, 30, 31
+    DSTEP   x6, 6, 16, 17, 18, 19
+    DSTEP   x10, 5, 20, 21, 22, 23
+    DSTEP   x11, 4, 24, 25, 26, 27
+    DSTEP   x12, 3, 28, 29, 30, 31
+    DSTEP   x6, 7, 16, 17, 18, 19
+    DSTEP   x10, 6, 20, 21, 22, 23
+    DSTEP   x11, 5, 24, 25, 26, 27
+    DSTEP   x12, 4, 28, 29, 30, 31
+    DSTEP   x10, 7, 20, 21, 22, 23
+    DSTEP   x11, 6, 24, 25, 26, 27
+    DSTEP   x12, 5, 28, 29, 30, 31
+    DSTEP   x11, 7, 24, 25, 26, 27
+    DSTEP   x12, 6, 28, 29, 30, 31
+    DSTEP   x12, 7, 28, 29, 30, 31
+    add     x6, x6, #8 * VEC
+    add     x10, x10, #8 * VEC
+    add     x11, x11, #8 * VEC
+    add     x12, x12, #8 * VEC
+    sub     x8, x8, #8
+    cmp     x8, #8
+    b.hs    2b
+    cbz     x8, 4f
+3:
+    STEP    x6, 16, 17, 18, 19
+    STEP    x10, 20, 21, 22, 23
+    STEP    x11, 24, 25, 26, 27
+    STEP    x12, 28, 29, 30, 31
+    subs    x8, x8, #1
+    b.ne    3b
+4:
+    cbz     x7, 5f
+    ldp     x0, x1, [sp, #EXTRAS]
+    ldp     x10, x11, [sp, #EXTRAS + 16]
+    ADDVEC  x0, 16, 17, 18, 19
+    ADDVEC  x1, 20, 21, 22, 23
+    ADDVEC  x10, 24, 25, 26, 27
+    ADDVEC  x11, 28, 29, 30, 31
+5:
+    HALVES  16, 17, 18, 19
+    HALVES  20, 21, 22, 23
+    HALVES  24, 25, 26, 27
+    HALVES  28, 29, 30, 31
+    faddp   v16.2d, v16.2d, v20.2d      // leaf 0, leaf 1
+    faddp   v24.2d, v24.2d, v28.2d      // leaf 2, leaf 3
+    faddp   v16.2d, v16.2d, v24.2d      // 0 + 1, 2 + 3
+    faddp   d0, v16.2d
+.endm
+
 .text
 .globl _sum_f64
 .p2align 2
@@ -460,6 +573,10 @@ Lplain:
     b.eq    Lsplit
     cmp     x7, #64
     b.ls    Lquad
+    cmp     x7, #67
+    b.ls    Lsplit
+    cmp     x7, #128
+    b.ls    Lquad2
     b       Lsplit
 Lplain_long:
     cmp     x7, #32
@@ -529,114 +646,7 @@ Lp_sum:
     b       Lpush
 
 Lquad:      // 34..64 vectors: four leaves
-    lsr     x8, x7, #2                  // q
-    lsr     x11, x7, #1                 // b2
-    lsr     x10, x11, #1                // b1
-    sub     x0, x7, x11
-    add     x12, x11, x0, lsr #1        // b3
-    add     x10, x6, x10, lsl #6
-    add     x11, x6, x11, lsl #6
-    add     x12, x6, x12, lsl #6
-    add     x13, x6, x7, lsl #6
-    lsl     x1, x8, #6
-    ands    x7, x7, #3                  // 0: every leaf has q vectors
-    b.eq    Lq_setup
-    add     x7, sp, #ZERO
-    EXTRA   0, x6, x10
-    EXTRA   1, x10, x11
-    EXTRA   2, x11, x12
-    EXTRA   3, x12, x13
-Lq_setup:
-    // The running sums start at +0.0, which changes no sum but the sign of
-    // a zero, so every step is alike.
-    movi    v16.2d, #0
-    movi    v17.2d, #0
-    movi    v18.2d, #0
-    movi    v19.2d, #0
-    movi    v20.2d, #0
-    movi    v21.2d, #0
-    movi    v22.2d, #0
-    movi    v23.2d, #0
-    movi    v24.2d, #0
-    movi    v25.2d, #0
-    movi    v26.2d, #0
-    movi    v27.2d, #0
-    movi    v28.2d, #0
-    movi    v29.2d, #0
-    movi    v30.2d, #0
-    movi    v31.2d, #0
-    // When q is even, leaves whose starts are a multiple of 4 vectors apart
-    // are common, and the L1 serves loads of the same offset in different
-    // 256-byte blocks at once slowly (sum_f32's log). So 8 steps are taken in
-    // a diagonal order: leaf j's step k beside leaf 0's step k + j.
-    tbnz    x8, #0, Lq_step
-    cmp     x8, #8
-    b.lo    Lq_step
-Lq_diag:
-    DSTEP   x6, 0, 16, 17, 18, 19
-    DSTEP   x6, 1, 16, 17, 18, 19
-    DSTEP   x10, 0, 20, 21, 22, 23
-    DSTEP   x6, 2, 16, 17, 18, 19
-    DSTEP   x10, 1, 20, 21, 22, 23
-    DSTEP   x11, 0, 24, 25, 26, 27
-    DSTEP   x6, 3, 16, 17, 18, 19
-    DSTEP   x10, 2, 20, 21, 22, 23
-    DSTEP   x11, 1, 24, 25, 26, 27
-    DSTEP   x12, 0, 28, 29, 30, 31
-    DSTEP   x6, 4, 16, 17, 18, 19
-    DSTEP   x10, 3, 20, 21, 22, 23
-    DSTEP   x11, 2, 24, 25, 26, 27
-    DSTEP   x12, 1, 28, 29, 30, 31
-    DSTEP   x6, 5, 16, 17, 18, 19
-    DSTEP   x10, 4, 20, 21, 22, 23
-    DSTEP   x11, 3, 24, 25, 26, 27
-    DSTEP   x12, 2, 28, 29, 30, 31
-    DSTEP   x6, 6, 16, 17, 18, 19
-    DSTEP   x10, 5, 20, 21, 22, 23
-    DSTEP   x11, 4, 24, 25, 26, 27
-    DSTEP   x12, 3, 28, 29, 30, 31
-    DSTEP   x6, 7, 16, 17, 18, 19
-    DSTEP   x10, 6, 20, 21, 22, 23
-    DSTEP   x11, 5, 24, 25, 26, 27
-    DSTEP   x12, 4, 28, 29, 30, 31
-    DSTEP   x10, 7, 20, 21, 22, 23
-    DSTEP   x11, 6, 24, 25, 26, 27
-    DSTEP   x12, 5, 28, 29, 30, 31
-    DSTEP   x11, 7, 24, 25, 26, 27
-    DSTEP   x12, 6, 28, 29, 30, 31
-    DSTEP   x12, 7, 28, 29, 30, 31
-    add     x6, x6, #8 * VEC
-    add     x10, x10, #8 * VEC
-    add     x11, x11, #8 * VEC
-    add     x12, x12, #8 * VEC
-    sub     x8, x8, #8
-    cmp     x8, #8
-    b.hs    Lq_diag
-    cbz     x8, Lq_extra
-Lq_step:
-    STEP    x6, 16, 17, 18, 19
-    STEP    x10, 20, 21, 22, 23
-    STEP    x11, 24, 25, 26, 27
-    STEP    x12, 28, 29, 30, 31
-    subs    x8, x8, #1
-    b.ne    Lq_step
-Lq_extra:
-    cbz     x7, Lq_sum
-    ldp     x0, x1, [sp, #EXTRAS]
-    ldp     x10, x11, [sp, #EXTRAS + 16]
-    ADDVEC  x0, 16, 17, 18, 19
-    ADDVEC  x1, 20, 21, 22, 23
-    ADDVEC  x10, 24, 25, 26, 27
-    ADDVEC  x11, 28, 29, 30, 31
-Lq_sum:
-    HALVES  16, 17, 18, 19
-    HALVES  20, 21, 22, 23
-    HALVES  24, 25, 26, 27
-    HALVES  28, 29, 30, 31
-    faddp   v16.2d, v16.2d, v20.2d      // leaf 0, leaf 1
-    faddp   v24.2d, v24.2d, v28.2d      // leaf 2, leaf 3
-    faddp   v16.2d, v16.2d, v24.2d      // 0 + 1, 2 + 3
-    faddp   d0, v16.2d
+    QUAD
     b       Lpush
 
 // ---- Beyond the first-level cache: a group's leaves one after another, in
@@ -838,6 +848,20 @@ Locto_seq:  // 68..128 vectors: eight leaves
     fadd    d20, d20, d22
     fadd    d24, d24, d26
     fadd    d0, d20, d24
+    b       Lpush
+
+Lquad2:     // 68..128 vectors: two groups of four, one after the other, so
+            // that the walk does not pass between them
+    lsr     x8, x7, #1
+    add     x15, x6, x8, lsl #6         // the right group
+    sub     x16, x7, x8
+    mov     x7, x8
+    QUAD
+    fmov    d5, d0
+    mov     x6, x15
+    mov     x7, x16
+    QUAD
+    fadd    d0, d5, d0
     b       Lpush
 
 Ldone:
