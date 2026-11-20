@@ -346,3 +346,31 @@ there.
   16,777,216 elements on both tables, 1.17x at 64 elements (one row, Lrow1: the code moved), 0.96x
   to 0.98x at 256 and 1,024 behind the size test.
 - **Kept:** yes
+
+## 31. The size tests as one `tst`
+
+- **Idea:** each test for HUGE_N was `mov`, `cmp` and a branch; HUGE_N is a power of two, so `tst
+  x2, #-HUGE_N` and a branch do it in two instructions, on the paths of 33 to 256 and widths
+  dividing 16.
+- **check:** pass
+- **compare:** significantly slower, 0.998x [0.997 – 0.998] (load average 1.8); width 64 0.86x at
+  64 elements (one row, 1.9 ns to 2.2 ns: the code after it moved), 1.01x at 256 and 1,024.
+- **Kept:** no
+
+## Where it stopped under this spec
+
+Attempts 24 to 31: six kept, one rejected, one baseline. Stopped there because the timed widths
+are at their limits: width 31 at two loads a row and 8 at about 43 bytes a cycle in the first-level
+cache, width 64 at 1.37 cycles a row against 1.33 for four loads, width 256 at 16 loads a row, and
+every width at the second-level cache's 80 GB/s beyond. `run --record` (load average 2.1 to 2.3):
+8.77x [8.76 – 8.77] over the naive C and 73.6x over NumPy over all eight tables, from 8.34x and
+70.7x at attempt 24; width 31 16.9x / 16.8x (sparse / dense), 8 26.8x / 26.8x, 64 4.81x / 4.81x,
+256 2.71x / 2.72x. The smallest gain is width 64 with no row (16 elements), 2.17x; no size is slower
+than the C or NumPy. With the output 16 bytes behind the input: 1.00x n.s.
+
+Untimed widths against the C, before attempt 25 and after attempt 30 (scratch timer, 3% True,
+load average 3.3 and 2.2; ratios at 930 / 4,096 / 1,048,576 elements): 1, 2, 3, 8, 15, 16, 17, 33,
+65, 100 and 1,000 within 2% of before at every size; 48 18.3x / 24.3x / 15.4x against 18.6x / 24.9x
+/ 15.4x; 129 2.72x / 3.01x / 2.15x against 2.46x / 2.83x / 1.96x; 200 2.86x / 3.67x / 2.42x against
+2.60x / 3.23x / 2.02x. The property that any non-zero byte is True, which this spec's judge does not
+feed, was checked after every attempt against a plain loop on arbitrary bytes: 1,848 cases pass.
