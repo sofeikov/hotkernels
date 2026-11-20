@@ -111,18 +111,132 @@
 .globl _sum_f64
 .p2align 2
 _sum_f64:
-    cmp     x1, #8
-    b.lo    Lsmall
-    cmp     x1, #128
-    b.hi    Lbig
-    and     x2, x1, #7
-    lsr     x7, x1, #3
-    mov     x6, x0
-    LEAF
-    TAIL
+    // 8..128 elements are one leaf, the commonest calls: straight in.
+    sub     x2, x1, #8
+    cmp     x2, #120
+    b.hi    Lnot_leaf
+    ldp     q16, q17, [x0]
+    ldp     q18, q19, [x0, #32]
+    add     x0, x0, #VEC
+    lsr     x8, x2, #3                  // vectors after the first, 0..15
+    // Into a straight run of 15 steps of 24 bytes, at the step that leaves
+    // exactly x8 of them.
+    adr     x9, Lf_sum
+    sub     x9, x9, x8, lsl #4
+    sub     x9, x9, x8, lsl #3
+    br      x9
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+    ldp     q0, q1, [x0], #VEC
+    ldp     q2, q3, [x0, #-32]
+    fadd    v16.2d, v16.2d, v0.2d
+    fadd    v17.2d, v17.2d, v1.2d
+    fadd    v18.2d, v18.2d, v2.2d
+    fadd    v19.2d, v19.2d, v3.2d
+Lf_sum:
+    faddp   v16.2d, v16.2d, v17.2d
+    faddp   v18.2d, v18.2d, v19.2d
+    faddp   v16.2d, v16.2d, v18.2d
+    faddp   d0, v16.2d
+    ands    x2, x1, #7
+    b.ne    Lf_tail
     movi    d1, #0
     fadd    d0, d0, d1
     ret
+Lf_tail:
+    ldr     d1, [x0], #8
+    fadd    d0, d0, d1
+    subs    x2, x2, #1
+    b.ne    Lf_tail
+    movi    d1, #0
+    fadd    d0, d0, d1
+    ret
+
+Lnot_leaf:
+    cmp     x1, #8
+    b.hs    Lbig
 
 Lsmall:
     movi    d0, #0

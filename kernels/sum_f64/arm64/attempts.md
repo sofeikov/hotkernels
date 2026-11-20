@@ -37,3 +37,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.011x [1.007 – 1.016]
 - **Kept:** yes
 - **Notes:** 1.03x from 262,144 to 4,194,304, 1.04x at 16,777,216, nothing in the first-level cache. A first try with 16,384 itself on the long path was 0.74x there: an array of exactly 128 KB still sits in the first-level cache. Load average 4.8.
+
+## 5. One leaf as a straight run entered at its length
+
+- **Idea:** float32's attempts 5 and 20: 8 to 128 elements are tested with one unsigned compare and summed by 15 steps written out, entered by a computed branch at the step that leaves exactly the leaf's vectors after its first.
+- **check:** pass
+- **compare:** significantly faster, 1.009x [1.004 – 1.014]
+- **Kept:** yes
+- **Notes:** 1.08x at 16 (1.6 ns), 1.02x at 64, nothing elsewhere. A leaf of eight float64 vectors is four chains of seven additions, bound by their latency more than float32's two chains were by the loop. The indirect branch is predicted in the judge, which calls one size at a time. Load average 4.5.
