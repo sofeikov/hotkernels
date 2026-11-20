@@ -141,3 +141,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.002x [0.998 – 1.005]
 - **Kept:** no
 - **Notes:** 1.02x [1.00 – 1.04] at 262,144, 1.01x at 1,048,576: the loss attempt 15 showed there was mostly noise. Load average 5.0.
+
+## 18. Prefetch two groups ahead
+
+- **Idea:** attempt 9's prefetch at twice the distance, the leaf starts of the group after next.
+- **check:** pass
+- **compare:** no significant difference, 0.999x [0.998 – 1.001]
+- **Kept:** no
+- **Notes:** nothing at any size. Load average 4.2.
