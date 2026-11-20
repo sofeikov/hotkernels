@@ -246,6 +246,11 @@ Lnarrow:
     add     x8, x0, x5                  // end of the whole rows
     sub     x9, x8, #16                 // the last load that fits
     movi    v16.16b, #0
+    lsl     x16, x7, #3
+    sub     x16, x16, x7                // 7 L
+    sub     x17, x9, x16                // the last x10 whose eight loads fit
+    cmp     x0, x17
+    b.hi    Lnarrow_short               // fewer than eight loads in all
     movi    v17.16b, #0
     movi    v18.16b, #0
     movi    v19.16b, #0
@@ -259,10 +264,6 @@ Lnarrow:
     lsl     x13, x7, #2                 // 4 L
     add     x14, x10, x13               // loads at x14 + 0, 1, 2, 3 L
     lsl     x15, x7, #3                 // 8 L: one step
-    add     x16, x12, x13               // 7 L
-    sub     x17, x9, x16                // the last x10 whose eight loads fit
-    cmp     x10, x17
-    b.hi    Lnarrow_one
     cmp     x7, #16
     b.eq    Lnarrow16
 Lnarrow_loop:
@@ -779,6 +780,25 @@ Lmid256_nt:
     subs    x4, x4, #1
     b.ne    Lmid256_nt
     b       Lmid256_end
+
+// Rows of 1 to 16 when the whole rows take fewer than eight loads: one
+// accumulator, v16, a load at a time, then the last 16 bytes as in
+// Lnarrow_last.
+Lnarrow_short:
+    mov     x10, x0
+1:  ldr     q0, [x10]
+    add     x10, x10, x7
+    orr     v16.16b, v16.16b, v0.16b
+    cmp     x10, x9
+    b.ls    1b
+    ldr     q0, [x9]
+    mov     x6, #16
+    sub     x6, x6, x7
+    dup     v1.16b, w6
+    add     v1.16b, v31.16b, v1.16b
+    tbl     v0.16b, {v0.16b}, v1.16b
+    orr     v16.16b, v16.16b, v0.16b
+    b       Lnarrow_fold
 
 .section __TEXT,__const
 .p2align 4

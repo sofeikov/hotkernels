@@ -302,3 +302,14 @@ there.
 - **compare:** significantly faster, 1.001x [1.001 – 1.001] (load average 2.4); width 256 1.12x at
   16,777,216 elements on the sparse table, 0.96x to 0.98x at 256 and 1,024 behind the size test.
 - **Kept:** yes
+
+## 27. Rows of 1 to 16, fewer than eight loads in all: one accumulator
+
+- **Idea:** width 8 at 16 elements (two rows) was 1.83x over the C, the smallest gain of any
+  table: the narrow path cleared eight accumulators and set up seven offsets for a matrix of one
+  or two loads. Now the test for a step of eight loads comes first, and a matrix that has none
+  takes a loop of one accumulator, out of line, then the last 16 bytes and the fold as before.
+- **check:** pass; arbitrary-bytes check passes.
+- **compare:** significantly faster, 1.007x [1.006 – 1.007] (load average 1.9); width 8 1.26x at
+  16 elements (3.7 ns to 2.9 ns), 1.07x at 64, 0.99x at 1,024; 1.03x over each of its tables.
+- **Kept:** yes
