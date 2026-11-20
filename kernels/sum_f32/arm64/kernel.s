@@ -57,6 +57,14 @@
     str     x0, [sp, #EXTRAS + 8 * \slot]
 .endm
 
+// One step of a leaf of a group of eight: its vector \k after the pointer
+// \p into its running sums v\lo (lanes 0..3) and v\hi (lanes 4..7).
+.macro DSTEP lo, hi, p, k
+    ldp     q0, q1, [\p, #\k * VEC]
+    fadd    v\lo\().4s, v\lo\().4s, v0.4s
+    fadd    v\hi\().4s, v\hi\().4s, v1.4s
+.endm
+
 .text
 .globl _sum_f32
 .p2align 2
@@ -270,16 +278,110 @@ Locto:      // 68..128 vectors: eight leaves
     EXTRA   5, x14, x15
     EXTRA   6, x15, x16
     EXTRA   7, x16, x17
-    ldp     q16, q17, [x6], #VEC
-    ldp     q18, q19, [x10], #VEC
-    ldp     q20, q21, [x11], #VEC
-    ldp     q22, q23, [x12], #VEC
-    ldp     q24, q25, [x13], #VEC
-    ldp     q26, q27, [x14], #VEC
-    ldp     q28, q29, [x15], #VEC
-    ldp     q30, q31, [x16], #VEC
-    sub     x8, x8, #1
-1:
+    // The running sums start at +0.0, which changes no sum but the sign of
+    // a zero (see the header), so every step is alike.
+    movi    v16.2d, #0
+    movi    v17.2d, #0
+    movi    v18.2d, #0
+    movi    v19.2d, #0
+    movi    v20.2d, #0
+    movi    v21.2d, #0
+    movi    v22.2d, #0
+    movi    v23.2d, #0
+    movi    v24.2d, #0
+    movi    v25.2d, #0
+    movi    v26.2d, #0
+    movi    v27.2d, #0
+    movi    v28.2d, #0
+    movi    v29.2d, #0
+    movi    v30.2d, #0
+    movi    v31.2d, #0
+    // When q is even, leaves whose starts are a multiple of 8 vectors apart
+    // are common, and the L1 serves loads of the same 32 bytes of different
+    // 256-byte blocks at once slowly. So 8 steps are taken in a diagonal
+    // order: leaf j's step k beside leaf 0's step k + j.
+    tbnz    x8, #0, Lo_plain
+    cmp     x8, #8
+    b.lo    Lo_plain
+Lo_diag:
+    DSTEP   16, 17, x6, 0
+    DSTEP   16, 17, x6, 1
+    DSTEP   18, 19, x10, 0
+    DSTEP   16, 17, x6, 2
+    DSTEP   18, 19, x10, 1
+    DSTEP   20, 21, x11, 0
+    DSTEP   16, 17, x6, 3
+    DSTEP   18, 19, x10, 2
+    DSTEP   20, 21, x11, 1
+    DSTEP   22, 23, x12, 0
+    DSTEP   16, 17, x6, 4
+    DSTEP   18, 19, x10, 3
+    DSTEP   20, 21, x11, 2
+    DSTEP   22, 23, x12, 1
+    DSTEP   24, 25, x13, 0
+    DSTEP   16, 17, x6, 5
+    DSTEP   18, 19, x10, 4
+    DSTEP   20, 21, x11, 3
+    DSTEP   22, 23, x12, 2
+    DSTEP   24, 25, x13, 1
+    DSTEP   26, 27, x14, 0
+    DSTEP   16, 17, x6, 6
+    DSTEP   18, 19, x10, 5
+    DSTEP   20, 21, x11, 4
+    DSTEP   22, 23, x12, 3
+    DSTEP   24, 25, x13, 2
+    DSTEP   26, 27, x14, 1
+    DSTEP   28, 29, x15, 0
+    DSTEP   16, 17, x6, 7
+    DSTEP   18, 19, x10, 6
+    DSTEP   20, 21, x11, 5
+    DSTEP   22, 23, x12, 4
+    DSTEP   24, 25, x13, 3
+    DSTEP   26, 27, x14, 2
+    DSTEP   28, 29, x15, 1
+    DSTEP   30, 31, x16, 0
+    DSTEP   18, 19, x10, 7
+    DSTEP   20, 21, x11, 6
+    DSTEP   22, 23, x12, 5
+    DSTEP   24, 25, x13, 4
+    DSTEP   26, 27, x14, 3
+    DSTEP   28, 29, x15, 2
+    DSTEP   30, 31, x16, 1
+    DSTEP   20, 21, x11, 7
+    DSTEP   22, 23, x12, 6
+    DSTEP   24, 25, x13, 5
+    DSTEP   26, 27, x14, 4
+    DSTEP   28, 29, x15, 3
+    DSTEP   30, 31, x16, 2
+    DSTEP   22, 23, x12, 7
+    DSTEP   24, 25, x13, 6
+    DSTEP   26, 27, x14, 5
+    DSTEP   28, 29, x15, 4
+    DSTEP   30, 31, x16, 3
+    DSTEP   24, 25, x13, 7
+    DSTEP   26, 27, x14, 6
+    DSTEP   28, 29, x15, 5
+    DSTEP   30, 31, x16, 4
+    DSTEP   26, 27, x14, 7
+    DSTEP   28, 29, x15, 6
+    DSTEP   30, 31, x16, 5
+    DSTEP   28, 29, x15, 7
+    DSTEP   30, 31, x16, 6
+    DSTEP   30, 31, x16, 7
+    add     x6, x6, #8 * VEC
+    add     x10, x10, #8 * VEC
+    add     x11, x11, #8 * VEC
+    add     x12, x12, #8 * VEC
+    add     x13, x13, #8 * VEC
+    add     x14, x14, #8 * VEC
+    add     x15, x15, #8 * VEC
+    add     x16, x16, #8 * VEC
+    sub     x8, x8, #8
+    cmp     x8, #8
+    b.hs    Lo_diag
+Lo_plain:
+    cbz     x8, Lo_extra
+Lo_step:
     ldp     q0, q1, [x6], #VEC
     ldp     q2, q3, [x10], #VEC
     ldp     q4, q5, [x11], #VEC
@@ -305,7 +407,8 @@ Locto:      // 68..128 vectors: eight leaves
     fadd    v30.4s, v30.4s, v6.4s
     fadd    v31.4s, v31.4s, v7.4s
     subs    x8, x8, #1
-    b.ne    1b
+    b.ne    Lo_step
+Lo_extra:
     ldp     x0, x1, [sp, #EXTRAS]
     ldp     x10, x11, [sp, #EXTRAS + 16]
     ldp     q0, q1, [x0]

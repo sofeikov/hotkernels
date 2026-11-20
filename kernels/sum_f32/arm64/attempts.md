@@ -21,3 +21,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.264x [1.255 – 1.272]
 - **Kept:** yes
 - **Notes:** 1.84x at 4,096 (159 ns, 0.039 ns an element), 1.81x at 16,384; 1.13x to 1.15x in the second-level cache; nothing at 16 and 64, which are one leaf. Load average 6.6.
+
+## 3. Eight leaves in a diagonal order when q is even
+
+- **Idea:** a microbenchmark of the eight-leaf loop alone ran at the load limit (about 28 ns for 1,024 elements) when the leaves started 544 bytes apart and 20% slower (34 ns) when they started 256, 512 or 1,024 bytes apart, as they do for every power-of-two size. Loads of the same 32 bytes of different 256-byte blocks seem to contend in the first-level cache on this core. So when q is even, eight steps are taken at once in a diagonal order, leaf j's step k beside leaf 0's step k + j, which puts the loads issued together in different 32-byte positions; each leaf still adds its vectors in order. When q is odd the plain order already does that. The running sums start at `+0.0` so that all steps are alike.
+- **check:** pass
+- **compare:** significantly faster, 1.061x [1.058 – 1.065]
+- **Kept:** yes
+- **Notes:** 1.14x at 1,024 and 4,096 (137 ns), 1.15x at 16,384, 1.06x in the second-level cache. Load average 4.4.
