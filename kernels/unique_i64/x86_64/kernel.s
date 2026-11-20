@@ -15,17 +15,40 @@
 #           elements per vector: d = x - lo, then 1 << d by vpsllvq, which
 #           gives zero for a count of 64 or more, so an element far outside
 #           the range sets nothing and needs no test. A d from span to 63
-#           sets a bit at or above span, which bzhi drops at the end. The
-#           last vector ends at n and overlaps the one before it, which a
-#           set does not mind. Fewer than four elements are read one at a
-#           time.
+#           sets a bit at or above span, which bzhi drops at the end. When
+#           0 <= lo and lo + span <= 64, an element is its own bit number:
+#           the shift takes its counts from memory and the set is shifted
+#           down by lo at the end. The last vector ends at n and overlaps
+#           the one before it, which a set does not mind; from ALIGN_MIN_N
+#           elements the first vector is taken where x starts and the rest
+#           from a multiple of 32 bytes, for the same reason. Fewer than
+#           four elements are read one at a time.
 #   table   span > 64. The last span bytes of out are a table of one byte
 #           per value: cleared, 0x80 stored at byte d for each element
 #           inside the range, then read out in order into the front of out,
 #           32 bytes per vpmovmskb. The values written never reach a byte
 #           of the table not yet read (see .Lread_start).
 #
-# No stack, no constants.
+#           A store per element is the slow part, so the table is the way
+#           out, not the way in. A window of WINDOW values, a 64-bit set as
+#           on the bits path, takes the elements first, sixteen per chunk:
+#           t = x - (the window's first value), 1 << t into the set, and
+#           the or of the sixteen t tested for a bit from 64 up. A chunk
+#           without one is done. A chunk with one is marked in the table,
+#           element by element, and the window is put around that chunk's
+#           values if they are less than WINDOW apart, after the set has
+#           been stored in the table.
+#           Fewer than sixteen elements all go to the table. Labels that keep to 64 neighbouring
+#           values, or that come sorted, never reach the table; if no chunk
+#           ever failed there is no table at all, and the values are read
+#           straight out of the set. Where the first chunk is spread wider
+#           than a window, or chunks keep failing, the window is left out
+#           for a stretch that grows each time (see .Lwin_fail), so that
+#           labels spread over a wider range pay one store per element and
+#           a failed chunk or two.
+#
+# The table path keeps six values in the 128 bytes below the stack
+# pointer, which is not moved. No constants.
 
 # Largest span of the bits path: one bit per value of a 64-bit register.
 .set BITS_SPAN, 64
@@ -35,6 +58,110 @@
 # What the table path stores for a value that is present: the top bit of
 # the byte, which is the bit vpmovmskb reads.
 .set PRESENT, 0x80
+
+# Elements of a chunk of the table path's window, in bytes of x.
+.set CHUNK_BYTES, 128
+# Values in the window: one bit each of a 64-bit set.
+.set WINDOW, 64
+# A chunk that fails within this many bytes of x of the last one that
+# failed is one of a row, and a window that lasted no longer was not worth
+# moving: sixteen chunks. A failed chunk costs about what the window saves
+# over that many.
+.set FREQUENT_BYTES, 16 * CHUNK_BYTES
+# The first stretch without the window, in bytes of x, and the longest.
+.set SKIP_FIRST, 64 * CHUNK_BYTES
+.set SKIP_MAX, 1 << 19
+# Places below the stack pointer, in the 128 bytes a leaf function may use:
+# out, the chunk that failed last, the chunk the window was moved at, the
+# stretch, the window's new first value while the sets are stored, and the
+# bytes of x.
+.set OUT_SLOT, 8
+.set LAST_FAIL_SLOT, 16
+.set LAST_MOVE_SLOT, 24
+.set SKIP_SLOT, 32
+.set WINDOW_SLOT, 40
+.set SIZE_SLOT, 48
+
+# Marks the elements from rdi up to rsi in the table, byte d = PRESENT for
+# each inside the range, each with its own test and branch, and leaves rdi
+# at rsi. Makes the table first if there is none: the last span bytes of
+# out, cleared 32 bytes per step, the last step ending at its end. Changes
+# rax and r11.
+.macro MARK_STORES
+    test    r10, r10
+    jnz     20f
+    mov     r10, [rsp - OUT_SLOT]
+    lea     r11, [r10 + r8*8]           # end of out
+    mov     r10, r11
+    sub     r10, r8                     # the table
+    vpxor   xmm10, xmm10, xmm10
+    sub     r11, 32
+    mov     rax, r10
+10: vmovdqu [rax], ymm10
+    add     rax, 32
+    cmp     rax, r11
+    jb      10b
+    vmovdqu [r11], ymm10
+20: lea     r11, [rsi - 32]
+    cmp     rdi, r11
+    ja      40f
+30: .irp k, 0, 8, 16, 24
+    mov     rax, [rdi + \k]
+    sub     rax, rcx
+    cmp     rax, r8
+    jae     31f
+    mov     byte ptr [r10 + rax], PRESENT
+31:
+    .endr
+    add     rdi, 32
+    cmp     rdi, r11
+    jbe     30b
+40: cmp     rdi, rsi
+    jae     60f
+50: mov     rax, [rdi]
+    add     rdi, 8
+    sub     rax, rcx
+    cmp     rax, r8
+    jae     51f
+    mov     byte ptr [r10 + rax], PRESENT
+51: cmp     rdi, rsi
+    jb      50b
+60:
+.endm
+
+# The four sets and their lanes into rax, without the bits of values at or
+# above lo + span. Leaves the window's first d in rsi. Changes r11.
+.macro REDUCE_SET
+    vpor    ymm0, ymm0, ymm1
+    vpor    ymm2, ymm2, ymm3
+    vpor    ymm0, ymm0, ymm2
+    vextracti128 xmm1, ymm0, 1
+    vpor    xmm0, xmm0, xmm1
+    vpshufd xmm1, xmm0, 0x4e
+    vpor    xmm0, xmm0, xmm1
+    vmovq   rax, xmm0
+    mov     rsi, r9
+    sub     rsi, rcx                    # the window's first d
+    mov     r11, r8
+    sub     r11, rsi                    # values of the range from there on
+    cmp     r11, WINDOW
+    jae     70f
+    bzhi    rax, rax, r11
+70:
+.endm
+
+# Marks the values of the set in rax in the table; rsi = the window's
+# first d. Changes rax, rsi and r11.
+.macro STORE_SET
+    add     rsi, r10
+    test    rax, rax
+    jz      81f
+80: tzcnt   r11, rax
+    mov     byte ptr [rsi + r11], PRESENT
+    blsr    rax, rax
+    jnz     80b
+81:
+.endm
 
 .text
 .globl unique_i64
@@ -81,7 +208,7 @@ unique_i64:
 .Lraw_start:
     cmp     rdi, r11
     ja      .Lraw_singles
-.Lraw16:
+.Lbits_raw16:
     vpsllvq ymm4, ymm15, [rdi]
     vpsllvq ymm5, ymm15, [rdi + 32]
     vpsllvq ymm6, ymm15, [rdi + 64]
@@ -92,7 +219,7 @@ unique_i64:
     vpor    ymm2, ymm2, ymm6
     vpor    ymm3, ymm3, ymm7
     cmp     rdi, r11
-    jbe     .Lraw16
+    jbe     .Lbits_raw16
 .Lraw_singles:
     lea     r11, [r10 - 32]             # the last vector, which ends at n
     cmp     rdi, r11
@@ -205,67 +332,236 @@ unique_i64:
     ret
 
     # ---- table path: span > 64, so out has at least 65 elements, 520 bytes.
-    # The table is one byte per value, the last span bytes of out: byte d
-    # at r10 + d, where r10 = out + 7 * span bytes.
+    #
+    # rdi = the next element, rdx = the end of x, rcx = lo, r8 = span,
+    # r9 = the window's first value, r10 = the table or 0 while there is
+    # none, r11 = the last place a chunk may start. rax and rsi are free
+    # while elements are marked; out waits below the stack pointer.
 .Ltable:
-    lea     r9, [rsi + r8*8]            # end of out
-    mov     r10, r9
-    sub     r10, r8                     # the table
-    # Clear the table, 32 bytes per step; the last step ends at its end.
-    vpxor   xmm0, xmm0, xmm0
-    lea     r11, [r9 - 32]
-    mov     rax, r10
-.Lclear:
-    vmovdqu [rax], ymm0
-    add     rax, 32
-    cmp     rax, r11
-    jb      .Lclear
-    vmovdqu [r11], ymm0
-
-    # Mark: byte d = PRESENT for each element inside the range. Four
-    # elements per step, each with its own test and branch, which the data
-    # the binding passes (every element inside) makes predictable.
-    mov     r11, rdx
-    shr     r11, 2                      # steps of four
-    and     edx, 3                      # the rest, one at a time
-    test    r11, r11
-    jz      .Lmark_rest
-.Lmark4:
+    mov     [rsp - OUT_SLOT], rsi
+    lea     rdx, [rdi + rdx*8]          # end of x
+    xor     r10d, r10d                  # no table yet
+    vpcmpeqd ymm13, ymm13, ymm13
+    vpsrlq  ymm15, ymm13, 63            # 1 in every lane
+    vpsllq  ymm13, ymm13, 6             # every bit from 64 up
+    vpxor   xmm0, xmm0, xmm0            # four sets of the window
+    vpxor   xmm1, xmm1, xmm1
+    vpxor   xmm2, xmm2, xmm2
+    vpxor   xmm3, xmm3, xmm3
+    mov     r9, rcx                     # the window starts at lo
+    lea     r11, [rdx - CHUNK_BYTES]
+    mov     rsi, rdx
+    mov     rax, rdx
+    sub     rax, rdi
+    mov     [rsp - SIZE_SLOT], rax      # bytes of x
+    cmp     rax, CHUNK_BYTES
+    jb      .Lmark_plain                # fewer than a chunk: all through the table
+    # The first window: WINDOW / 2 below the first element, if that is
+    # inside the range, and not below lo.
     mov     rax, [rdi]
+    sub     rax, rcx
+    cmp     rax, r8
+    jae     .Lwin_set
+    sub     rax, WINDOW / 2
+    jb      .Lwin_set
+    lea     r9, [rcx + rax]
+.Lwin_set:
+    mov     rax, r9
+    neg     rax
+    vmovq   xmm14, rax
+    vpbroadcastq ymm14, xmm14           # minus the window's first value
+
+    # A chunk: t = x - (the window's first value) for sixteen elements,
+    # 1 << t into the sets, and the or of every t tested for a bit from 64
+    # up. Without one, every element of the chunk is a bit of the sets.
+    jmp     .Lwin_go
+    .p2align 5
+.Lwin16:
+    vpaddq  ymm4, ymm14, [rdi]
+    vpaddq  ymm5, ymm14, [rdi + 32]
+    vpaddq  ymm6, ymm14, [rdi + 64]
+    vpaddq  ymm7, ymm14, [rdi + 96]
+    vpor    ymm8, ymm4, ymm5
+    vpor    ymm9, ymm6, ymm7
+    vpsllvq ymm4, ymm15, ymm4
+    vpsllvq ymm5, ymm15, ymm5
+    vpsllvq ymm6, ymm15, ymm6
+    vpsllvq ymm7, ymm15, ymm7
+    vpor    ymm8, ymm8, ymm9
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    vptest  ymm8, ymm13
+    jnz     .Lwin_fail
+    add     rdi, CHUNK_BYTES
+    cmp     rdi, r11
+    jbe     .Lwin16
+
+    # The next chunk, or the last one, which ends at n.
+.Lwin_head:
+    cmp     rdi, r11
+    jbe     .Lwin_go
+    cmp     rdi, rdx
+    je      .Lmark_done
+    mov     rdi, r11
+.Lwin_go:
+    jmp     .Lwin16
+
+    # A chunk with an element outside the window. Its elements are marked
+    # in the table, one at a time; the bits it set stay, since each is a
+    # value that is there. What else happens depends on the chunk's values
+    # and on how long ago the last chunk failed.
+    #
+    # The chunk is read for the smallest and the largest d of its elements
+    # inside the range (rsi, r11). If they are less than WINDOW apart, the
+    # chunk is of one cluster, and the window is put around their middle,
+    # and not below lo. If the window it replaces was
+    # itself put there no more than FREQUENT_BYTES back, the clusters do
+    # not last, and the data is not for a window.
+    #
+    # Otherwise the chunk is spread wider than a window, or holds an
+    # element from elsewhere. If the last failure was more than
+    # FREQUENT_BYTES back, that is all; if not, and so too when the first
+    # chunk of all fails this way, the data is not for a window.
+    #
+    # Data that is not for a window, either way, is marked in the table
+    # for a stretch without trying the window: SKIP_FIRST bytes of x, and
+    # four times as much each time the chunk after a stretch fails wide
+    # again, up to SKIP_MAX. After a stretch the window may move once
+    # without that counting.
+.Lwin_fail:
+    lea     rax, [rdi + CHUNK_BYTES]
+    cmp     rax, rdx
+    je      .Lfail_last
+    # The first failure, which is the one before there is a table, starts
+    # the bookkeeping: no window moved yet, the first stretch, and a last
+    # failure far back, or one chunk back if this is the first chunk of x,
+    # so that it counts as one in a row.
+    test    r10, r10
+    jnz     5f
+    mov     qword ptr [rsp - LAST_MOVE_SLOT], 0
+    mov     qword ptr [rsp - SKIP_SLOT], SKIP_FIRST
+    mov     rax, rdx
+    sub     rax, rdi
+    cmp     rax, [rsp - SIZE_SLOT]
+    lea     rax, [rdi - CHUNK_BYTES]
+    mov     esi, 0
+    cmovne  rax, rsi
+    mov     [rsp - LAST_FAIL_SLOT], rax
+5:
+    mov     rsi, -1
+    xor     r11d, r11d
+    .irp k, 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120
+    mov     rax, [rdi + \k]
     sub     rax, rcx
     cmp     rax, r8
     jae     1f
-    mov     byte ptr [r10 + rax], PRESENT
-1:  mov     rax, [rdi + 8]
-    sub     rax, rcx
-    cmp     rax, r8
+    cmp     rax, rsi
+    cmovb   rsi, rax
+    cmp     rax, r11
+    cmova   r11, rax
+1:
+    .endr
+    mov     [rsp - WINDOW_SLOT], r9     # the window stays, unless moved below
+    cmp     rsi, r11
+    ja      .Lfail_wide                 # none inside the range
+    mov     rax, r11
+    sub     rax, rsi
+    cmp     rax, WINDOW
+    jae     .Lfail_wide
+    # One cluster: around its middle.
+    lea     rax, [rsi + r11]
+    shr     rax, 1
+    sub     rax, WINDOW / 2
     jae     2f
-    mov     byte ptr [r10 + rax], PRESENT
-2:  mov     rax, [rdi + 16]
-    sub     rax, rcx
-    cmp     rax, r8
-    jae     3f
-    mov     byte ptr [r10 + rax], PRESENT
-3:  mov     rax, [rdi + 24]
-    sub     rax, rcx
-    cmp     rax, r8
-    jae     4f
-    mov     byte ptr [r10 + rax], PRESENT
-4:  add     rdi, 32
-    dec     r11
-    jnz     .Lmark4
-.Lmark_rest:
-    test    edx, edx
-    jz      .Lread_start
-.Lmark1:
-    mov     rax, [rdi]
-    add     rdi, 8
-    sub     rax, rcx
-    cmp     rax, r8
-    jae     5f
-    mov     byte ptr [r10 + rax], PRESENT
-5:  dec     edx
-    jnz     .Lmark1
+    xor     eax, eax
+2:  add     rax, rcx                    # the new window's first value
+    mov     [rsp - WINDOW_SLOT], rax
+    mov     [rsp - LAST_FAIL_SLOT], rdi
+    lea     rsi, [rdi + CHUNK_BYTES]    # mark up to here
+    mov     rax, [rsp - LAST_MOVE_SLOT]
+    mov     [rsp - LAST_MOVE_SLOT], rdi
+    test    rax, rax
+    jz      .Lfail_mark                 # the first move, or the first after a stretch
+    sub     rax, rdi
+    neg     rax                         # bytes of x the window lasted
+    cmp     rax, FREQUENT_BYTES
+    ja      .Lfail_calm
+    jmp     .Lfail_stretch
+.Lfail_wide:
+    mov     rax, rdi
+    sub     rax, [rsp - LAST_FAIL_SLOT]
+    mov     [rsp - LAST_FAIL_SLOT], rdi
+    lea     rsi, [rdi + CHUNK_BYTES]
+    cmp     rax, FREQUENT_BYTES
+    ja      .Lfail_calm
+.Lfail_stretch:
+    mov     qword ptr [rsp - LAST_MOVE_SLOT], 0
+    mov     rax, [rsp - SKIP_SLOT]
+    lea     rsi, [rdi + rax]
+    cmp     rsi, rdx
+    cmova   rsi, rdx
+    cmp     rax, SKIP_MAX
+    jae     1f
+    shl     rax, 2
+    mov     [rsp - SKIP_SLOT], rax
+1:  lea     rax, [rsi - CHUNK_BYTES]
+    mov     [rsp - LAST_FAIL_SLOT], rax # a failure right after the stretch is one in a row
+    jmp     .Lfail_mark
+.Lfail_calm:
+    mov     qword ptr [rsp - SKIP_SLOT], SKIP_FIRST
+.Lfail_mark:
+    MARK_STORES
+    cmp     rdi, rdx
+    je      .Lmark_done                 # nothing left for a window to take
+    mov     rax, [rsp - WINDOW_SLOT]
+    cmp     rax, r9
+    je      .Lwin_keep
+    # The sets go to the table before the window moves.
+    REDUCE_SET
+    STORE_SET
+    mov     r9, [rsp - WINDOW_SLOT]
+    mov     rax, r9
+    neg     rax
+    vmovq   xmm14, rax
+    vpbroadcastq ymm14, xmm14
+    vpxor   xmm0, xmm0, xmm0
+    vpxor   xmm1, xmm1, xmm1
+    vpxor   xmm2, xmm2, xmm2
+    vpxor   xmm3, xmm3, xmm3
+.Lwin_keep:
+    lea     r11, [rdx - CHUNK_BYTES]
+    jmp     .Lwin_head
+
+    # The chunk that failed is the last: nothing is left for a window to
+    # take, so its elements are marked and that is all.
+.Lfail_last:
+    mov     rsi, rdx
+    MARK_STORES
+    jmp     .Lmark_done
+
+    # Fewer than a chunk of elements: all of them through the table.
+.Lmark_plain:
+    MARK_STORES
+
+    # Every element is in the sets or in the table. Without a table the
+    # values are read straight out of the sets, as on the bits path.
+.Lmark_done:
+    REDUCE_SET
+    test    r10, r10
+    jnz     .Lread_table
+    mov     rsi, [rsp - OUT_SLOT]
+    mov     rcx, r9                     # value of bit 0
+    mov     r9, rax
+    xor     eax, eax
+    vzeroupper
+    test    r9, r9
+    jnz     .Lbits_read
+    ret
+.Lread_table:
+    STORE_SET
+    mov     rsi, [rsp - OUT_SLOT]
 
     # Read the table out: value lo + j goes to out[count] for each byte j
     # that is set. 32 bytes are taken per step, as a mask of their top
@@ -281,7 +577,7 @@ unique_i64:
     #
     # rdx = count, rdi = j, rcx = lo + j, r9d = the mask of the last 32 bytes.
 .Lread_start:
-    vmovdqu ymm0, [r9 - 32]
+    vmovdqu ymm0, [r10 + r8 - 32]
     vpmovmskb r9d, ymm0
     xor     edx, edx
     xor     edi, edi
