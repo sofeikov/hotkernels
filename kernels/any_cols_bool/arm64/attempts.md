@@ -324,3 +324,16 @@ there.
   64 elements (2.8 ns to 2.2 ns), width 256 1.14x at 256; 0.98x to 0.99x on widths 31 and 64 at
   256 to 1,024 elements behind the extra test.
 - **Kept:** yes
+
+## 29. Rows of 49 to 64: two positions, the last 32 bytes by register offsets
+
+- **Idea:** the loop of two rows moved four positions (each row's start and its last 32 bytes).
+  Now two positions, the row's first 32 bytes by `ldp` and its last 32 by two `ldr` with register
+  offsets: the same six loads per row pair in load count, two adds instead of four.
+- **check:** pass; arbitrary-bytes check passes.
+- **compare:** significantly faster, 1.007x [1.005 – 1.008] (load average 1.5); width 64 1.04x to
+  1.08x from 256 to 65,536 elements on both tables, 1.03x over each.
+- **Kept:** yes
+- **Notes:** width 64 now takes 0.43 ns a row at 4,096 elements, about 1.37 cycles, against the
+  1.33 of four loads a row on three load units. The `ldnp` loop of attempt 9 never covered this
+  path; above 8 MB it loads as below.

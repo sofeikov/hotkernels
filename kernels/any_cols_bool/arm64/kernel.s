@@ -481,22 +481,21 @@ Lmid48_rest:
 // row of a step), the last 32 into v18, v19 (v22, v23).
 Lmid64:
     sub     x6, x3, #32                 // where a row's last 32 bytes start
+    sub     x7, x3, #16                 // and its last 16
     mov     x10, x0
-    add     x11, x0, x6
-    add     x12, x10, x3
-    add     x13, x11, x3
+    add     x12, x0, x3
     lsl     x14, x3, #1                 // 2 width: one step
     subs    x9, x4, #2
     b.lo    Lmid64_rest
 Lmid64_loop:
     ldp     q0, q1, [x10]
-    ldp     q2, q3, [x11]
+    ldr     q2, [x10, x6]
+    ldr     q3, [x10, x7]
     ldp     q4, q5, [x12]
-    ldp     q6, q7, [x13]
+    ldr     q6, [x12, x6]
+    ldr     q7, [x12, x7]
     add     x10, x10, x14
-    add     x11, x11, x14
     add     x12, x12, x14
-    add     x13, x13, x14
     orr     v16.16b, v16.16b, v0.16b
     orr     v17.16b, v17.16b, v1.16b
     orr     v18.16b, v18.16b, v2.16b
@@ -511,7 +510,8 @@ Lmid64_rest:
     adds    x9, x9, #2
     b.eq    Lmid64_end
     ldp     q0, q1, [x10]
-    ldp     q2, q3, [x11]
+    ldr     q2, [x10, x6]
+    ldr     q3, [x10, x7]
     orr     v16.16b, v16.16b, v0.16b
     orr     v17.16b, v17.16b, v1.16b
     orr     v18.16b, v18.16b, v2.16b
