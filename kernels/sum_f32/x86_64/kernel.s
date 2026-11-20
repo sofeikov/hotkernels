@@ -175,6 +175,11 @@ sum_f32:
     lea     rax, [rbp - 68]
     cmp     rax, 128 - 68
     jbe     .Lgroup
+    cmp     rbp, 32
+    jbe     .Lgroup2
+    lea     rax, [rbp - 34]
+    cmp     rax, 64 - 34
+    jbe     .Lgroup4
 
 .Lsplit:
     mov     rax, rbp
@@ -220,6 +225,91 @@ sum_f32:
     pop     rbx
     vzeroupper
     ret
+
+.Lgroup2:
+    # 17 to 32 vectors: two leaves, h = m/2 and m - h, h + 1 when m is odd.
+    # rdx and rcx are each leaf's start plus 32h; rdi runs from -32h to 0.
+    mov     rdi, rbp
+    shr     rdi, 1
+    shl     rdi, 5
+    lea     rdx, [rbx + rdi]
+    lea     rcx, [rdx + rdi]
+    neg     rdi
+    vmovups ymm0, [rdx + rdi]
+    vmovups ymm1, [rcx + rdi]
+    add     rdi, 32
+.Lgroup2_loop:
+    vaddps  ymm0, ymm0, [rdx + rdi]
+    vaddps  ymm1, ymm1, [rcx + rdi]
+    add     rdi, 32
+    jnz     .Lgroup2_loop
+    test    rbp, 1
+    jz      1f
+    vaddps  ymm1, ymm1, [rcx]
+1:
+    COMBINE 0, 2
+    COMBINE 1, 3
+    vaddss  xmm0, xmm0, xmm1
+    jmp     .Lup
+
+.Lgroup4:
+    # 34 to 64 vectors: four leaves two levels down, of q = floor(m/4) or
+    # q + 1 vectors. h = m/2, b = m - h; s1 = h/2, s2 = h, s3 = h + b/2.
+    # r8, r9, r10, r11 are each leaf's start plus 32q; rdi runs from -32q.
+    mov     rdi, rbp
+    and     rdi, -4
+    shl     rdi, 3
+    lea     r8, [rbx + rdi]
+    neg     rdi
+    mov     r10, rbp
+    shr     r10, 1
+    mov     r11, rbp
+    sub     r11, r10
+    shr     r11, 1
+    add     r11, r10
+    mov     r9, r10
+    shr     r9, 1
+    shl     r9, 5
+    add     r9, r8
+    shl     r10, 5
+    add     r10, r8
+    shl     r11, 5
+    add     r11, r8
+    vmovups ymm0, [r8 + rdi]
+    vmovups ymm1, [r9 + rdi]
+    vmovups ymm2, [r10 + rdi]
+    vmovups ymm3, [r11 + rdi]
+    add     rdi, 32
+.Lgroup4_loop:
+    vaddps  ymm0, ymm0, [r8 + rdi]
+    vaddps  ymm1, ymm1, [r9 + rdi]
+    vaddps  ymm2, ymm2, [r10 + rdi]
+    vaddps  ymm3, ymm3, [r11 + rdi]
+    add     rdi, 32
+    jnz     .Lgroup4_loop
+    test    rbp, 3
+    jz      1f
+    # The last leaf is ceil(m/4) long, q + 1.
+    mov     r14, rbp
+    and     r14, -4
+    shl     r14, 3
+    EXTRA   0, r8, r9
+    EXTRA   1, r9, r10
+    EXTRA   2, r10, r11
+    vaddps  ymm3, ymm3, [r11]
+1:
+    # Leaf sums [L0 L1 L2 L3] in xmm0 as for a group of eight, then
+    # (L0 + L1) + (L2 + L3).
+    vhaddps ymm0, ymm0, ymm1
+    vhaddps ymm2, ymm2, ymm3
+    vhaddps ymm0, ymm0, ymm2
+    vextractf128 xmm1, ymm0, 1
+    vaddps  xmm0, xmm0, xmm1
+    vmovshdup xmm1, xmm0
+    vaddps  xmm0, xmm0, xmm1
+    vmovhlps xmm1, xmm1, xmm0
+    vaddss  xmm0, xmm0, xmm1
+    jmp     .Lup
 
 .Lgroup:
     # Leaf starts in vectors, as NumPy's halvings make them: h = m/2, a = h,

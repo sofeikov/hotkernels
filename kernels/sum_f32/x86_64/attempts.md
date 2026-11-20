@@ -21,3 +21,11 @@ What the compiler does with `naive.c`: NumPy's tree, one leaf at a time, each le
 - **compare:** significantly faster, 1.027x [1.022 – 1.032]
 - **Kept:** yes
 - **Notes:** 1.32x at 256 (12.7 ns), whose two leaves are each combined on the walk's critical path; 1.01x at 1,024 and 4,096; 0.99x in the second-level cache, inside the noise of the other agents' runs. Load average 0.8.
+
+## 3. Groups of two and four leaves
+
+- **Idea:** a node of 17 to 32 vectors not on the right edge is two leaves, of 34 to 64 four (33 and 65 to 67 have leaves at two depths and are split again, as before). Each is summed in one loop with a `ymm` per leaf, as the group of eight is, instead of one leaf at a time with a trip up the walk between them.
+- **check:** pass
+- **compare:** significantly faster, 1.038x [1.029 – 1.047]
+- **Kept:** yes
+- **Notes:** 1.50x at 256 (8.3 ns), a single group of two; nothing elsewhere among the timed sizes, which from 1,024 up are all groups of eight. Sizes whose walk ends in nodes of 17 to 64 vectors, such as 272 to 512, gain the same way but are not timed. Load average 1.0.
