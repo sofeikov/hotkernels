@@ -120,6 +120,23 @@ PROBE_FACTOR = 3
 PROBE_SORT_STEP = 617
 PROBE_SORT_TIES = 4
 
+# The float sum probes add the values ((i * PROBE_SORT_STEP) mod
+# PROBE_SUM_N - PROBE_SUM_N // 2) / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET.
+# PROBE_SUM_N is more than one leaf of NumPy's pairwise summation (128
+# elements) and not a multiple of 8, so the sum goes through splits, the
+# leaves' eight running sums and the elements left over. With these values
+# the float32 sum in NumPy's order differs from the sum added one after
+# another, from a tree split at n / 2 not rounded to a multiple of 8, from
+# leaves of 64 or 256 elements, and from leaves whose running sums are added
+# in turn: a kernel that adds in any of those orders fails the probe.
+PROBE_SUM_N = 1003
+PROBE_SUM_DIVISOR = 7
+PROBE_SUM_OFFSET = 0.1
+# Leaves of NumPy's pairwise summation: up to PAIRWISE_LEAF elements, added
+# into PAIRWISE_LANES running sums.
+PAIRWISE_LEAF = 128
+PAIRWISE_LANES = 8
+
 # Element count of the sorted array the search probes look in. It differs
 # from PROBE_N so that a kernel which confused its two lengths would fail.
 PROBE_TABLE_N = 37
@@ -707,6 +724,66 @@ def _sum_function() -> bool:
     return int(np.sum(np.full(PROBE_N, PROBE_BYTE, np.uint8))) == PROBE_N * PROBE_BYTE
 
 
+def _pairwise(values: list) -> np.generic:
+    """Add NumPy scalars in the order of NumPy's pairwise summation, in plain Python.
+
+    The order of `pairwise_sum` in NumPy's `loops_utils.h.src`: fewer than
+    PAIRWISE_LANES values one after another from zero; up to PAIRWISE_LEAF
+    into PAIRWISE_LANES running sums, value i into sum i mod PAIRWISE_LANES,
+    combined in pairs and then the values left over one after another; more
+    split at half the count rounded down to a multiple of PAIRWISE_LANES.
+
+    Args:
+        values: The elements as NumPy scalars of one float type, whose own
+            arithmetic rounds each addition to that type.
+
+    Returns:
+        The sum, a scalar of the same type.
+    """
+    n = len(values)
+    if n < PAIRWISE_LANES:
+        # +0.0 of the values' type: NumPy's sum of negative zeros is +0.0.
+        total = type(values[0])(0) if values else 0
+        for value in values:
+            total = total + value
+        return total
+    if n <= PAIRWISE_LEAF:
+        sums = list(values[:PAIRWISE_LANES])
+        whole = n - n % PAIRWISE_LANES
+        for start in range(PAIRWISE_LANES, whole, PAIRWISE_LANES):
+            sums = [a + b for a, b in zip(sums, values[start:start + PAIRWISE_LANES])]
+        total = ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]))
+        for value in values[whole:]:
+            total = total + value
+        return total
+    half = n // 2
+    half -= half % PAIRWISE_LANES
+    return _pairwise(values[:half]) + _pairwise(values[half:])
+
+
+def _sum_float(dtype: type, call: Callable[[np.ndarray], object]) -> bool:
+    """Probe `np.sum(x)` or `x.sum()` on floats whose sum depends on the order of the additions.
+
+    Args:
+        dtype: np.float32 or np.float64.
+        call: Makes the call on the array.
+
+    Returns:
+        Whether the result is a scalar of `dtype` with the bits of the sum in
+        NumPy's pairwise order, worked out here one addition at a time.
+    """
+    steps = (np.arange(PROBE_SUM_N) * PROBE_SORT_STEP) % PROBE_SUM_N - PROBE_SUM_N // 2
+    x = (steps / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET).astype(dtype)
+    expected = dtype(0) + _pairwise([dtype(value) for value in x.tolist()])
+    result = call(x)
+    return type(result) is dtype and result.tobytes() == expected.tobytes()
+
+
+def _sum_method_of(x: np.ndarray) -> object:
+    """Return `x.sum()`."""
+    return x.sum()
+
+
 def _count_nonzero(dtype: type) -> bool:
     """Probe the function hook: `np.count_nonzero(x)`."""
     return int(np.count_nonzero(_stride_mask().astype(dtype))) == len(range(0, PROBE_N, PROBE_STRIDE))
@@ -911,7 +988,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("count_nonzero_i64", partial(_count_nonzero, np.int64)),
         Probe("count_nonzero_f64", partial(_count_nonzero, np.float64)),
     )),
-    Hook("function.sum", FUNCTION, (Probe("sum_u8", _sum_function),)),
+    Hook("function.sum", FUNCTION, (
+        Probe("sum_u8", _sum_function),
+        Probe("sum_f32", partial(_sum_float, np.float32, np.sum)),
+    )),
     Hook("function.histogram", FUNCTION, (Probe("histogram_f64", _histogram),)),
     Hook("function.bincount", FUNCTION, (
         Probe("bincount_u8", _bincount),
@@ -948,7 +1028,10 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.median", FUNCTION, (Probe("median_f64", _median),)),
     Hook("function.unique", FUNCTION, (Probe("unique_i64", _unique),)),
     Hook("method.astype", METHOD, (Probe("cast_u8_f32", _astype),)),
-    Hook("method.sum", METHOD, (Probe("sum_u8", _sum_method),)),
+    Hook("method.sum", METHOD, (
+        Probe("sum_u8", _sum_method),
+        Probe("sum_f32", partial(_sum_float, np.float32, _sum_method_of)),
+    )),
     Hook("method.nonzero", METHOD, (Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),)),
     Hook("method.cumsum", METHOD, (
         Probe("cumsum_i64", partial(_cumsum, np.int64)),
@@ -1049,6 +1132,7 @@ KERNELS: tuple[KernelInfo, ...] = (
                builtin=True),
     KernelInfo("cast_u8_f32", "x.astype(float32)", "uint8", "astype", ("method.astype",)),
     KernelInfo("sum_u8", "np.sum", "uint8", "sum", ("function.sum", "method.sum")),
+    KernelInfo("sum_f32", "np.sum", "float32", "sum", ("function.sum", "method.sum")),
     KernelInfo("count_nonzero_i64", "np.count_nonzero", "int64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("count_nonzero_f64", "np.count_nonzero", "float64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("histogram_f64", "np.histogram", "float64", "histogram", ("function.histogram",)),

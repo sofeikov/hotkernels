@@ -67,7 +67,7 @@ typedef enum {
     HK_WHERE_F64, HK_CUMMAX_I64, HK_CUMFMAX_F64, HK_FMAX_REDUCE_F64, HK_ANY_ROWS_BOOL,
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
-    HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64, HK_ANY_COLS_BOOL,
+    HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64, HK_ANY_COLS_BOOL, HK_SUM_F32,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.
@@ -397,6 +397,31 @@ static inline void hk_clear_float_flags(void) {
     if (csr & flags) _mm_setcsr(csr & ~flags);
 #else
     feclearexcept(FE_ALL_EXCEPT);
+#endif
+}
+
+// Clear the four floating-point status flags NumPy reports (invalid
+// operation, divide by zero, overflow, underflow) and leave the others.
+// After np.sum, NumPy leaves these four clear and the inexact flag as its
+// additions left it, set or not; a kernel that makes the same additions sets
+// the same inexact flag. The status register is written only when one of the
+// four is set.
+static inline void hk_clear_reported_float_flags(void) {
+#if defined(__x86_64__)
+    // MXCSR's flags for invalid (0x01), divide by zero (0x04), overflow
+    // (0x08) and underflow (0x10). The denormal flag (0x02) is left, as
+    // NumPy's feclearexcept leaves it: it is not one of fenv.h's flags.
+    const unsigned int reported = 0x1d;
+    const unsigned int csr = _mm_getcsr();
+    if (csr & reported) _mm_setcsr(csr & ~reported);
+#elif defined(__aarch64__)
+    // IOC, DZC, OFC and UFC: bits 0 to 3 of FPSR.
+    const uint64_t reported = 0xf;
+    uint64_t fpsr;
+    __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr) : : "memory");
+    if (fpsr & reported) __asm__ volatile("msr fpsr, %0" : : "r"(fpsr & ~reported) : "memory");
+#else
+    feclearexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW);
 #endif
 }
 
