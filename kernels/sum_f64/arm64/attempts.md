@@ -45,3 +45,11 @@ The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was 
 - **compare:** significantly faster, 1.009x [1.004 – 1.014]
 - **Kept:** yes
 - **Notes:** 1.08x at 16 (1.6 ns), 1.02x at 64, nothing elsewhere. A leaf of eight float64 vectors is four chains of seven additions, bound by their latency more than float32's two chains were by the loop. The indirect branch is predicted in the judge, which calls one size at a time. Load average 4.5.
+
+## 6. One group of two without the walk
+
+- **Idea:** float32's attempt 13: 136 to 256 elements that are a multiple of 8 are summed as one group of two straight from the entry, without the frame and the stacks.
+- **check:** pass
+- **compare:** no significant difference, 1.001x [0.995 – 1.006]
+- **Kept:** no
+- **Notes:** 1.01x at 256 (16.2 ns): at this width a group of two is eight chains of 16 additions, and their latency, not the walk around them, is what 256 elements cost. Load average 8.2.
