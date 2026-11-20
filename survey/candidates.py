@@ -27,6 +27,8 @@ SECOND = "second shortlist"
 APPS = "applications"
 # Sorting, from the applications study: docs/sort-design.md.
 SORT = "argsort"
+# Calls a second program in use left to NumPy: docs/coverage-gaps-arm64.md.
+GAPS = "coverage gaps"
 
 # Mask densities measured: the worst case for a branch predictor, and a sparse mask.
 DENSITIES = (0.5, 0.05)
@@ -55,6 +57,13 @@ UNIQUE_TABLE = 64
 # Elements of output the argsort candidates have per element of input: the
 # result, and the working memory of the C sorts (see survey/naive.c).
 ARGSORT_OUT_PER_ELEMENT = 5
+# Coverage gaps: the columns of the mask reduced down its columns, the rows of
+# the one reduced over a few long rows, and the columns of the mask whose True
+# elements are located. The shapes the program had were about 30 by 31 and 30
+# to 50 by 22.
+ANY_COLUMNS = 31
+ANY_ROWS = 30
+NONZERO_COLUMNS = 22
 # Relative tolerances for kernels whose NumPy counterpart orders floating-point
 # operations differently (pairwise sums, fused multiply-add).
 RTOL_F32_SUM = 1e-2
@@ -539,6 +548,62 @@ def _argsort() -> list[Cand]:
     return cands
 
 
+def _coverage_gaps() -> list[Cand]:
+    """The calls of docs/coverage-gaps-arm64.md that had no survey row.
+
+    `np.searchsorted` on int64 with the left side and `astype` from float64 to
+    float32 are measured by earlier groups.
+
+    Returns:
+        The candidates of this group, in measuring order.
+    """
+    haystack = {"m": f"min(n, {MAX_NEEDLES})", "a": "np.sort(rng.integers(0, 1 << 40, n))",
+                "v": "rng.integers(0, 1 << 40, m)", "out": "np.empty(m, np.int64)"}
+    one = {"a": "np.sort(rng.integers(0, 1 << 40, n))", "v": "rng.integers(0, 1 << 40, 1)", "key": "v[0]",
+           "out": "np.empty(1, np.int64)"}
+    cands = [
+        Cand("searchsorted_i64 side=right", GAPS, "np.searchsorted(a, v, side='right')", "searchsorted_right_i64",
+             "pipip", haystack, ("ptr(a)", "n", "ptr(v)", "m", "ptr(out)"),
+             "out", "np.searchsorted(a, v, side='right')", out="out", alloc=True, work="m"),
+        Cand("searchsorted_i64 one needle", GAPS, "np.searchsorted(a, key)", "searchsorted_i64",
+             "pipip", one, ("ptr(a)", "n", "ptr(v)", "1", "ptr(out)"),
+             "out[0]", "np.searchsorted(a, key)", out="out", work="1"),
+    ]
+    cands += [
+        Cand(f"sum_{t} (NumPy's order)", GAPS, "np.sum(x)", f"sum_pairwise_{t}", "pip",
+             {"x": f"rng.standard_normal(n, dtype={_DTYPE[t]})", "res": f"np.empty(1, {_DTYPE[t]})"},
+             ("ptr(x)", "n", "ptr(res)"), "res[0]", "np.sum(x)")
+        for t in ("f32", "f64")
+    ]
+    cands += [
+        Cand("sum_i64", GAPS, "np.sum(x)", "sum_i64", "pi",
+             {"x": _RANDOM["i64"]}, ("ptr(x)", "n"), "ret", "int(np.sum(x))"),
+        Cand(f"any_cols_bool {ANY_COLUMNS} columns", GAPS, "m.any(axis=0)", "any_cols_bool", "ppii",
+             {"m": f"rng.random((max(n // {ANY_COLUMNS}, 1), {ANY_COLUMNS})) < 0.03",
+              "out": f"np.empty({ANY_COLUMNS}, bool)"},
+             ("ptr(m)", "ptr(out)", "len(m)", str(ANY_COLUMNS)),
+             "out", "m.any(axis=0)", out="out", alloc=True, work="m.size"),
+        Cand(f"any_cols_bool {ANY_ROWS} rows", GAPS, "m.any(axis=0)", "any_cols_bool", "ppii",
+             {"m": f"rng.random(({ANY_ROWS}, max(n // {ANY_ROWS}, 1))) < 0.03",
+              "out": "np.empty(m.shape[1], bool)"},
+             ("ptr(m)", "ptr(out)", str(ANY_ROWS), "m.shape[1]"),
+             "out", "m.any(axis=0)", out="out", alloc=True, work="m.size"),
+    ]
+    cands += [
+        Cand(f"nonzero_2d_bool {NONZERO_COLUMNS} columns p={p}", GAPS, "np.nonzero(m)", "nonzero_2d_bool", "ppii",
+             {"m": f"rng.random((max(n // {NONZERO_COLUMNS}, 1), {NONZERO_COLUMNS})) < {p}",
+              "out": "np.empty(2 * m.size, np.int64)"},
+             ("ptr(m)", "ptr(out)", "len(m)", str(NONZERO_COLUMNS)),
+             "np.concatenate((out[:ret], out[m.size:m.size + ret]))", "np.concatenate(np.nonzero(m))",
+             out="out", alloc=True, work="m.size")
+        for p in DENSITIES
+    ]
+    cands.append(Cand("cast_i16_i64", GAPS, "x.astype(np.int64)", "cast_i16_i64", "ppi",
+                      {"x": "rng.integers(-(1 << 15), 1 << 15, n).astype(np.int16)", "out": "np.empty(n, np.int64)"},
+                      ("ptr(x)", "ptr(out)", "n"), "out", "x.astype(np.int64)", out="out", alloc=True))
+    return cands
+
+
 def candidates() -> list[Cand]:
     """List every candidate the survey measures.
 
@@ -547,5 +612,5 @@ def candidates() -> list[Cand]:
     """
     groups = (_argmax, _controls, _mask_selection, _counting, _nonzero, _accumulations, _searching,
               _clip, _any_all, _indexing, _membership_and_binning, _elementwise, _stepped_slices,
-              _second_shortlist, _applications, _argsort)
+              _second_shortlist, _applications, _argsort, _coverage_gaps)
     return [cand for group in groups for cand in group()]
