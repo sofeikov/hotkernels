@@ -69,18 +69,49 @@
 .globl _sum_f32
 .p2align 2
 _sum_f32:
-    cmp     x1, #8
-    b.lo    Lsmall
-    cmp     x1, #128
-    b.hi    Lbig
-    and     x2, x1, #7
-    lsr     x7, x1, #3
-    mov     x6, x0
-    LEAF
-    TAIL
+    // 8..128 elements are one leaf, the commonest calls: straight in.
+    sub     x2, x1, #8
+    cmp     x2, #120
+    b.hi    Lnot_leaf
+    ldp     q16, q17, [x0], #VEC
+    lsr     x8, x2, #3                  // vectors after the first
+    tbz     x8, #0, Lf_pairs
+    ldp     q0, q1, [x0], #VEC
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+Lf_pairs:
+    lsr     x8, x8, #1
+    cbz     x8, Lf_sum
+Lf_loop:
+    ldp     q0, q1, [x0], #2 * VEC
+    ldp     q2, q3, [x0, #-VEC]
+    fadd    v16.4s, v16.4s, v0.4s
+    fadd    v17.4s, v17.4s, v1.4s
+    fadd    v16.4s, v16.4s, v2.4s
+    fadd    v17.4s, v17.4s, v3.4s
+    subs    x8, x8, #1
+    b.ne    Lf_loop
+Lf_sum:
+    faddp   v16.4s, v16.4s, v17.4s
+    faddp   v16.4s, v16.4s, v16.4s
+    faddp   s0, v16.2s
+    ands    x2, x1, #7
+    b.ne    Lf_tail
     movi    d1, #0
     fadd    s0, s0, s1
     ret
+Lf_tail:
+    ldr     s1, [x0], #4
+    fadd    s0, s0, s1
+    subs    x2, x2, #1
+    b.ne    Lf_tail
+    movi    d1, #0
+    fadd    s0, s0, s1
+    ret
+
+Lnot_leaf:
+    cmp     x1, #8
+    b.hs    Lbig
 
 Lsmall:
     movi    d0, #0

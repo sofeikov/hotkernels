@@ -37,3 +37,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.045x [1.044 – 1.046]
 - **Kept:** yes
 - **Notes:** 1.06x at 256, 1.11x at 1,024, 1.09x at 4,096 (125 ns), 1.05x in the second-level cache. Every timed size from 256 up is a power of two, whose groups all have equal leaves; other sizes keep the cost. Load average 4.0.
+
+## 5. A straight path for one leaf, two steps per trip
+
+- **Idea:** 8 to 128 elements, a single leaf, are tested with one unsigned compare and summed in code of their own, two vectors per trip of the loop, instead of the leaf macro the walk uses.
+- **check:** pass
+- **compare:** significantly faster, 1.047x [1.046 – 1.047]
+- **Kept:** yes
+- **Notes:** 1.25x at 16 (1.3 ns), 1.33x at 64 (2.9 ns), nothing elsewhere. Load average 6.2.
