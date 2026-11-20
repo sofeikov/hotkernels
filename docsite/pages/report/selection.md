@@ -190,6 +190,10 @@ These kernels were first written with one length for the sorted array and the ne
 `any_cols_bool` serves `m.any(axis=0)`, the call beside `m.any(axis=1)`: whether each column of a boolean matrix holds a True. It keeps the results in vector registers for the whole call and makes them 0 or 1 once at the end, where a compiled loop or's each row into memory. It was written for x86-64 and ships as its C on ARM64 for now. On an Intel Core i5-14600KF a mask of 30 rows by 31 columns takes about 95 ns from Python against NumPy's 840 ns.
 :::
 
+::: note A float sum in NumPy's order
+`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It was written for x86-64 and ships as its C on ARM64 for now. On an Intel Core i5-14600KF it is 6.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million.
+:::
+
 ::: note The search on int64
 `searchsorted_i64` and `searchsorted_right_i64` are the same two searches for a sorted int64 array and int64 needles, with no NaN to order. They were written for x86-64, where a pass takes two steps of each search and the first steps need no gather, and they ship as their C on ARM64 for now. NumPy's int64 search is about three times faster than its float64 search, so the gain with many needles is smaller: 4x to 5x over NumPy up to 4,096 elements on an Intel Core i5-14600KF, and 1.2x beyond the caches. The call they were added for passes one `np.int64` at a time, and there the gain is NumPy's call path: about 2x from Python at any length.
 :::
