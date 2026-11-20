@@ -39,10 +39,11 @@
 #           values if they are less than WINDOW apart, after the set has
 #           been stored in the table. A window that starts at the value 0
 #           needs no subtraction, and is the one chosen where it fits.
-#           Fewer than sixteen elements all go to the table. Labels that keep to 64 neighbouring
-#           values, or that come sorted, never reach the table; if no chunk
-#           ever failed there is no table at all, and the values are read
-#           straight out of the set. Where the first chunk is spread wider
+#           Fewer than sixteen elements all go to the table. Labels that
+#           keep to 64 neighbouring values never reach it: if no chunk ever
+#           failed there is no table at all, and the values are read
+#           straight out of the set. Sorted labels reach it only where the
+#           window moves. Where the first chunk is spread wider
 #           than a window, or chunks keep failing, the window is left out
 #           for a stretch that grows each time (see .Lwin_fail), so that
 #           labels spread over a wider range pay one store per element and
