@@ -109,3 +109,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.008x [1.007 – 1.010]
 - **Kept:** yes
 - **Notes:** 1.11x at 256 (8.8 ns), nothing elsewhere. Load average 5.6.
+
+## 14. One group of eight without the walk
+
+- **Idea:** as attempt 13 for groups of eight: 544 to 1,024 elements that are a multiple of 64 are one group of eight equal leaves, which needs nothing of the frame but the flag of attempt 8; the entry sets that and an empty node stack, and the push after the group returns.
+- **check:** pass
+- **compare:** significantly faster, 1.002x [1.001 – 1.003]
+- **Kept:** yes
+- **Notes:** 1.02x at 1,024 (29.0 ns), nothing elsewhere. Load average 5.0.

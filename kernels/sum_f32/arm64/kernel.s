@@ -156,6 +156,20 @@ Lf_tail:
 Lnot_leaf:
     cmp     x1, #8
     b.lo    Lsmall
+    // 544..1024 elements, a multiple of 64, are one group of eight leaves
+    // of equal length, which needs of the frame only the flag LONG.
+    sub     x2, x1, #544
+    cmp     x2, #1024 - 544
+    b.hi    Lnot_eight
+    tst     x1, #63
+    b.ne    Lbig
+    sub     sp, sp, #FRAME
+    str     xzr, [sp, #LONG]
+    mov     x4, #0                      // no node stack: Lpush returns
+    mov     x6, x0
+    lsr     x7, x1, #3
+    b       Locto
+Lnot_eight:
     // 136..256 elements, a multiple of 8, are one group of two leaves.
     sub     x2, x1, #136
     cmp     x2, #256 - 136
@@ -226,6 +240,7 @@ Lplain:
 Lleaf:
     LEAF
 Lpush:
+    cbz     x4, Ldone_alone
     str     s0, [x5], #4
 Lnext:
     cmp     x4, x9
@@ -627,6 +642,11 @@ Lo_sum:
     faddp   s0, v16.2s
     b       Lpush
 
+Ldone_alone:
+    movi    d1, #0
+    fadd    s0, s0, s1
+    add     sp, sp, #FRAME
+    ret
 Ldone:
     ldr     s0, [x5, #-4]
     movi    d1, #0
