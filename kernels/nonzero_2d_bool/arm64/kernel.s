@@ -8,8 +8,8 @@
 // masked off. One multiplication packs it into an 8-bit number, another gives
 // the true count (times 8). The 8-bit number indexes a table whose entry lists
 // the positions of the true bytes, in order, as eight bytes; those are widened
-// to 64 bits and added to the chunk's first column, and `st2` stores them
-// interleaved with the row: eight (row, column) pairs at the write pointer, of
+// to 64 bits and added to the chunk's first column, and they are
+// interleaved with the row and stored: eight (row, column) pairs at the write pointer, of
 // which the first `count` are kept.
 //
 // Stores stay inside the capacity: a chunk starting at element f is read only
@@ -17,9 +17,8 @@
 // pairs. The last 0 to 7 bytes of the mask, when a chunk cannot be read there,
 // are handled one at a time.
 
-// Widen the 8 positions in d0, add the column in v17, and store 8 pairs with
-// the row (in v20, v22, v24, v26) at x5. Uses v0 to v2, the odd registers
-// v21 to v27, and x15.
+// Widen the 8 positions in d0, add the column in v17, pair each with the row
+// in v20 and store the 8 pairs at x5. Uses v0 to v6 and v21 to v27.
 .macro PAIRS
     ushll   v0.8h, v0.8b, #0
     ushll   v1.4s, v0.4h, #0
@@ -28,11 +27,18 @@
     uaddw2  v23.2d, v17.2d, v1.4s
     uaddw   v25.2d, v17.2d, v2.2s
     uaddw2  v27.2d, v17.2d, v2.4s
-    mov     x15, x5
-    st2     {v20.2d, v21.2d}, [x15], #32
-    st2     {v22.2d, v23.2d}, [x15], #32
-    st2     {v24.2d, v25.2d}, [x15], #32
-    st2     {v26.2d, v27.2d}, [x15]
+    zip1    v3.2d, v20.2d, v21.2d
+    zip2    v4.2d, v20.2d, v21.2d
+    zip1    v5.2d, v20.2d, v23.2d
+    zip2    v6.2d, v20.2d, v23.2d
+    stp     q3, q4, [x5]
+    stp     q5, q6, [x5, #32]
+    zip1    v3.2d, v20.2d, v25.2d
+    zip2    v4.2d, v20.2d, v25.2d
+    zip1    v5.2d, v20.2d, v27.2d
+    zip2    v6.2d, v20.2d, v27.2d
+    stp     q3, q4, [x5, #64]
+    stp     q5, q6, [x5, #96]
 .endm
 
 .text
@@ -62,10 +68,7 @@ Lrow:                                   // x0 = x17 = start of row x6, below the
     csel    x12, x12, x3, lo
     add     x12, x0, x12                // x12 = end of the row, or of the mask
     sub     x13, x12, #8                // x13 = last place a whole chunk can start
-    dup     v20.2d, x6                  // the row, beside each column register
-    dup     v22.2d, x6
-    dup     v24.2d, x6
-    dup     v26.2d, x6
+    dup     v20.2d, x6                  // the row, twice
     movi    v17.2d, #0                  // column of the chunk
     cmp     x0, x13
     b.hi    Lpart

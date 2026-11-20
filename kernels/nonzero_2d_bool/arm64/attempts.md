@@ -25,3 +25,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.18x [1.18 – 1.19]
 - **Kept:** yes
 - **Notes:** default width 1.52x sparse and 1.22x dense, width 1,000 1.34x dense, width 3 0.96x (one masked chunk per row of 3, plus the row's bookkeeping). The sparse tables at widths 32 and 1,000 read about 1.9 ms at 1M elements for both versions, against 0.3 ms at the default width; noise from the other agents' runs, to be rechecked.
+
+## 4. `zip1` / `zip2` and `stp` in place of `st2`
+
+- **Idea:** the four `st2` of 32 bytes each look like the limit (about 7 cycles per chunk at width 32). Pair the row with each column register by `zip1` / `zip2` instead and store the eight pairs with four `stp q`. One row register instead of four copies.
+- **check:** pass
+- **compare:** significantly faster, 1.13x [1.12 – 1.14]
+- **Kept:** yes
+- **Notes:** about 1.25x at the default width and at width 3 dense, 1.02 to 1.10x at widths 32 and 1,000 above 64K elements. The slow sparse tables of attempt 3 at widths 3, 32 and 1,000 appeared again for both versions (2 ms at 1M at width 32, against 0.29 ms dense); a `judge run --quick` straight after had sparse width 32 at 0.29 ns per element, and a timer outside the judge 0.30. So it is the machine (the process sharing cores with other agents' runs), not the kernel.
