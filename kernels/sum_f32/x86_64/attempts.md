@@ -29,3 +29,29 @@ What the compiler does with `naive.c`: NumPy's tree, one leaf at a time, each le
 - **compare:** significantly faster, 1.038x [1.029 – 1.047]
 - **Kept:** yes
 - **Notes:** 1.50x at 256 (8.3 ns), a single group of two; nothing elsewhere among the timed sizes, which from 1,024 up are all groups of eight. Sizes whose walk ends in nodes of 17 to 64 vectors, such as 272 to 512, gain the same way but are not timed. Load average 1.0.
+
+## 4. Two steps per trip in the group of eight
+
+- **Idea:** each visit to a leaf reads 64 bytes, two vectors added one after the other to its running sums, after one single step when q - 1 is odd; ARM64 gained from this in its second-level cache.
+- **check:** pass
+- **compare:** no significant difference, 1.004x [0.997 – 1.010]
+- **Kept:** no
+- **Notes:** 0.97x to 0.98x from 16,384 to 262,144, 1.02x to 1.03x from 1,048,576 up. Load average 0.9.
+
+**Where the loop stands.** A microbenchmark outside the judge (`bench.py` and `plain.s` in the scratch folder) timed the kernel against a contiguous sum with eight accumulators, which reads the same bytes in address order and is not NumPy's order. With `x` on a 64-byte boundary: 6.6 us against 5.1 us at 262,144 elements, 50 us against 46 us at 1,048,576. With `x` 16 bytes past one, as NumPy's large arrays are and as the judge times them: 8.7 us against 8.0 us at 262,144; at 4,194,304 the kernel was the faster of the two. In the first-level cache, at 4,096 elements the judge's 65 ns is 0.67 cycles per vector; the loop issues one load and one add per vector against two load ports and two add ports, so 0.5 cycles, and at that start every second 32-byte load straddles two cache lines, which takes a load port one cycle more: 0.75 cycles per vector.
+
+## 5. Read misaligned vectors in 16-byte halves beyond the first-level cache
+
+- **Idea:** from 12,288 elements, when `x` is not 32-byte aligned, the group of eight reads each vector as two 16-byte halves (`vmovups` and `vinsertf128`), so that no load straddles two cache lines; a flag in the frame chooses the loop.
+- **check:** pass
+- **compare:** significantly faster, 1.010x [1.002 – 1.018]
+- **Kept:** no
+- **Notes:** the gain is at 256 (1.13x) and 1,024 (1.02x), sizes whose code this change does not run, so it is the placement of the code; 1.00x at 16,384 to 262,144 where it applies, 1.02x at 1,048,576 and 4,194,304, and 0.93x at 16,777,216. The microbenchmark agreed: 8.73 us against 8.74 us at 262,144 with `x` 16 bytes past a line. Rejected as no real gain. Load average 1.4.
+
+## 6. The same halves at every size
+
+- **Idea:** attempt 5 in the first-level cache too, where the straddling loads are the estimated limit of the loop.
+- **check:** pass
+- **compare:** no significant difference, 0.998x [0.985 – 1.012]
+- **Kept:** no
+- **Notes:** 1.00x at 4,096, 0.84x at 1,024: two loads per vector and one more operation on the vector ports cost what the straddles did. Load average 1.4.

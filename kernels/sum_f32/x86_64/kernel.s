@@ -39,7 +39,15 @@
 # than by the latency of one leaf's chain. After q steps a leaf of q + 1
 # vectors adds its last one and a leaf of q adds a vector of +0.0. The eight
 # leaf sums, and then the node's sum, are combined with vhaddps in the
-# order NumPy combines them.
+# order NumPy combines them. A node of 17 to 32 vectors is a group of two
+# leaves and one of 34 to 64 a group of four, summed the same way; 33 and
+# 65 to 67 have leaves at two depths and are split again.
+#
+# Speed on the Intel Core i5-14600KF: the group's loop is one load and one
+# add per vector, against two load ports and two add ports. In the
+# first-level cache it runs at 0.67 cycles a vector with x 16 bytes past a
+# 32-byte boundary, where every second load straddles two cache lines;
+# beyond it, within a tenth of a plain contiguous sum of the same bytes.
 
 .section .rodata
 .p2align 5
