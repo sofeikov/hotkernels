@@ -331,10 +331,13 @@ Not tried, or tried only in part, and why:
 
 `uv run judge run searchsorted_i64 --unlocked --record` on the final kernel, against
 the spec of PR 245 (check: pass, 63,444 cases), Apple M1 Pro, NumPy 2.5.5,
-load average 11.1, with other kernels being timed on the machine: indicative. Report:
+on 20 November 2026 on a quiet machine (load average 2.7, no CI run, no other kernel
+being timed). An earlier run at a load average of 11.1 read 4.30x over the C and
+3.19x over NumPy. Report:
 `results/searchsorted_i64/arm64-apple-m1-pro.json`.
 
-- **Overall:** 4.30x [4.29 – 4.32] over the naive C, 3.19x over NumPy, across both timed
+- **Overall:** 4.45x [4.45 – 4.45] over the naive C, 3.34x over NumPy, across both timed
   needle counts. Faster than the C and than NumPy at every size.
-- **By size:** 64 needles: 3.25x over the C at 16 elements, 3.93x at 4,096, 4.54x at 1,048,576, 7.12x at 16,777,216; over NumPy 4.47x overall and 2.13x at 1,048,576. 1,000 needles: 3.50x, 3.97x, 3.90x and 9.82x over the C; over NumPy 3.82x at 16, 2.70x at 4,096, 1.38x at 1,048,576 and 1.34x at 16,777,216.
-- **Output 16 bytes behind the input:** level everywhere (1.00x to 1.04x).
+- **By size:** 64 needles: 3.21x over the C at 16 elements, 3.93x at 4,096, 5.46x at 1,048,576, 8.32x at 16,777,216; over NumPy 4.68x overall and 2.44x at 1,048,576. 1,000 needles: 3.50x, 3.97x, 4.59x and 9.50x over the C; over NumPy 3.83x at 16, 2.70x at 4,096, 1.72x at 1,048,576 and 1.44x at 16,777,216.
+- **Output 16 bytes behind the input:** 0.98x at 16,384 and at 16,777,216, 1.04x at
+  4,194,304, level elsewhere.
