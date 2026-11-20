@@ -46,10 +46,6 @@ unique_i64:
     cmp     rdx, 4
     jb      .Lbits_few
 
-    mov     r9, rcx
-    neg     r9
-    vmovq   xmm14, r9
-    vpbroadcastq ymm14, xmm14           # -lo in every lane
     vpcmpeqd ymm15, ymm15, ymm15
     vpsrlq  ymm15, ymm15, 63            # 1 in every lane
     vpxor   xmm0, xmm0, xmm0            # four sets
@@ -58,6 +54,51 @@ unique_i64:
     vpxor   xmm3, xmm3, xmm3
     lea     r10, [rdi + rdx*8]          # end of x
     lea     r11, [r10 - 128]            # the last place a step of 16 may start
+
+    # Labels from zero up: when 0 <= lo and lo + span <= 64, an element is
+    # its own bit number, and the shift takes its count from memory. The
+    # set is shifted down by lo at the end (r9; 0 on the general path).
+    test    rcx, rcx
+    js      .Lbits_general
+    lea     r9, [rcx + r8]
+    cmp     r9, BITS_SPAN
+    ja      .Lbits_general
+    mov     r9, rcx
+    cmp     rdi, r11
+    ja      .Lraw_singles
+.Lraw16:
+    vpsllvq ymm4, ymm15, [rdi]
+    vpsllvq ymm5, ymm15, [rdi + 32]
+    vpsllvq ymm6, ymm15, [rdi + 64]
+    vpsllvq ymm7, ymm15, [rdi + 96]
+    add     rdi, 128
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    cmp     rdi, r11
+    jbe     .Lraw16
+.Lraw_singles:
+    lea     r11, [r10 - 32]             # the last vector, which ends at n
+    cmp     rdi, r11
+    jae     .Lraw_last
+.Lraw4:
+    vpsllvq ymm4, ymm15, [rdi]
+    add     rdi, 32
+    vpor    ymm0, ymm0, ymm4
+    cmp     rdi, r11
+    jb      .Lraw4
+.Lraw_last:
+    vpsllvq ymm4, ymm15, [r11]
+    vpor    ymm1, ymm1, ymm4
+    jmp     .Lbits_reduce
+
+.Lbits_general:
+    mov     r9, rcx
+    neg     r9
+    vmovq   xmm14, r9
+    vpbroadcastq ymm14, xmm14           # -lo in every lane
+    xor     r9d, r9d
     cmp     rdi, r11
     ja      .Lbits_singles
 .Lbits16:
@@ -92,6 +133,7 @@ unique_i64:
     vpsllvq ymm4, ymm15, ymm4
     vpor    ymm1, ymm1, ymm4
     # The four sets and their four lanes into one register.
+.Lbits_reduce:
     vpor    ymm0, ymm0, ymm1
     vpor    ymm2, ymm2, ymm3
     vpor    ymm0, ymm0, ymm2
@@ -100,6 +142,7 @@ unique_i64:
     vpshufd xmm1, xmm0, 0x4e
     vpor    xmm0, xmm0, xmm1
     vmovq   rax, xmm0
+    shrx    rax, rax, r9                # bit lo + d down to bit d
     vzeroupper
     jmp     .Lbits_done
 
