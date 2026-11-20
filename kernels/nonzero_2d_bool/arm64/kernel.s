@@ -2,20 +2,35 @@
 // Writes the row and column of every true byte of m (rows of width) to out as
 // int64 pairs, in C order. Returns how many int64 it wrote.
 //
-// The mask is read a row at a time, in chunks of 8 bytes and a last chunk of
-// what is left of the row, so that no chunk crosses a row. A chunk is loaded
-// as one 64-bit word; in the last chunk of a row the bytes past its end are
-// masked off. One multiplication packs it into an 8-bit number, another gives
-// the true count (times 8). The 8-bit number indexes a table whose entry lists
-// the positions of the true bytes, in order, as eight bytes; those are widened
-// to 64 bits and added to the chunk's first column, and they are
-// interleaved with the row and stored: eight (row, column) pairs at the write pointer, of
-// which the first `count` are kept.
+// Two ways of handling a stretch of the mask, chosen by how many bytes are true.
 //
-// Stores stay inside the capacity: a chunk starting at element f is read only
-// when f + 8 <= n, at most f pairs have been kept before it, and it writes 8
-// pairs. The last 0 to 7 bytes of the mask, when a chunk cannot be read there,
-// are handled one at a time.
+// Sparse (64 bytes per step, any width): the 64 bytes are packed into a 64-bit
+// word, first byte in the top bit, and the true ones are counted. If at most 6
+// are true, the positions of the first 6 set bits are extracted one after
+// another with `clz`, with no branches. Each position f becomes a row and a
+// column without a division: row = high half of (2f * M), M = ceil(2^63 / w),
+// exact while f * w < 2^63, and column = f - row * w. Positions past the true
+// count are rubbish that the next store overwrites (`out` is scratch). More
+// than 6 true bytes send those 64 bytes to the dense code.
+//
+// Dense (a row at a time): chunks of 8 bytes and a last chunk of what is left
+// of the row, so that no chunk crosses a row; in the last chunk the bytes past
+// the row are masked off. One multiplication packs a chunk into an 8-bit
+// number, another gives the true count (times 8). The 8-bit number indexes a
+// table whose entry lists the positions of the true bytes, in order, as eight
+// bytes; those are widened to 64 bits, added to the chunk's first column,
+// paired with the row by `zip`, and stored: eight (row, column) pairs at the
+// write pointer, of which the first `count` are kept.
+//
+// After a dense stretch, which ends at the end of a row, the share of true
+// bytes in it decides what handles the next bytes: sparse if at most one in
+// eight was true, else a longer dense stretch.
+//
+// Stores stay inside the capacity: a step starting at element f writes at
+// most 8 pairs and is taken only when f + 8 <= n, and at most f pairs have
+// been kept before it. The last 0 to 7 bytes of the mask, when a chunk cannot
+// be read there, are handled one at a time. The sparse code runs only when
+// n < 2^31, which keeps f * w below 2^63 with w taken as at most n.
 
 // Widen the 8 positions in d0, add the column in v17, pair each with the row
 // in v20 and store the 8 pairs at x5. Uses v0 to v6 and v21 to v27.
@@ -41,6 +56,21 @@
     stp     q5, q6, [x5, #96]
 .endm
 
+// Sparse step: take the first set bit of x14 (bit 63 - j for byte j), clear
+// it, and store its (row, column) pair at [x5, #off]. x7 = 2 * the position
+// of the block's first byte, x6 = M, x15 = 1 << 63, x3 = width. \a and \b are
+// scratch registers.
+.macro EXTRACT a, b, off
+    clz     \a, x14
+    lsr     \b, x15, \a
+    bic     x14, x14, \b
+    add     \a, x7, \a, lsl #1          // 2f
+    umulh   \b, \a, x6                  // row
+    lsr     \a, \a, #1                  // f
+    msub    \a, \b, x3, \a              // column
+    stp     \b, \a, [x5, #\off]
+.endm
+
 .text
 .globl _nonzero_2d_bool
 .p2align 2
@@ -51,7 +81,6 @@ _nonzero_2d_bool:
     add     x4, x0, x2                  // x4 = end of the mask
     cmp     x2, #8
     b.lo    Ltail
-    sub     x2, x4, #8                  // x2 = last place a chunk can start
     adrp    x9, Lpositions@PAGE
     add     x9, x9, Lpositions@PAGEOFF
     mov     x10, #0x4080                // 0x0102040810204080: gathers the low
@@ -59,17 +88,83 @@ _nonzero_2d_bool:
     movk    x10, #0x0408, lsl #32
     movk    x10, #0x0102, lsl #48
     mov     x11, #0x0808080808080808    // sums the bytes, times 8, into the top byte
-    mov     x16, #-1
     mov     w8, #8
     dup     v18.2d, x8                  // 8, twice: the column step of a chunk
-Lrow:                                   // x0 = x17 = start of row x6, below the end
-    sub     x12, x4, x0
-    cmp     x12, x3
-    csel    x12, x12, x3, lo
-    add     x12, x0, x12                // x12 = end of the row, or of the mask
+    cmp     x3, x2
+    csel    x3, x3, x2, lo              // a width above n is as good as n
+    mov     x7, x4                      // dense to the end, unless sparse is used
+    sub     x2, x4, #8                  // x2 = last place a chunk can start
+    sub     x8, x4, x0
+    cmp     x8, #64
+    b.lo    Lrow
+    lsr     x8, x8, #31
+    cbnz    x8, Lrow                    // n >= 2^31: dense only
+    mov     x8, #0x7fffffffffffffff
+    udiv    x8, x8, x3
+    add     x8, x8, #1                  // M = ceil(2^63 / width)
+    fmov    d19, x8
+    mov     v19.d[1], x0                // v19 = (M, start of the mask)
+    adrp    x8, Lbit_shifts@PAGE
+    ldr     q28, [x8, Lbit_shifts@PAGEOFF]
+Lsparse_enter:                          // x0 = the next byte
+    fmov    x6, d19
+    mov     x15, #0x8000000000000000
+    mov     x7, v19.d[1]
+    sub     x7, x0, x7
+    lsl     x7, x7, #1                  // x7 = 2 * its position
+Lsparse:
+    sub     x8, x4, x0
+    cmp     x8, #64
+    b.lo    Lsparse_exit
+    ldp     q0, q1, [x0]
+    ldp     q2, q3, [x0, #32]
+    ushl    v0.16b, v0.16b, v28.16b     // byte j becomes bit (j mod 8)
+    ushl    v1.16b, v1.16b, v28.16b
+    ushl    v2.16b, v2.16b, v28.16b
+    ushl    v3.16b, v3.16b, v28.16b
+    addp    v0.16b, v0.16b, v1.16b      // three rounds of pairwise sums
+    addp    v2.16b, v2.16b, v3.16b      // leave one byte per 8 mask bytes
+    addp    v0.16b, v0.16b, v2.16b
+    addp    v0.16b, v0.16b, v0.16b
+    cnt     v1.8b, v0.8b
+    fmov    x14, d0                     // bit j = mask byte j
+    addv    b1, v1.8b
+    rbit    x14, x14                    // bit 63-j = mask byte j
+    fmov    w13, s1                     // number of true bytes
+    cmp     w13, #6
+    b.hi    Lsparse_fail
+    EXTRACT x8, x12, 0
+    EXTRACT x16, x17, 16
+    EXTRACT x8, x12, 32
+    EXTRACT x16, x17, 48
+    EXTRACT x8, x12, 64
+    EXTRACT x16, x17, 80
+    add     x5, x5, x13, lsl #4
+    add     x0, x0, #64
+    add     x7, x7, #128
+    b       Lsparse
+Lsparse_fail:                           // a dense stretch of at least 64 bytes
+    add     x13, x0, #64
+    b       Lsparse_leave
+Lsparse_exit:                           // fewer than 64 bytes left: dense to the end
+    mov     x13, x4
+Lsparse_leave:                          // row and start of row of x0, from 2f in x7
+    umulh   x8, x7, x6
+    lsr     x12, x7, #1
+    msub    x12, x8, x3, x12            // column
+    mov     x6, x8
+    sub     x17, x0, x12
+    mov     x7, x13                     // x7 = end of the dense stretch
+Lstretch:
+    sub     x16, x5, x0, lsl #1         // x16 = 16 * true - 2 * bytes, offset
+Lrow:                                   // x0 in row x6, which starts at x17
+    add     x12, x17, x3
+    cmp     x12, x4
+    csel    x12, x12, x4, lo            // x12 = end of the row, or of the mask
     sub     x13, x12, #8                // x13 = last place a whole chunk can start
     dup     v20.2d, x6                  // the row, twice
-    movi    v17.2d, #0                  // column of the chunk
+    sub     x14, x0, x17
+    dup     v17.2d, x14                 // column of the chunk
     cmp     x0, x13
     b.hi    Lpart
 Lfull:                                  // 8 bytes, all in this row
@@ -93,7 +188,8 @@ Lpart:                                  // 0 to 7 bytes left in the row
     ldr     x14, [x0]
     add     x0, x0, x12
     neg     x15, x12, lsl #3            // 64 - 8 * length
-    lsr     x15, x16, x15               // the row's bytes of the word
+    mov     x8, #-1
+    lsr     x15, x8, x15                // the row's bytes of the word
     and     x14, x14, x15
     mul     x15, x14, x10
     mul     x8, x14, x11
@@ -105,9 +201,17 @@ Lpart:                                  // 0 to 7 bytes left in the row
 Lrow_end:
     add     x6, x6, #1
     mov     x17, x0
-    cmp     x0, x4
+    cmp     x0, x7
     b.lo    Lrow
-    b       Ldone
+    cmp     x0, x4
+    b.hs    Ldone
+    sub     x8, x5, x0, lsl #1          // was at most one byte in eight true?
+    subs    x8, x8, x16
+    b.le    Lsparse_enter
+    add     x7, x0, #512                // else a longer dense stretch
+    cmp     x7, x4
+    csel    x7, x7, x4, lo
+    b       Lstretch
 Ltail:                                  // 1 to 7 bytes left in the mask
     sub     x7, x0, x17                 // column
     cmp     x0, x4
@@ -129,6 +233,9 @@ Ldone:
 
 .section __TEXT,__const
 .p2align 4
+// Left-shift amounts that give each of 8 consecutive bytes its own bit.
+Lbit_shifts:
+    .byte 0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7
 // For each 8-bit mask (bit j is mask byte j): the positions of its set bits,
 // in ascending order, one byte each. Unused bytes are zero. The comment shows
 // mask bytes 0 to 7.

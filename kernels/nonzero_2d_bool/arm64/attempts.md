@@ -33,3 +33,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.13x [1.12 – 1.14]
 - **Kept:** yes
 - **Notes:** about 1.25x at the default width and at width 3 dense, 1.02 to 1.10x at widths 32 and 1,000 above 64K elements. The slow sparse tables of attempt 3 at widths 3, 32 and 1,000 appeared again for both versions (2 ms at 1M at width 32, against 0.29 ms dense); a `judge run --quick` straight after had sparse width 32 at 0.29 ns per element, and a timer outside the judge 0.30. So it is the machine (the process sharing cores with other agents' runs), not the kernel.
+
+## 5. Sparse path: 64 bytes to a bitmask, six extractions, row by a multiplication
+
+- **Idea:** `nonzero_bool`'s sparse step, which does not care about rows. 64 mask bytes become a 64-bit mask (`ushl`, three rounds of `addp`, `rbit`) and a count. With at most 6 true, six unconditional `clz` / `lsr` / `bic` steps take the positions; each position f becomes its row without a division, row = high half of 2f times M = ceil(2^63 / w) (`umulh`), exact while f * w < 2^63, and its column f - row * w (`msub`); one `stp` per pair. More than 6 true sends the block to the dense row loop of attempt 4, which now starts anywhere in a row and runs to the end of the row past the block. After a dense stretch, at most one true byte in eight sends the next bytes back to the sparse path, otherwise a stretch of 512 bytes more. The sparse path is skipped when n >= 2^31 (the product could overflow) and the width is taken as at most n.
+- **check:** pass
+- **compare:** significantly faster, 1.81x [1.76 – 1.87]
+- **Kept:** yes
+- **Notes:** sparse 2.3x at the default width, 6.8x at width 3, 3.4x at width 32, 2.6x at width 1,000 (about 0.1 ns per element); dense 0.94 to 0.95x at widths 22, 32 and 1,000, all of it at small sizes (n=16 to 1,024: the failed first sparse block), and 1.02x at width 3.
