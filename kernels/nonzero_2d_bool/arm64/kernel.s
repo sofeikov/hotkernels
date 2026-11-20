@@ -13,7 +13,7 @@
 // count are rubbish that the next store overwrites (`out` is scratch). More
 // than 12 true bytes send those 64 bytes to the dense code.
 //
-// Dense (a row at a time): chunks of 8 bytes and a last chunk of what is left
+// Dense (a row at a time): chunks of 8 bytes, two per step, and a last chunk of what is left
 // of the row, so that no chunk crosses a row; in the last chunk the bytes past
 // the row are masked off. One multiplication packs a chunk into an 8-bit
 // number, another gives the true count (times 8). The 8-bit number indexes a
@@ -203,24 +203,45 @@ Lrow_wide:
     add     x12, x17, x3
     cmp     x12, x4
     csel    x12, x12, x4, lo            // x12 = end of the row, or of the mask
-    sub     x13, x12, #8                // x13 = last place a whole chunk can start
+    sub     x13, x12, #16               // x13 = last place two whole chunks can start
     dup     v20.2d, x6                  // the row, twice
     sub     x14, x0, x17
     dup     v17.2d, x14                 // column of the chunk
     cmp     x0, x13
-    b.hi    Lpart
-Lfull:                                  // 8 bytes, all in this row
-    ldr     x14, [x0], #8
-    mul     x15, x14, x10
+    b.hi    Lfull_one
+Lfull:                                  // 16 bytes, all in this row
+    ldp     x14, x15, [x0], #16
+    mul     x8, x14, x10
+    lsr     x8, x8, #56                 // 8-bit mask
+    ldr     d0, [x9, x8, lsl #3]        // positions of the true bytes
     mul     x8, x14, x11
-    lsr     x15, x15, #56               // 8-bit mask
     lsr     x8, x8, #56                 // 8 * (number of true bytes)
-    ldr     d0, [x9, x15, lsl #3]       // positions of the true bytes
+    PAIRS
+    add     x5, x5, x8, lsl #1
+    add     v17.2d, v17.2d, v18.2d
+    mul     x8, x15, x10
+    lsr     x8, x8, #56
+    ldr     d0, [x9, x8, lsl #3]
+    mul     x8, x15, x11
+    lsr     x8, x8, #56
     PAIRS
     add     x5, x5, x8, lsl #1
     add     v17.2d, v17.2d, v18.2d
     cmp     x0, x13
     b.ls    Lfull
+Lfull_one:                              // one more whole chunk?
+    add     x13, x13, #8
+    cmp     x0, x13
+    b.hi    Lpart
+    ldr     x14, [x0], #8
+    mul     x15, x14, x10
+    mul     x8, x14, x11
+    lsr     x15, x15, #56
+    lsr     x8, x8, #56
+    ldr     d0, [x9, x15, lsl #3]
+    PAIRS
+    add     x5, x5, x8, lsl #1
+    add     v17.2d, v17.2d, v18.2d
 Lpart:                                  // 0 to 7 bytes left in the row
     cmp     x0, x12
     b.eq    Lrow_end

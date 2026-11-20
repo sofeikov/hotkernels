@@ -57,3 +57,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.11x [1.10 – 1.11]
 - **Kept:** yes
 - **Notes:** sparse 1.11x to 1.41x (1.41x at width 1,000, where a dense trip ran to the end of a 1,000-byte row); dense unchanged. Sparse is now about 0.08 ns per element at every width.
+
+## 8. Two dense chunks per step in the wide row loop
+
+- **Idea:** load 16 mask bytes with one `ldp` and handle two 8-byte chunks per iteration of the inner loop, with one more single chunk when 8 to 15 bytes of the row are left: one loop branch and compare per 16 bytes.
+- **check:** pass
+- **compare:** significantly faster, 1.006x [1.004 – 1.008]
+- **Kept:** yes
+- **Notes:** dense widths 32 and 1,000 1.03 to 1.04x (0.27 ns per element at 1M), the rest unchanged.
