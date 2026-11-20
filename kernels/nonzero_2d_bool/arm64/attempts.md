@@ -89,3 +89,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.008x [1.006 – 1.010]
 - **Kept:** yes
 - **Notes:** sparse 1.01 to 1.02x at every width, 1.08x at width 1,000 at 1M; dense unchanged.
+
+## 12. Dense: a 32 KB table of ready-made pairs
+
+- **Idea:** replace the widening and the `zip`s of a dense chunk (15 vector instructions) by a table of 256 entries of eight (0, position) pairs each, loaded with four `ldp q` and added to the chunk's (row, column) with eight `add`. The table base needs a register, so the start of `out` moves to the stack.
+- **check:** pass
+- **compare:** significantly slower, 0.92x [0.92 – 0.92]
+- **Kept:** no
+- **Notes:** dense wide tables 0.79x: the four 32-byte loads from a 32 KB table per chunk cost more than the arithmetic they replace; n=16 0.84x from the stack traffic.
