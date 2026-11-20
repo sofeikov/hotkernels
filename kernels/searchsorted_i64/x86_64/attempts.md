@@ -11,3 +11,11 @@ What the compiler does with `naive.c` (`clang -O3 -march=native`): one search at
 - **compare:** not run (first version). `run`: 4.69x over naive C overall (64 needles 2.46x, 1,000 needles 8.96x), 3.11x over NumPy (4.37x and 2.21x).
 - **Kept:** yes
 - **Notes:** about 15% slower than the float64 kernel at 64 to 16,384 elements (132.6 ns for 64 needles at 1,024 elements, 113.4 there). `vpcmpgtq` runs on one port of this processor with a latency of three cycles, and the float compare on two. Against NumPy with 1,000 needles the kernel is 3.0x to 3.5x up to 4,096 elements and 1.2x from 1,048,576.
+
+## 2. Two steps of each search in one pass over the chunk
+
+- **Idea:** a pass loaded four positions, took one step and stored them. With the gather counted at about thirteen instructions' worth of the processor's front end, a step of four searches was about 23, of which the load of the positions, the load of the needles, the store and the loop are five that do not depend on how many steps the pass takes. Two steps in a pass pay them once: the positions and the needles stay in registers between the two gathers. From 524,288 elements a pass takes one step as before.
+- **check:** pass
+- **compare:** significantly faster, 1.089x [1.087 – 1.092]
+- **Kept:** yes
+- **Notes:** 1.15x to 1.18x up to 4,096 elements for both needle counts, 1.05x to 1.07x at 16,384 to 262,144, nothing above. Tried first with two steps at every size: 1.072x [1.066 – 1.078] overall, but 0.95x, 0.91x and 0.88x at 1,048,576, 4,194,304 and 16,777,216 with 1,000 needles. There the probes miss the second-level cache, and the second gather of a pass waits for the first, so fewer misses are in flight; hence the threshold. Three and four steps in a pass were slower than two in a benchmark outside the judge (1,000 needles against 1,024 elements: 1.71 us with two, 2.03 with three, 2.32 with four, 1.98 with one): the gathers of a pass form a chain, and the instructions that wait for it fill the scheduler.

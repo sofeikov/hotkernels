@@ -21,10 +21,18 @@
 #
 # Up to 64 searches run in step, and up to 512 when a does not fit the
 # second-level cache. Their positions live in out, which is exactly one
-# 64-bit slot per needle, and their needles stay in v. A step is, per four
-# searches, a load of the positions, one `vpgatherqq` for the four probes,
-# one compare with the needles, `half` under the compare's mask, an add and a
-# store. Nothing in a step waits for another search.
+# 64-bit slot per needle, and their needles stay in v. A pass over the chunk
+# loads four positions and their needles, takes two steps of those four
+# searches, and stores the positions: per step one `vpgatherqq` for the four
+# probes, one compare with the needles, `half` under the compare's mask and
+# an add. Nothing in a pass waits for another vector of searches.
+#
+# Two steps in a pass because the load of the positions, their store and
+# the loop are then paid once for two steps. Not three: the second and third
+# gathers wait for the one before, and the processor runs out of room for
+# instructions that wait. And one step in a pass from DEEP_N elements, where
+# the probes miss the second-level cache and a probe that waits for another
+# is a miss that is not in flight.
 #
 # The first step needs no gather: every search probes the same element.
 #
@@ -38,9 +46,11 @@
 # `vpgatherqq` is fast on this processor and slow on some others (older AMD,
 # and Intel processors that carry the gather mitigation).
 #
-# Registers: r9 len, rax the address of a[half - 1], r10 and r11 the byte
-# offsets where the chunk starts and ends, rbx the offset inside it (saved
-# below the stack pointer). ymm8 half in every lane, ymm9 the gather's mask.
+# Registers: r9 len; rax and rcx the addresses of a[half - 1] for the two
+# steps of a pass, ymm8 and ymm7 their halves in every lane; r10 and r11 the
+# byte offsets where the chunk starts and ends, rbx the offset inside it
+# (saved below the stack pointer, where n and the chunk's size are kept
+# too). ymm0 positions, ymm4 needles, ymm9 the gather's mask.
 
 # Needles per chunk, in bytes of v: 64 while a fits the second-level cache.
 .set CHUNK_BYTES, 512
@@ -48,17 +58,50 @@
 .set LARGE_N, 262144
 # Needles per chunk for such an a: 512.
 .set LARGE_CHUNK_BYTES, 4096
+# From this many elements (4 MB, twice the second-level cache) a pass over
+# the chunk takes one step, not two.
+.set DEEP_N, 524288
 
-# The start of a step: half into rax and ymm8, len reduced, and rax turned
-# into the address of a[half - 1]. Leaves the zero flag set when this is the
-# last step; nothing that follows in a step changes the flags.
-.macro HALVE
-    lea     rax, [r9 + 1]
-    shr     rax, 1
-    vmovq   xmm8, rax
-    vpbroadcastq ymm8, xmm8
-    sub     r9, rax
-    lea     rax, [rdi + rax * 8 - 8]
+# The next half: into \addr as the address of a[half - 1] and into every
+# lane of \half, and len (r9) reduced by it. Leaves the zero flag set when
+# this was the last step.
+.macro HALVE addr, half, xhalf
+    lea     \addr, [r9 + 1]
+    shr     \addr, 1
+    vmovq   \xhalf, \addr
+    vpbroadcastq \half, \xhalf
+    sub     r9, \addr
+    lea     \addr, [rdi + \addr * 8 - 8]
+.endm
+
+# One step for the four searches whose positions are in ymm0 and whose
+# needles are in ymm4. A gather clears its mask register, and it merges into
+# its destination, which is therefore one more input: it is zeroed first, so
+# that no probe waits for an earlier one.
+.macro PROBE addr, half, n
+    vpcmpeqd ymm9, ymm9, ymm9
+    vpxor   xmm\n, xmm\n, xmm\n
+    vpgatherqq ymm\n, [\addr + ymm0 * 8], ymm9
+    vpcmpgtq ymm\n, ymm4, ymm\n
+    vpand   ymm\n, ymm\n, \half
+    vpaddq  ymm0, ymm0, ymm\n
+.endm
+
+# One pass over the chunk: \steps steps of each of its searches.
+.macro PASS steps
+    mov     rbx, r10
+.p2align 5
+1:
+    vmovdqu ymm0, [rdx + rbx]
+    vmovdqu ymm4, [rsi + rbx]
+    PROBE   rax, ymm8, 10
+.if \steps > 1
+    PROBE   rcx, ymm7, 11
+.endif
+    vmovdqu [rdx + rbx], ymm0
+    add     rbx, 32
+    cmp     rbx, r11
+    jb      1b
 .endm
 
 .text
@@ -76,6 +119,7 @@ searchsorted_i64:
     cmp     rcx, LARGE_N
     cmovae  eax, r9d
     mov     [rsp - 16], rax             # bytes of v per chunk
+    mov     [rsp - 24], rcx             # n
     xor     r10d, r10d
     test    rcx, rcx
     jz      .Lempty
@@ -91,8 +135,8 @@ searchsorted_i64:
     cmp     r11, rax
     cmova   r11, rax                    # where this chunk ends
     # The first step: every search probes a[half - 1].
-    mov     r9, rcx
-    HALVE
+    mov     r9, [rsp - 24]
+    HALVE   rax, ymm8, xmm8
     vpbroadcastq ymm10, qword ptr [rax]
     mov     rbx, r10
 .Lfirst:
@@ -106,22 +150,17 @@ searchsorted_i64:
     test    r9, r9
     jz      .Lchunkdone
 .Lstep:
-    HALVE
-    mov     rbx, r10
-.p2align 5
-.Lprobe:
-    vmovdqu ymm0, [rdx + rbx]
-    vpcmpeqd ymm9, ymm9, ymm9
-    vpxor   xmm10, xmm10, xmm10         # a gather merges into its destination: start it afresh
-    vpgatherqq ymm10, [rax + ymm0 * 8], ymm9
-    vmovdqu ymm4, [rsi + rbx]
-    vpcmpgtq ymm10, ymm4, ymm10
-    vpand   ymm10, ymm10, ymm8
-    vpaddq  ymm0, ymm0, ymm10
-    vmovdqu [rdx + rbx], ymm0
-    add     rbx, 32
-    cmp     rbx, r11
-    jb      .Lprobe
+    HALVE   rax, ymm8, xmm8
+    jz      .Lpass1
+    cmp     qword ptr [rsp - 24], DEEP_N
+    jae     .Lpass1
+    HALVE   rcx, ymm7, xmm7
+    PASS    2
+    test    r9, r9
+    jnz     .Lstep
+    jmp     .Lchunkdone
+.Lpass1:
+    PASS    1
     test    r9, r9
     jnz     .Lstep
 .Lchunkdone:
@@ -137,9 +176,9 @@ searchsorted_i64:
     lea     r10, [r8 * 8 - 32]
     vmovdqu ymm4, [rsi + r10]
     vpxor   xmm0, xmm0, xmm0
-    mov     r9, rcx
+    mov     r9, [rsp - 24]
 .Lstep4:
-    HALVE
+    HALVE   rax, ymm8, xmm8
     vpcmpeqd ymm9, ymm9, ymm9
     vpgatherqq ymm10, [rax + ymm0 * 8], ymm9
     vpcmpgtq ymm10, ymm4, ymm10
