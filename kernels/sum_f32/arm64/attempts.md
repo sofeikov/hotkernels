@@ -45,3 +45,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.047x [1.046 – 1.047]
 - **Kept:** yes
 - **Notes:** 1.25x at 16 (1.3 ns), 1.33x at 64 (2.9 ns), nothing elsewhere. Load average 6.2.
+
+## 6. The diagonal in steps of 64 bytes
+
+- **Idea:** a microbenchmark of the group loop over blocks in the second-level cache ran 5% faster when each visit to a leaf loaded 64 bytes, two vectors, instead of 32: 3.37 us against 3.55 us for 65,536 elements, where one stream at the load limit takes 3.15 us. So the diagonal block of 8 vectors became 4 visits of two vectors per leaf.
+- **check:** pass
+- **compare:** significantly slower, 0.990x [0.989 – 0.992]
+- **Kept:** no
+- **Notes:** 0.94x at 1,024, 0.98x at 4,096 and 16,384, nothing in the second-level cache. A block of four visits has only 11 diagonals, with few leaves active at its two ends, and each visit's two additions to a running sum wait for each other; the microbenchmark's block was 8 visits long.
