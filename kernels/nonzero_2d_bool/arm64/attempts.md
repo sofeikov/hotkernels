@@ -113,3 +113,31 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.036x [1.035 – 1.037]
 - **Kept:** no
 - **Notes:** the gain is the benchmark's: `compare` times one input over and over, and the predictor learns which blocks take which tier (1.23x at 1,024 elements, 1.07x at 1M). On masks it has not seen, timed outside the judge at width 22 (4M elements, a fresh random mask): 0.090 ns per element at 5% against 0.081 for attempt 11, and 0.148 against 0.105 at 7%, where the count sits on the new boundary; better only at 3% (0.063 against 0.079). Rejected for the same reason as `nonzero_bool` attempt 5 chose 6 and 12.
+
+## 15. Dense stretches of 2,048 bytes instead of 512
+
+- **Idea:** after a dense stretch that was more than one in eight true, run 2,048 bytes before looking at the share again, so dense masks pass the decision a quarter as often.
+- **check:** pass
+- **compare:** no significant difference, 1.000x [1.000 – 1.000]
+- **Kept:** no
+- **Notes:** the decision costs a few instructions per 512 bytes; nothing to gain.
+
+## 16. One branch at the end of a wide row
+
+- **Idea:** the end of a row in the wide loop branches back to the row loop, whose first instructions test the width to choose the narrow loop. Test both conditions with `cmp` / `ccmp` and branch straight to the wide loop.
+- **check:** pass
+- **compare:** significantly slower, 0.996x [0.995 – 0.997]
+- **Kept:** no
+- **Notes:** n=16 0.97x, the rest level.
+
+## 17. Two sparse blocks per pass of the sparse loop
+
+- **Idea:** unroll the sparse loop for rows under 512 to two 64-byte blocks per pass: one loop branch per 128 bytes.
+- **check:** pass
+- **compare:** significantly faster, 1.001x [1.001 – 1.002]
+- **Kept:** no
+- **Notes:** 1.02 to 1.03x at 1M sparse, level elsewhere, taken while the load average rose to 24. A tenth of a percent overall does not pay for a second copy of the sparse step; counted as no improvement.
+
+## Stopped
+
+Six attempts in a row (12 to 17) gave nothing worth keeping. The dense step stores eight 16-byte pairs per 8 mask bytes, about 6 cycles per chunk, which looks like the limit of the stores; the sparse step runs at about 4 instructions per cycle. Not tried: a sparse step for the last partial 64-byte block of a matrix (the workload's 880-byte matrices end with 48 bytes that go to the dense code), since every size `compare` times is a multiple of 64 and would not see it.
