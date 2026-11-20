@@ -15,3 +15,19 @@ The kernel does the same work whatever the elements are, so the two timing distr
 - **compare:** n/a (first version). `run`: 5.37x [5.35 – 5.39] over naive C over all eight tables, 66.2x over NumPy. Rows of 31: 8.28x (sparse) and 8.26x (dense); rows of 8: 11.7x and 11.3x; rows of 64: 4.58x and 4.46x; rows of 256: 2.03x and 1.86x.
 - **Kept:** yes
 - **Notes:** rows of 31 at 4,096 elements: 26.0 ns for 132 rows, 0.18 ns per row, about one cycle, where two loads per cycle would allow half that; half the loads straddle two cache lines. Rows of 64 at 16,384: 0.33 ns per row for two loads. Rows of 256 at 16,384: 0.89 ns per row for eight loads. Rows of 8 at 16 elements, the copy through the stack: 7.1 ns against 6.0 for the reference, the one figure below it (0.85x). Rows of 256 at 16 and 64 elements, no row: 4.0 ns against 4.2. The table with the output 16 bytes behind the input is level with the other: 1.00x from 4,096 to 4,194,304.
+
+## 2. No division before the loops, on either path
+
+- **Idea:** count the rows by address instead of dividing. Rows of 32 and more: a pass ends at the last address a whole row starts at, `m + n - cols`, so the row count is never needed. Rows under 32: the loads end 32 bytes before the end of `m` rather than of its whole rows, the division still runs but only its remainder is wanted, to clear the partial row out of the last 32 bytes (`vpand` with a mask read from a table at the remainder), and a matrix with no row went through the copy on the stack.
+- **check:** pass
+- **compare:** significantly slower, 0.987x [0.979 – 0.994]
+- **Kept:** no
+- **Notes:** the wide tables gained (rows of 64: 1.04x and 1.06x, 1.41x at 16 elements where there is no row and now no division). The default width lost, 0.89x: at 16 elements, no row, 6.4 ns against 1.9, because the path for a matrix under 32 bytes was taken where zeros were stored directly before; and at 256 elements 4.0 ns against 3.4. The division was not what the loop waited for in the first place: its branch is predicted, so the loads ran beside the division already, and the last load waits for the quotient in one form and for the remainder, then for the mask, in the other.
+
+## 3. No division on the wide path only
+
+- **Idea:** the wide half of attempt 2 alone. The narrow path as in attempt 1, except that a matrix shorter than one row stores its zeros before the division.
+- **check:** pass
+- **compare:** significantly faster, 1.024x [1.011 – 1.037]
+- **Kept:** yes
+- **Notes:** rows of 31: 1.04x, all of it at 16 elements. Rows of 64: 1.03x. Rows of 8: 1.02x. Rows of 256: 1.01x, not significant.

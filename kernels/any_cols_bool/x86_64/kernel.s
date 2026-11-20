@@ -7,7 +7,9 @@
 # A byte of m other than 0 and 1 counts as true on every path.
 #
 # The results are or'ed together in registers and made 0 or 1 once, by a
-# minimum with 1, when they are stored.
+# minimum with 1, when they are stored. The rows are counted by address: a
+# pass ends at the last address a whole row starts at. Only the narrow path
+# divides, for the bytes in whole rows, which is where its loads end.
 #
 # Paths, by cols:
 #   32..     strips of 32 columns, each with a register of its own for the
@@ -55,12 +57,12 @@
 
 # One pass over the rows for the strips listed, which are numbered from 0 and
 # kept in the ymm registers of the same numbers: strip i is the 32 columns
-# from r9 + 32 * i. rdi = m, rsi = out, rax = rows, at least one, rcx = cols,
-# ymm15 = 1 in every byte. Uses rdx and r11.
+# from r9 + 32 * i. rdi = m, rsi = out, rax = where the last whole row starts,
+# and there is one, rcx = cols, ymm15 = 1 in every byte. Uses rdx and r11.
 .macro PASS label, strips:vararg
 \label:
     lea     rdx, [rdi + r9]
-    mov     r11, rax
+    lea     r11, [rax + r9]             # the strip in the last row
   .irp i, \strips
     vpxor   xmm\i, xmm\i, xmm\i
   .endr
@@ -69,8 +71,8 @@
     vpor    ymm\i, ymm\i, [rdx + \i * VEC]
   .endr
     add     rdx, rcx
-    dec     r11
-    jnz     \label\()_loop
+    cmp     rdx, r11
+    jbe     \label\()_loop
   .irp i, \strips
     vpminub ymm\i, ymm\i, ymm15
     vmovdqu [rsi + r9 + \i * VEC], ymm\i
@@ -94,17 +96,14 @@
 .type any_cols_bool, @function
 .p2align 4
 any_cols_bool:
-    mov     r8, rdx
-    mov     rax, rdx
-    xor     edx, edx
-    div     rcx                         # rax = rows
-    sub     r8, rdx                     # r8 = rows * cols, the bytes in whole rows
     vpcmpeqd ymm15, ymm15, ymm15
     vpabsb  ymm15, ymm15                # 1 in every byte
     cmp     rcx, VEC
     jb      .Lnarrow
-    test    rax, rax
-    jz      .Lno_rows
+    cmp     rdx, rcx
+    jb      .Lno_rows
+    lea     rax, [rdi + rdx]
+    sub     rax, rcx                    # where the last whole row starts
     xor     r9d, r9d                    # columns done
     mov     r10, rcx                    # columns left
     lea     r8, [rcx + rcx]             # two rows
@@ -123,24 +122,24 @@ any_cols_bool:
     mov     r10d, VEC
 .Lpass1:
     lea     rdx, [rdi + r9]
+    lea     r11, [rax + r9]
+    sub     r11, rcx                    # the strip in the last row but one; below m when there is one row, so the compares are signed
     vpxor   xmm0, xmm0, xmm0
     vpxor   xmm1, xmm1, xmm1
-    mov     r11, rax
-    shr     r11, 1                      # pairs of rows
-    test    al, 1
-    jz      .Lpass1_pairs
-    vmovdqu ymm0, [rdx]
-    add     rdx, rcx
-.Lpass1_pairs:
-    test    r11, r11
-    jz      .Lpass1_store
+    cmp     rdx, r11
+    jg      .Lpass1_one
 .Lpass1_loop:
     vpor    ymm0, ymm0, [rdx]
     vpor    ymm1, ymm1, [rdx + rcx]
     add     rdx, r8
-    dec     r11
-    jnz     .Lpass1_loop
+    cmp     rdx, r11
+    jle     .Lpass1_loop
     vpor    ymm0, ymm0, ymm1
+.Lpass1_one:
+    sub     rdx, rcx
+    cmp     rdx, r11
+    jg      .Lpass1_store
+    vpor    ymm0, ymm0, [rdx + rcx]     # a row without a pair
 .Lpass1_store:
     vpminub ymm0, ymm0, ymm15
     vmovdqu [rsi + r9], ymm0
@@ -179,8 +178,13 @@ any_cols_bool:
 .Lnarrow:
     lea     r9, [rip + .Lshift]
     vpxor   xmm0, xmm0, xmm0
-    test    rax, rax
-    jz      .Lnarrow_store              # no rows: zeros
+    cmp     rdx, rcx
+    jb      .Lnarrow_store              # no rows: zeros
+    mov     r8, rdx
+    mov     rax, rdx
+    xor     edx, edx
+    div     rcx
+    sub     r8, rdx                     # the bytes in whole rows
     movzx   r10d, byte ptr [r9 + rcx + (.Lstep - .Lshift)]     # step
     cmp     r8, VEC
     jb      .Ltiny
