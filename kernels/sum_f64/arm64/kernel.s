@@ -470,6 +470,10 @@ Lplain_long:
     b.eq    Lsplit
     cmp     x7, #64
     b.ls    Lquad_seq
+    cmp     x7, #67
+    b.ls    Lsplit
+    cmp     x7, #128
+    b.ls    Locto_seq
     b       Lsplit
 Lleaf:
     cmp     x14, #2
@@ -672,6 +676,44 @@ Lquad_seq:  // 34..64 vectors: four leaves
     fadd    d20, d20, d21
     fadd    d22, d22, d23
     fadd    d0, d20, d22
+    b       Lpush
+
+Locto_seq:  // 68..128 vectors: eight leaves
+    lsr     x13, x7, #1                 // b4
+    lsr     x11, x13, #1                // b2
+    sub     x0, x7, x13
+    add     x15, x13, x0, lsr #1        // b6
+    lsr     x10, x11, #1                // b1
+    sub     x0, x13, x11
+    add     x12, x11, x0, lsr #1        // b3
+    sub     x0, x15, x13
+    add     x14, x13, x0, lsr #1        // b5
+    sub     x0, x7, x15
+    add     x16, x15, x0, lsr #1        // b7
+    add     x10, x6, x10, lsl #6
+    add     x11, x6, x11, lsl #6
+    add     x12, x6, x12, lsl #6
+    add     x13, x6, x13, lsl #6
+    add     x14, x6, x14, lsl #6
+    add     x15, x6, x15, lsl #6
+    add     x16, x6, x16, lsl #6
+    add     x17, x6, x7, lsl #6
+    LEAFAT  x10, 20
+    LEAFAT  x11, 21
+    LEAFAT  x12, 22
+    LEAFAT  x13, 23
+    LEAFAT  x14, 24
+    LEAFAT  x15, 25
+    LEAFAT  x16, 26
+    LEAFAT  x17, 27
+    mov     x14, #1                     // the flag, borrowed above: still long
+    fadd    d20, d20, d21
+    fadd    d22, d22, d23
+    fadd    d24, d24, d25
+    fadd    d26, d26, d27
+    fadd    d20, d20, d22
+    fadd    d24, d24, d26
+    fadd    d0, d20, d24
     b       Lpush
 
 Ldone:

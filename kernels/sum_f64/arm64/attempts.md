@@ -99,3 +99,11 @@ Ten attempts, the last two rejected; the run was cut short at the coordinator's 
 - **compare:** significantly faster, 1.030x [1.014 – 1.045]
 - **Kept:** yes
 - **Notes:** 1.11x at 65,536 and 262,144, 1.13x [1.00 – 1.28] at 1,048,576, nothing elsewhere. Outside timer against the naive C: 1.064x, 1.075x and 1.069x at the three sizes, 1.035x at 4,194,304. Load average 11.
+
+## 12. Eight leaves in sequence beyond the first-level cache
+
+- **Idea:** attempt 11 for a node of 68 to 128 vectors: its eight leaves one after another, their sums in eight registers, combined in the node's order. One pass of the walk per eight leaves.
+- **check:** pass
+- **compare:** significantly faster, 1.004x [1.001 – 1.007]
+- **Kept:** yes
+- **Notes:** 1.02x at 65,536 and 262,144, 1.01x at 1,048,576. Outside timer against the naive C: 1.097x, 1.107x, 1.071x. Load average 8.7.
