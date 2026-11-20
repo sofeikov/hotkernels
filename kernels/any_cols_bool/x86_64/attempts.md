@@ -47,3 +47,30 @@ The kernel does the same work whatever the elements are, so the two timing distr
 - **compare:** significantly faster, 1.028x [1.019 – 1.037]
 - **Kept:** yes
 - **Notes:** rows of 8: 1.08x in both tables (1.38x at 256 elements, 1.32x at 1,024, level from 16,384). Rows of 31: 1.00x, not significant: 4,096 elements take 24.8 ns, 0.19 ns per row, one cycle, and that is the cost of the loads. A 32-byte load every 31 bytes straddles two cache lines 31 times in 64, and such a load takes a cycle more than the half cycle of one that does not. In a benchmark outside the judge, with the matrix on a 64-byte boundary, 4,096 elements in rows of 8, whose loads then never straddle, went from 26.8 ns to 16.5 ns; three bytes off the boundary, from 31.2 ns to 26.9 ns.
+
+## 6. Two rows per step in the pass of two strips
+
+- **Idea:** the pass that serves rows of 64 to 127 takes one row, two loads, per step, and a step is about 1.3 cycles. Two rows per step into four registers, as the pass of one strip does, with a row without a pair taken after the loop.
+- **check:** pass
+- **compare:** significantly faster, 1.012x [1.009 – 1.016], and 1.014x [1.009 – 1.018] when run again
+- **Kept:** no
+- **Notes:** dropped although the judge rated it faster, because the gain is not where the change is. Rows of 64, the only timed width that takes this pass: 1.01x not significant and 1.02x. Rows of 256: 1.04x, all of it at 16 and 64 elements, where there is no row and the kernel stores zeros: 3.2 ns against 4.2. That code was not changed; it moved, and in the kernel as committed the `jmp` after its loop straddles a 32-byte boundary of the code, which it no longer did with this change in front of it. In a benchmark outside the judge the pass itself was slower for a matrix of few rows (one row of 64: 1.70 ns against 1.51; four rows: 2.26 ns against 1.89), level from 16 rows up with the matrix five bytes off a 64-byte boundary, and 1.15x faster from 64 rows with the matrix on one. The binding leaves a matrix of no rows to NumPy, so the point that gained is never reached from Python.
+
+## 7. The function and its loops on 32-byte boundaries
+
+- **Idea:** take the gain of attempt 6 on purpose: `.p2align 5` for the function, for the head of each loop and for the path of no rows, so that where a loop and the jump after it lie within a 32-byte block of code does not depend on what stands in front of them.
+- **check:** pass
+- **compare:** no significant difference, 0.996x [0.989 – 1.004]
+- **Kept:** no
+- **Notes:** rows of 256: 1.03x and 1.02x, the no-row points again. Rows of 64: 0.97x and 0.96x. Rows of 8: 0.99x in both tables. Rows of 31: 1.01x and 1.00x. The padding in front of a loop is run once per pass, and a call of a few rows is a few passes.
+
+## Where the kernel stands
+
+- **Rows under 32, in the first-level cache:** the loads. One 32-byte load per row or per `step` bytes, and a load that straddles two cache lines takes a cycle more: 0.19 ns per row of 31 at 4,096 elements, one cycle, where half the loads straddle. A row of 31 has two places a 32-byte load can cover it from, one byte apart, so there is no choosing a load that does not straddle.
+- **Rows of 32 and more, in the first-level cache:** the same. Rows of 256 at 16,384 elements take 0.89 ns per row for eight loads with the matrix on a 64-byte boundary in a benchmark outside the judge, and 1.58 ns five bytes off it.
+- **Beyond the first-level cache:** how fast the cache below delivers. 0.009 ns per element for rows of 31 from 65,536 to 1,048,576 elements, 0.013 at 4,194,304.
+- **A call of a few rows:** about 2 ns for two rows of 31 and 6 ns for the `(30, 31)` matrix the kernel was asked for. The division on the narrow path costs 0.2 to 0.6 ns of that for one to eight rows and nothing from 30, measured outside the judge by leaving it out.
+
+`vpshufb` with an index vector read from a table is used to move bytes within a register; no `pext`, `pdep`, gather or masked store is used.
+
+Left untried: strips that start on a 32-byte boundary of the memory for rows whose width is a multiple of 32, where every row then lies the same way and only the first and last strip of a row can straddle; more than eight strips in a pass for rows of several hundred; the division replaced by a multiplication with a reciprocal read from a table.
