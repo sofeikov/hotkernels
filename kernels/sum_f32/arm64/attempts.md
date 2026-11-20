@@ -61,3 +61,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.006x [1.001 – 1.011]
 - **Kept:** yes
 - **Notes:** 1.04x from 65,536 to 1,048,576 (57.2 us), as the microbenchmark said; but 0.95x at 1,024 and 0.97x to 0.98x at 4,096 and 16,384, in the first-level cache. Load average 3.5.
+
+## 8. The 64-byte diagonal only beyond the first-level cache
+
+- **Idea:** keep attempt 7's gain and drop its loss: the walk notes on entry whether the array is at least 32,768 elements (128 KB, the first-level cache of a performance core), and only then do groups of eight take blocks of 16 vectors in 64-byte visits.
+- **check:** pass
+- **compare:** significantly faster, 1.007x [1.005 – 1.010]
+- **Kept:** yes
+- **Notes:** 1.05x at 1,024, 1.03x at 4,096 and 16,384 (back to attempt 5's figures), unchanged from 65,536 up. Load average 3.3.

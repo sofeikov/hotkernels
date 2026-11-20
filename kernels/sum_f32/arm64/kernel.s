@@ -12,7 +12,11 @@
 .set ZERO, 64                   // 32 bytes of +0.0
 .set SUMS, 96                   // stack of sums, 4 bytes each
 .set NODES, 352                 // node stack, 16 bytes a node
-.set FRAME, 2400
+.set LONG, 2400                 // non-zero when the array is beyond the L1
+.set FRAME, 2416
+// From this many elements (128 KB, the first-level cache of a performance
+// core) the groups of eight read their leaves 64 bytes at a time.
+.set LONG_N, 32768
 
 // Sum one leaf of x7 >= 1 vectors at x6 into s0: eight running sums, in
 // v16 (lanes 0..3) and v17 (lanes 4..7), combined as NumPy combines them.
@@ -145,6 +149,9 @@ Lbig:
     add     x4, sp, #NODES
     mov     x9, x4
     stp     xzr, xzr, [sp, #ZERO]
+    cmp     x1, #LONG_N
+    cset    x0, hs
+    str     x0, [sp, #LONG]
     stp     xzr, xzr, [sp, #ZERO + 16]
 Lnode:
     // A node on the right edge holds the tail: a leaf while 8m + t <= 128.
@@ -351,6 +358,8 @@ Lo_setup:
     tbnz    x8, #0, Lo_plain
     cmp     x8, #8
     b.lo    Lo_plain
+    ldr     x0, [sp, #LONG]
+    cbz     x0, Lo_diag
     cmp     x8, #16
     b.lo    Lo_diag
 Lo_diag16:
