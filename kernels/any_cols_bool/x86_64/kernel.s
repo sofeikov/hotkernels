@@ -190,23 +190,33 @@ any_cols_bool:
     lea     r11, [rdi + r8 - VEC]       # the last address a vector can be loaded from
     mov     rdx, rdi
     vpxor   xmm1, xmm1, xmm1
+    vpxor   xmm2, xmm2, xmm2
+    vpxor   xmm3, xmm3, xmm3
     lea     r8, [r10 + r10]             # two steps
+    lea     rdi, [r8 + r10]             # three steps
     mov     rax, r11
-    sub     rax, r10                    # the last address two vectors can be loaded from
+    sub     rax, rdi                    # the last address four vectors can be loaded from; may be below m, so the compares are signed
     cmp     rdx, rax
-    ja      .Lnarrow_one
+    jg      .Lnarrow_ones
 .Lnarrow_loop:
     vpor    ymm0, ymm0, [rdx]
     vpor    ymm1, ymm1, [rdx + r10]
-    add     rdx, r8
+    vpor    ymm2, ymm2, [rdx + r8]
+    vpor    ymm3, ymm3, [rdx + rdi]
+    lea     rdx, [rdx + 4 * r10]
     cmp     rdx, rax
-    jbe     .Lnarrow_loop
+    jle     .Lnarrow_loop
     vpor    ymm0, ymm0, ymm1
-.Lnarrow_one:
+    vpor    ymm2, ymm2, ymm3
+    vpor    ymm0, ymm0, ymm2
+.Lnarrow_ones:
     cmp     rdx, r11
     ja      .Lnarrow_last
+.Lnarrow_one:
     vpor    ymm0, ymm0, [rdx]
     add     rdx, r10
+    cmp     rdx, r11
+    jbe     .Lnarrow_one
 .Lnarrow_last:
     # The rows from rdx on, fewer than 32 bytes and maybe none, are the top
     # of the last 32 bytes of m: move them down by rdx - r11, 1 to 32.

@@ -39,3 +39,11 @@ The kernel does the same work whatever the elements are, so the two timing distr
 - **compare:** significantly faster, 1.022x [1.003 – 1.040]
 - **Kept:** yes
 - **Notes:** the judge times this path at one point, 16 elements in rows of 8: 4.0 ns against 7.1, 1.82x and 1.76x in the two tables, and 3.3 ns for the reference became 0.67x of the kernel's time where it was 0.85x the other way. Every other point is level. A single row under 32 wide, `(1, 31)`, takes the same path; the judge has no timed point there.
+
+## 5. Four loads per step in the narrow loop
+
+- **Idea:** four `vpor` with a memory operand into four registers per pass of the narrow loop, the loads a `step` apart (`rdx`, `rdx + step`, `rdx + 2 * step`, `rdx + 3 * step`, the multiples kept in registers), and the position moved by one `lea` with a scaled index, whose two cycles are what four loads take anyway. The loads left under four are taken one at a time.
+- **check:** pass
+- **compare:** significantly faster, 1.028x [1.019 – 1.037]
+- **Kept:** yes
+- **Notes:** rows of 8: 1.08x in both tables (1.38x at 256 elements, 1.32x at 1,024, level from 16,384). Rows of 31: 1.00x, not significant: 4,096 elements take 24.8 ns, 0.19 ns per row, one cycle, and that is the cost of the loads. A 32-byte load every 31 bytes straddles two cache lines 31 times in 64, and such a load takes a cycle more than the half cycle of one that does not. In a benchmark outside the judge, with the matrix on a 64-byte boundary, 4,096 elements in rows of 8, whose loads then never straddle, went from 26.8 ns to 16.5 ns; three bytes off the boundary, from 31.2 ns to 26.9 ns.
