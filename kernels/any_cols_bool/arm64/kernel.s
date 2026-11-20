@@ -8,7 +8,8 @@
 // are or'ed as raw bytes and every result goes through `umin` with 1 before it
 // is stored.
 //
-// Paths, by width, chosen once at entry:
+// Paths, by width, chosen once at entry (one row of more than 16 bytes is a
+// copy through `umin` with 1, Lrow1):
 //   1..16    the whole rows as one stream of bytes, 16 per load. A load
 //            starts at a multiple of width from m, so lane i of every load
 //            is column i mod width: the loads step by the largest multiple
@@ -159,6 +160,8 @@ _any_cols_bool:
     mul     x5, x4, x3                  // bytes of whole rows
     cmp     x3, #16
     b.ls    Lnarrow
+    cmp     x4, #1
+    b.eq    Lrow1
     cmp     x3, #64
     b.ls    Lmid
     cmp     x3, #112
@@ -799,6 +802,39 @@ Lnarrow_short:
     tbl     v0.16b, {v0.16b}, v1.16b
     orr     v16.16b, v16.16b, v0.16b
     b       Lnarrow_fold
+
+// One whole row of more than 16 bytes: the results are the row's bytes, each
+// through `umin` with 1. 32 bytes a step, the last 32 ending at the row's end
+// (loaded first, stored last over the step before); rows of 17 to 32 as two
+// overlapping 16-byte halves.
+Lrow1:
+    movi    v7.16b, #1
+    cmp     x3, #32
+    b.hi    2f
+    sub     x6, x3, #16
+    ldr     q0, [x0]
+    ldr     q1, [x0, x6]
+    umin    v0.16b, v0.16b, v7.16b
+    umin    v1.16b, v1.16b, v7.16b
+    str     q1, [x1, x6]
+    str     q0, [x1]
+    b       Ldone
+2:  sub     x6, x3, #32
+    add     x8, x0, x6                  // the row's last 32 bytes
+    add     x9, x1, x6                  // and their results
+    ldp     q2, q3, [x8]
+    umin    v2.16b, v2.16b, v7.16b
+    umin    v3.16b, v3.16b, v7.16b
+    mov     x10, x0
+    mov     x11, x1
+3:  ldp     q0, q1, [x10], #32
+    umin    v0.16b, v0.16b, v7.16b
+    umin    v1.16b, v1.16b, v7.16b
+    stp     q0, q1, [x11], #32
+    cmp     x10, x8
+    b.lo    3b
+    stp     q2, q3, [x9]
+    b       Ldone
 
 .section __TEXT,__const
 .p2align 4

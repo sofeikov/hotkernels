@@ -313,3 +313,14 @@ there.
 - **compare:** significantly faster, 1.007x [1.006 – 1.007] (load average 1.9); width 8 1.26x at
   16 elements (3.7 ns to 2.9 ns), 1.07x at 64, 0.99x at 1,024; 1.03x over each of its tables.
 - **Kept:** yes
+
+## 28. One row wider than 16: a copy through `umin`
+
+- **Idea:** with one whole row the results are that row's bytes, each through `umin` with 1. A
+  test for one row after the narrow paths sends it to a copy, 32 bytes a step, the last 32 ending
+  at the row's end; rows of 17 to 32 as two overlapping halves. No accumulators to clear.
+- **check:** pass; arbitrary-bytes check passes.
+- **compare:** significantly faster, 1.007x [1.007 – 1.007] (load average 1.8); width 64 1.29x at
+  64 elements (2.8 ns to 2.2 ns), width 256 1.14x at 256; 0.98x to 0.99x on widths 31 and 64 at
+  256 to 1,024 elements behind the extra test.
+- **Kept:** yes
