@@ -1,9 +1,42 @@
 // double sum_f64(const double *x, size_t n);
 //
 // x0 = x, x1 = n. Returns np.sum(x), NumPy's bits: the same additions in
-// NumPy's pairwise order (see spec.py). The tree is walked with a stack
-// below sp; a node whose leaves all lie at one depth below it is summed as a
-// group, its 2 or 4 leaves side by side.
+// NumPy's pairwise order (see spec.py), each one rounded once, with only the
+// operands of an addition swapped. sum_f32's kernel is the same design at
+// half the width, and its header has the proofs.
+//
+// NumPy's tree in vectors of 8 elements, here 64 bytes, four registers.
+// n = 8m + t. A leaf is at most 128 elements: eight running sums, element i
+// into sum i mod 8, combined as ((r0 + r1) + (r2 + r3)) + ((r4 + r5) +
+// (r6 + r7)), then its last t elements one by one. A larger node splits at
+// 8 * floor(m / 2) elements: only the nodes on the right edge carry the t
+// elements, and every other node is floor(m/2) and ceil(m/2) vectors.
+//
+// Signs of zeros. A zero operand changes no sum that is not zero, and NumPy
+// returns 0 + pairwise(x), never -0.0, so running sums may start at +0.0 and
+// the result needs a final + 0.0.
+//
+// Paths, by n:
+//   0..7       one after another from +0.0
+//   8..128     one leaf, 15 steps written out and entered at its length
+//   others     the walk: a stack of nodes below sp, split until a node is a
+//              group or a leaf, and a stack of sums. A marker on the node
+//              stack says when the sums of two children are to be added.
+//
+// Groups, while the array fits the first-level cache (up to LONG_N
+// elements). A node of 17..32 vectors is two leaves, of 34..64 four (33 has
+// leaves at two depths and is split again); eight leaves would need 32
+// registers of running sums. A group's leaves are summed in one loop, four
+// leaves being sixteen independent chains of additions. Leaves have q or
+// q + 1 vectors; after the loop each longer leaf adds its last vector and
+// each shorter one 64 bytes of +0.0 from the frame. When q is even, eight
+// steps are taken in a diagonal order, leaf j's step k beside leaf 0's step
+// k + j, because the L1 is slow to serve loads of one offset in different
+// 256-byte blocks together.
+//
+// Beyond the first-level cache there are no groups: the leaves are summed
+// one after another, one stream through memory, and the out-of-order core
+// overlaps neighbouring leaves. Above HUGE_N elements their loads are ldnp.
 
 // Bytes of one vector of eight elements, the unit the tree is cut in.
 .set VEC, 64
