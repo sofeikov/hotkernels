@@ -335,5 +335,4 @@ there.
   1.08x from 256 to 65,536 elements on both tables, 1.03x over each.
 - **Kept:** yes
 - **Notes:** width 64 now takes 0.43 ns a row at 4,096 elements, about 1.37 cycles, against the
-  1.33 of four loads a row on three load units. The `ldnp` loop of attempt 9 never covered this
-  path; above 8 MB it loads as below.
+  1.33 of four loads a row on three load units. This path has no `ldnp` loop above 8 MB.
