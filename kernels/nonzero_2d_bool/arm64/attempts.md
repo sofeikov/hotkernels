@@ -65,3 +65,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.006x [1.004 – 1.008]
 - **Kept:** yes
 - **Notes:** dense widths 32 and 1,000 1.03 to 1.04x (0.27 ns per element at 1M), the rest unchanged.
+
+## 9. Narrow chunks of 16 bytes
+
+- **Idea:** a narrow chunk of attempt 6 holds as many whole rows as fit in 8 bytes, which leaves bytes unused (6 of 8 at width 3, 5 at width 5). Take as many as fit in 16 bytes instead (15 at width 3 and 5, 14 at width 7, 16 at widths 1, 2 and 4), as two words handled by the same steps, the second word's positions moved up by 8 and looked up in row and column tables of 16 entries.
+- **check:** pass
+- **compare:** significantly faster, 1.03x [1.03 – 1.03]
+- **Kept:** yes
+- **Notes:** width 3 dense 1.26x (0.31 ns per element at 1M), n=16 1.32x at width 3; nothing else moved.
