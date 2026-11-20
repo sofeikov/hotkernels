@@ -10,3 +10,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **check:** pass
 - **compare:** not run (first version). `run`: 2.91x over naive C overall (load average 0.7). At 1,024 elements: sparse 5.35x (width 22), 6.65x (3), 5.42x (32), 5.59x (1,000); dense 2.46x, 3.07x, 3.36x, 3.41x. At 1,048,576: sparse 5.2x to 6.6x, dense 1.6x to 1.8x. At 16 elements, below one block, 0.72x: the one-element loop is slower than the compiler's.
 - **Kept:** yes
+
+## 2. Sparse positions without the multiplication: the block's (row, column) carried from block to block
+
+- **Idea:** a knock-out of `mulx` and `imul` from the sparse path took width 22 at 5% from 0.081 to 0.045 ns per element (micro-benchmark, 4,096 elements): `tzcnt`, `mulx` and `imul` all run on port 1, three per position. Instead the row and column of each block's first element are carried: the column advances by 32 mod width and the row by 32 / width, plus one where the column passes the width (one `div` on entry for widths up to 32, a compare, `cmov` and `sbb` per block). Up to 32 elements a row, a sparse position p is at c + p < 64 of the block's row, and a 128-byte table for the width gives its row within the block and its column. Wider rows: a block inside one row stores (r, c + p) as they are; a block across one row end compares c + p with the width. Dense blocks start from the carried (row, column) as well. With no multiplication there is no limit on n any more.
+- **check:** pass
+- **compare:** significantly faster, 1.135x [1.133 – 1.138]
+- **Kept:** yes
+- **Notes:** micro-benchmark at 4,096: width 22 at 5% 0.081 to 0.055 ns per element, dense widths 32 and 1,000 0.140 to 0.128; width 3 unchanged (it had no multiplication).
