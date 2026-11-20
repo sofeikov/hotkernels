@@ -73,3 +73,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.03x [1.03 – 1.03]
 - **Kept:** yes
 - **Notes:** width 3 dense 1.26x (0.31 ns per element at 1M), n=16 1.32x at width 3; nothing else moved.
+
+## 10. Wide rows: a sparse block inside one row skips the multiplication
+
+- **Idea:** in rows of 512 bytes or more, most 64-byte blocks lie in one row. For a block of at most 6 true bytes there, take its row and first column once (one `umulh`, one `msub`) and give each extracted position that row and the first column plus its offset: five instructions per position instead of eight. A block that crosses a row takes the general steps; with rows of at least 512, at most one block in eight does.
+- **check:** pass
+- **compare:** significantly faster, 1.025x [1.024 – 1.026]
+- **Kept:** yes
+- **Notes:** sparse width 1,000 1.26x (0.061 ns per element at 1M); the other sparse tables 0.98 to 0.99x at the large sizes, the cost of the width test on every block.

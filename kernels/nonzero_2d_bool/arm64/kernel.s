@@ -10,7 +10,9 @@
 // another with `clz`, with no branches; if 7 to 12, a second copy extracts 12. Each position f becomes a row and a
 // column without a division: row = high half of (2f * M), M = ceil(2^63 / w),
 // exact while f * w < 2^63, and column = f - row * w. Positions past the true
-// count are rubbish that the next store overwrites (`out` is scratch). More
+// count are rubbish that the next store overwrites (`out` is scratch). In
+// rows of WIDE_ROW bytes or more, a block that lies in one row skips the
+// multiplication: its row is the same for all six. More
 // than 12 true bytes send those 64 bytes to the dense code.
 //
 // Dense (a row at a time): chunks of 8 bytes, two per step, and a last chunk of what is left
@@ -105,6 +107,21 @@
     stp     q27, q0, [x5, #96]
 .endm
 
+// Sparse step in a block that lies in one row: as EXTRACT, with the row in
+// x16 and the column of the block's first byte in x17. Uses x8 and x12.
+.macro IN_ROW off
+    clz     x8, x14
+    lsr     x12, x15, x8
+    bic     x14, x14, x12
+    add     x8, x17, x8
+    stp     x16, x8, [x5, #\off]
+.endm
+
+// Rows at least this long take IN_ROW for a sparse block of at most 6 true
+// bytes that does not cross a row: then 64 / WIDE_ROW of blocks or fewer
+// cross one and mispredict the test.
+.set WIDE_ROW, 512
+
 .text
 .globl _nonzero_2d_bool
 .p2align 2
@@ -180,6 +197,22 @@ Lsparse:
     fmov    w13, s1                     // number of true bytes
     cmp     w13, #6
     b.hi    Lsparse_tier
+    cmp     x3, #WIDE_ROW
+    b.lo    Lsparse_six
+    umulh   x16, x7, x6                 // row of the block's first byte
+    lsr     x17, x7, #1
+    msub    x17, x16, x3, x17           // and its column
+    add     x8, x17, #64
+    cmp     x8, x3
+    b.hi    Lsparse_six                 // the block crosses a row
+    IN_ROW  0
+    IN_ROW  16
+    IN_ROW  32
+    IN_ROW  48
+    IN_ROW  64
+    IN_ROW  80
+    b       Lsparse_next
+Lsparse_six:
     EXTRACT x8, x12, 0
     EXTRACT x16, x17, 16
     EXTRACT x8, x12, 32
