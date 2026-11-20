@@ -608,23 +608,24 @@ From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/iss
 
 - **Technique.** NumPy's tree is walked with a stack below `sp`, split until a node is a group of 2, 4 or 8 leaves (or a lone leaf, on the right edge or at an irregular node). A group's leaves are summed in one loop, each in its own two registers; eight leaves are sixteen chains, enough to run at the core's three 16-byte loads per cycle. Leaves have `q` or `q + 1` vectors: after the loop the longer ones add their last vector and the shorter ones a vector of `+0.0`, a step skipped when all are equal. Leaf sums are combined across leaves with `faddp`, in the node's order. 8 to 128 elements are one leaf, a straight run of 15 steps entered at its length; one group of two (136 to 256 elements, a multiple of 8) and one of eight (544 to 1,024, a multiple of 64) skip the walk. The log is `kernels/sum_f32/arm64/attempts.md`.
 - **The first-level cache dislikes the same offset in different 256-byte blocks.** The group loop alone ran at the load limit when its eight leaves started 544 bytes apart and 20% slower when they started 256, 512 or 1,024 bytes apart, as they do at every power of two. Taking eight steps in a diagonal order, leaf `j`'s step `k` beside leaf 0's step `k + j`, puts the loads issued together at different offsets and recovers it, 1.14x at 4,096 elements. Beyond the first-level cache, visits of 64 bytes, `ldnp`, and a prefetch of the next group's leaf starts gain 4% to 10% more.
-- **Figures,** `uv run judge run sum_f32 --unlocked --record` at a load average of 3.9, other kernels' runs in progress, so indicative: 2.08x [2.07 – 2.08] over the naive C and 18.4x over NumPy across the eleven sizes.
+- **Figures,** `uv run judge run sum_f32 --unlocked --record` at a load average of 5.4, other kernels' runs winding down, so indicative: 2.08x [2.08 – 2.09] over the naive C and 18.4x over NumPy across the eleven sizes.
 
 | n | kernel | naive C | vs naive C | vs NumPy |
 |---|---|---|---|---|
-| 16 | 1.3 ns | 3.7 ns | 2.76x | 906x |
-| 64 | 2.5 ns | 6.3 ns | 2.55x | 489x |
-| 256 | 9.1 ns | 22.1 ns | 2.42x | 137x |
-| 1,024 | 30.1 ns | 89.6 ns | 2.97x | 47.1x |
-| 4,096 | 125.7 ns | 350.5 ns | 2.79x | 15.0x |
-| 16,384 | 506.7 ns | 1.4 µs | 2.77x | 7.62x |
-| 65,536 | 3.5 µs | 5.7 µs | 1.63x | 3.53x |
-| 262,144 | 14.9 µs | 22.5 µs | 1.51x | 3.06x |
-| 1,048,576 | 54.4 µs | 87.9 µs | 1.62x | 3.18x |
-| 4,194,304 | 251.3 µs | 378.9 µs | 1.51x | 2.85x |
-| 16,777,216 | 1.13 ms | 1.49 ms | 1.32x | 2.58x |
+| 16 | 1.3 ns | 3.6 ns | 2.75x | 903x |
+| 64 | 2.5 ns | 6.3 ns | 2.55x | 487x |
+| 256 | 8.9 ns | 21.7 ns | 2.43x | 137x |
+| 1,024 | 30.2 ns | 88.6 ns | 2.93x | 46.3x |
+| 4,096 | 124.2 ns | 356.8 ns | 2.87x | 15.3x |
+| 16,384 | 501.7 ns | 1.4 µs | 2.84x | 7.81x |
+| 65,536 | 3.5 µs | 5.7 µs | 1.63x | 3.58x |
+| 262,144 | 14.5 µs | 22.9 µs | 1.58x | 3.18x |
+| 1,048,576 | 58.5 µs | 93.0 µs | 1.59x | 3.14x |
+| 4,194,304 | 251.3 µs | 376.0 µs | 1.50x | 2.83x |
+| 16,777,216 | 1.15 ms | 1.49 ms | 1.29x | 2.48x |
 
-- **Where the room is.** At 4,096 elements the kernel takes 126 ns where one stream of loads at the limit takes 109; in the second-level cache 3.4 µs against 3.1 at 65,536. A group of two (256 elements) is four chains, bound by the latency of the additions; up to 128 elements a leaf is one chain per lane, NumPy's own. Every timed size is faster than the C and than NumPy.
+- **The walk mispredicts.** Which of a node and a combine marker comes off the stack next follows the bits of a counter, so the walk's test is mispredicted about once a pass. A node of two or four groups of eight therefore has them summed one after another, the walk passing once per 4,096 elements: 1.02x to 1.03x at 4,096 and 16,384. The same finding made `sum_f64` faster than its C beyond the first-level cache, where its leaves had been summed one pass of the walk each.
+- **Where the room is.** At 4,096 elements the kernel takes about 120 to 124 ns where one stream of loads at the limit takes 109; in the second-level cache 3.4 µs against 3.1 at 65,536. A group of two (256 elements) is four chains, bound by the latency of the additions; up to 128 elements a leaf is one chain per lane, NumPy's own. Every timed size is faster than the C and than NumPy.
 - **From Python,** `uv run delivery time --only sum` at a load average of 5.9, rough: `np.sum(x)` 22.6x faster than NumPy at 16 elements (1.08 µs to 47.6 ns), 10.5x at 4,096 and 2.33x at 1,048,576 (184 µs to 79 µs); `x.sum()` 6.02x, 5.78x and 1.92x. A float64 or strided float32 sum left to NumPy costs within the run's noise, -2.8% to +4.2%.
 - **The binding.** The function and method hooks of `sum` take `np.sum(x)` and `x.sum()` with no other argument on a contiguous, aligned, one-dimensional float32 array. A result that is not finite is thrown away and the call passed on. An array not aligned to 4 bytes is NumPy's: NumPy copies it in blocks of 8,192 elements and adds the blocks' sums one after another, which `delivery check` found. After the kernel the four flags NumPy reports are cleared and the inexact flag is left set, as NumPy leaves them.
 

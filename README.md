@@ -101,9 +101,9 @@ One `uv run judge run unique_i64 --record`, `--unlocked` because its spec is not
 
 | Call | Elements | vs NumPy | vs `clang -O3` |
 |---|---|---|---|
-| `np.sum(x)` | float32 | 3.18x | 1.62x |
+| `np.sum(x)` | float32 | 3.14x | 1.59x |
 
-One `uv run judge run sum_f32 --record`, `--unlocked` because its spec is not yet on `main`, at a load average of 3.9 with other kernels' runs in progress: indicative. The report is in [`results/`](results). The clang loop is NumPy's order written in C; it is 2.8x to 3.0x behind from 1,024 to 16,384 elements, where the data fits the first-level cache. From Python, at a load average of 5.9, `np.sum(x)` is about 23x faster than NumPy at 16 elements, 10x at 4,096 and 2.3x at a million ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-floats-in-numpys-order)).
+One `uv run judge run sum_f32 --record`, `--unlocked` because its spec is not yet on `main`, at a load average of 5.4 with other kernels' runs winding down: indicative. The report is in [`results/`](results). The clang loop is NumPy's order written in C; it is 2.8x to 2.9x behind from 1,024 to 16,384 elements, where the data fits the first-level cache. From Python, at a load average of 5.9, `np.sum(x)` is about 23x faster than NumPy at 16 elements, 10x at 4,096 and 2.3x at a million ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-floats-in-numpys-order)).
 
 The stable `argsort` kernels, on the Apple M1 Pro at 1,048,576 elements. They are a radix sort where NumPy merges, written in C: a merge sort in C only ties NumPy, and the radix sort's one hot loop tied the compiler's when written by hand.
 

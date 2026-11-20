@@ -24,6 +24,11 @@
 //   others     the walk: a stack of nodes below sp, split until a node is a
 //              group or a leaf, and a stack of sums. A marker on the node
 //              stack says when the sums of two children are to be added.
+//              Which of a node and a marker comes off the stack next
+//              follows the bits of a counter, a branch mispredicted about
+//              once a pass, so a node of 136..256 or 272..512 vectors has
+//              its 2 or 4 groups of eight summed one after another, their
+//              sums kept in the frame and combined in the tree's order.
 //
 // Groups. A node of 17..32 vectors is two leaves, of 34..64 four, of
 // 68..128 eight (33 and 65..67 have leaves at two depths and are split
