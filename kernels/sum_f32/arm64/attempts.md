@@ -133,3 +133,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** no significant difference, 1.000x [0.999 – 1.002]
 - **Kept:** no
 - **Notes:** 124.9 ns at 4,096 against 124.4. The out-of-order core already fills the short diagonals from the next block. Load average 4.6.
+
+## 17. `ldnp` only beyond the second-level cache
+
+- **Idea:** attempt 15 cost 0.98x at 262,144 within its interval; so the 64-byte blocks use `ldp` from 32,768 elements and `ldnp` only from 2,097,152 (8 MB).
+- **check:** pass
+- **compare:** no significant difference, 1.002x [0.998 – 1.005]
+- **Kept:** no
+- **Notes:** 1.02x [1.00 – 1.04] at 262,144, 1.01x at 1,048,576: the loss attempt 15 showed there was mostly noise. Load average 5.0.
