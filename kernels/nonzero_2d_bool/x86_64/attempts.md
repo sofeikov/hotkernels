@@ -66,3 +66,19 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly slower, 0.929x [0.918 – 0.940]
 - **Kept:** no
 - **Notes:** dense widths 22, 3 and 32 0.84x to 0.85x (micro-benchmark 0.21 ns per element against 0.12). The 4-byte loads from the list often span two of the group stores, which cannot be forwarded, so they wait for the stores to reach the cache. Width 1,000 (which does not take the path) 0.97x.
+
+## Stopped
+
+Seven attempts kept, one rejected. Where each path stands, on this processor:
+
+- **Dense** (about 0.12 ns per element at 4,096, 5 cycles per group of eight): about 20 instructions per group, of which four `vpshufb`, four `vpaddq` and four 32-byte stores are the least a group of eight pairs takes in this layout. Knock-outs of the stores (half of them, or all to one aligned place), of the shuffles and of the write-position chain each gained 15% at most, and the one attempt that cut the stores (8) lost to store forwarding. Beyond the second-level cache dense runs at the speed of writing the output: 1.15x over the naive C at 16,777,216, which writes the same bytes.
+- **Sparse** (about 0.036 ns per element at 4,096, 5%): five instructions per position from the tables and one store, plus about 14 per window of 64. A first tier of four positions per window was not tried: `nonzero_bool` and the ARM64 log of this kernel found such a boundary near the timed share helps the benchmark more than unseen masks.
+
+Weak spots the judge does not time:
+
+- The last 1 to 31 elements of a matrix that is not a whole number of blocks go one at a time, about 0.45 ns each. The workload's 40 rows of 22 (880 elements) end with 16 of them: about 7 ns of a call of about 110 ns. Every size `compare` times is a multiple of 32.
+- Under 32 elements the kernel is the one-element loop: 1.00x to 1.10x over the naive C at 16 in the recorded run.
+
+Output 16 bytes behind its input (the second table of `run`), sparse: 0.91x at 4,096 and 0.89x at 65,536 against the output clear, 1.07x and 1.14x at 1,048,576 and 16,777,216, 1.00x overall (not significant). Not pursued.
+
+Recorded run (`results/nonzero_2d_bool/`, load average 0.78 before and 1.16 after): 3.95x over the naive C overall [3.94 – 3.95], 35.2x over NumPy. Sparse 7.59x (width 22), 7.38x (3), 7.58x (32), 8.52x (1,000); dense 2.01x, 1.95x, 2.02x, 2.06x. At 1,024 elements sparse 11.0x to 13.5x and dense 3.38x to 3.98x; at 1,048,576 sparse 9.7x to 12.2x and dense 1.69x to 1.77x.
