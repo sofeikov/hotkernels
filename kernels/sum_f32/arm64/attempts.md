@@ -13,3 +13,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** n/a (first version)
 - **Kept:** yes
 - **Notes:** 1.31x the naive C overall, 297 ns at 4,096 (load average 9.9). The leaves are independent, and the processor's out-of-order window already overlaps some of them.
+
+## 2. Leaves side by side: groups of two, four and eight
+
+- **Idea:** a node of 17 to 32 vectors is two leaves, of 34 to 64 four, of 68 to 128 eight (33 and 65 to 67 have leaves at two depths and are split further). Such a node's leaves are summed in one loop, each in its own pair of registers, so eight leaves give sixteen independent chains of additions; the leaves have q or q + 1 vectors, and the last vector of a longer leaf is added after the loop, a shorter leaf adding a vector of `+0.0` from the stack instead. The leaf sums are combined in the node's order by `faddp` across leaves.
+- **check:** pass
+- **compare:** significantly faster, 1.264x [1.255 – 1.272]
+- **Kept:** yes
+- **Notes:** 1.84x at 4,096 (159 ns, 0.039 ns an element), 1.81x at 16,384; 1.13x to 1.15x in the second-level cache; nothing at 16 and 64, which are one leaf. Load average 6.6.
