@@ -51,9 +51,14 @@
 
 # Combine the eight running sums in ymm\r into the scalar in xmm\r as NumPy
 # does: ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7)). ymm\t is clobbered.
+# vmovshdup puts r1 beside r0 (and r3, r5, r7 beside r2, r4, r6), vpermilps
+# puts r2 + r3 beside r0 + r1 in each half: six instructions, where two
+# vhaddps and the rest take eight and a longer chain.
 .macro COMBINE r, t
-    vhaddps      ymm\r, ymm\r, ymm\r
-    vhaddps      ymm\r, ymm\r, ymm\r
+    vmovshdup    ymm\t, ymm\r
+    vaddps       ymm\r, ymm\r, ymm\t
+    vpermilps    ymm\t, ymm\r, 0x02
+    vaddps       ymm\r, ymm\r, ymm\t
     vextractf128 xmm\t, ymm\r, 1
     vaddss       xmm\r, xmm\r, xmm\t
 .endm

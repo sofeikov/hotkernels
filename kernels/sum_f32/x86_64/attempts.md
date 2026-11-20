@@ -13,3 +13,11 @@ What the compiler does with `naive.c`: NumPy's tree, one leaf at a time, each le
 - **compare:** n/a (first version). `run`: 2.78x [2.77 – 2.79] over the naive C overall, 14.4x over NumPy.
 - **Kept:** yes
 - **Notes:** 6.3x at 1,024 (17.7 ns) and 6.9x at 4,096 (65.3 ns, 0.016 ns an element); 3.4x in the second-level cache, 2.1x from 1,048,576 to 4,194,304, 1.26x at 16,777,216 (2.16 ms, memory). 1.6x at 256, which is two single leaves taken one after another by the walk; 1.7x at 16 and 2.2x at 64. Load average 1.6.
+
+## 2. Combine a leaf's eight sums with shuffles instead of two `vhaddps`
+
+- **Idea:** `vmovshdup` and an add give r0 + r1, r2 + r3, r4 + r5 and r6 + r7 in the even lanes, `vpermilps` and a second add the two halves' sums in lane 0 of each 128-bit half: six instructions and a shorter chain than two `vhaddps` (three micro-operations each), the extract and the add.
+- **check:** pass
+- **compare:** significantly faster, 1.027x [1.022 – 1.032]
+- **Kept:** yes
+- **Notes:** 1.32x at 256 (12.7 ns), whose two leaves are each combined on the walk's critical path; 1.01x at 1,024 and 4,096; 0.99x in the second-level cache, inside the noise of the other agents' runs. Load average 0.8.
