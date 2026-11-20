@@ -50,3 +50,11 @@ What the compiler does with `naive.c`: the scalar loop, two 8-byte stores per el
 - **compare:** significantly faster, 1.098x [1.090 – 1.106]
 - **Kept:** yes
 - **Notes:** sparse 1.20x (width 22), 1.19x (3), 1.20x (32), 1.27x (1,000); dense no significant difference except width 3, 0.98x [0.96 – 0.99]. Width 32 now goes through the tables instead of the wide path, with no significant change.
+
+## 7. A sparse pair from the table as one 16-byte store
+
+- **Idea:** with the tables, a sparse position took two byte loads, an add and two 8-byte stores (7 instructions). Instead `vpmovzxbq xmm` widens the pair's two table bytes to two int64, `vpaddq` adds (block row, 0), and one 16-byte store writes the pair: 5 instructions and one store. Rows wider than 64 keep their scalar stores (a position inside one row is already 5 instructions with no load).
+- **check:** pass
+- **compare:** significantly faster, 1.027x [1.024 – 1.030]
+- **Kept:** yes
+- **Notes:** sparse widths 22, 3 and 32 1.07x to 1.08x; width 1,000 and every dense distribution no significant difference. Micro-benchmark at 4,096, 5%: 0.041 to 0.036 ns per element.

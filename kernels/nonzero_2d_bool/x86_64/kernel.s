@@ -14,8 +14,8 @@
 # `vpmovmskb` give a word of 32 bits, one per element.
 #
 # A block with at most SPARSE_MAX true elements takes a fixed SPARSE_MAX
-# positions out of the word with `tzcnt` and `blsr`, and stores each pair with
-# two 8-byte stores. Past the last set bit `tzcnt` returns 32: a pair the
+# positions out of the word with `tzcnt` and `blsr`, and stores each pair
+# (one 16-byte store or two of 8 bytes, by the path below). Past the last set bit `tzcnt` returns 32: a pair the
 # write position does not advance over, and the next store overwrites it.
 # After a sparse block the kernel looks at a window of two blocks, a 64-bit
 # word, and takes PAIR_MAX positions out of it if it has no more; a window
@@ -34,7 +34,8 @@
 #
 # Rows of up to 64 elements. c + p is below 128, and a table of 256 bytes for
 # the width holds the row (c + p) / width and the column (c + p) % width of
-# each, a byte each. A sparse position reads its two bytes. A dense group
+# each, a byte each. A sparse position widens its two bytes with `vpmovzxbq`,
+# adds the block's row and stores the pair with one store. A dense group
 # loads the 16 bytes of the table at its first column, the (row, column)
 # bytes of its eight positions; the group's byte of the word indexes a table
 # of its positions, and one `vpshufb` picks the bytes of the positions present
@@ -196,16 +197,15 @@
     sbb     r13, [rsp + \row]          # row + step / width + 1 - carry
 .endm
 
-# Sparse, with a table: the j-th position of eax. r14 = the width's table
-# at the block's first column, r13 = the block's first row.
+# Sparse, with a table: the j-th position of the word. r14 = the width's
+# table at the block's first column, xmm1 = (the block's first row, 0). The
+# pair's two bytes are widened to two int64 and stored with one store.
 .macro TABLE_SPARSE j, word=eax, pos=r8d
     tzcnt   \pos, \word
     blsr    \word, \word
-    movzx   edx, byte ptr [r14 + r8 * 2]
-    add     rdx, r13
-    mov     [rsi + r9 * 8 + 16 * \j], rdx
-    movzx   edx, byte ptr [r14 + r8 * 2 + 1]
-    mov     [rsi + r9 * 8 + 16 * \j + 8], rdx
+    vpmovzxbq xmm2, word ptr [r14 + r8 * 2]
+    vpaddq  xmm2, xmm2, xmm1
+    vmovdqu [rsi + r9 * 8 + 16 * \j], xmm2
 .endm
 
 # Sparse, wide, a block inside one row: row r13, column r15 + p.
@@ -430,6 +430,7 @@ nonzero_2d_bool:
     PAIR_WORD
     popcnt  rcx, rax
     lea     r14, [rbp + r15 * 2]        # the table at the window's column
+    vmovq   xmm1, r13
     cmp     ecx, PAIR_MAX
     ja      .Ltable_split
     TABLE_SPARSE 0, rax, r8
@@ -453,6 +454,7 @@ nonzero_2d_bool:
     BLOCK_WORD
     popcnt  ecx, eax
     lea     r14, [rbp + r15 * 2]        # the table at the block's column
+    vmovq   xmm1, r13
 .Ltable_word:
     cmp     ecx, SPARSE_MAX
     ja      .Ltable_dense
