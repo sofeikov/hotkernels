@@ -187,7 +187,7 @@ These kernels were first written with one length for the sorted array and the ne
 :::
 
 ::: note Any along the other axis
-`any_cols_bool` serves `m.any(axis=0)`, the call beside `m.any(axis=1)`: whether each column of a boolean matrix holds a True. It keeps the results in vector registers for the whole call and makes them 0 or 1 once at the end, where a compiled loop or's each row into memory. It was written for x86-64 and ships as its C on ARM64 for now. On an Intel Core i5-14600KF a mask of 30 rows by 31 columns takes about 95 ns from Python against NumPy's 840 ns.
+`any_cols_bool` serves `m.any(axis=0)`, the call beside `m.any(axis=1)`: whether each column of a boolean matrix holds a True. It keeps the results in vector registers for the whole call and makes them 0 or 1 once at the end, where a compiled loop or's each row into memory. It was written for x86-64 first and has its own assembly on ARM64. On an Intel Core i5-14600KF a mask of 30 rows by 31 columns takes about 95 ns from Python against NumPy's 840 ns; on an Apple M1 Pro a matrix of 31 columns is about 44 times faster than NumPy at a million elements.
 :::
 
 ::: note The search on int64
