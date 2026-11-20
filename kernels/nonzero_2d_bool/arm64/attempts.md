@@ -81,3 +81,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.025x [1.024 – 1.026]
 - **Kept:** yes
 - **Notes:** sparse width 1,000 1.26x (0.061 ns per element at 1M); the other sparse tables 0.98 to 0.99x at the large sizes, the cost of the width test on every block.
+
+## 11. The width test out of the sparse loop
+
+- **Idea:** attempt 10 tests the width on every sparse block. Give rows of 512 or more a sparse loop of their own, chosen when the sparse path is entered and after a block of more than 6, so the loop for narrower rows is attempt 9's again.
+- **check:** pass
+- **compare:** significantly faster, 1.008x [1.006 – 1.010]
+- **Kept:** yes
+- **Notes:** sparse 1.01 to 1.02x at every width, 1.08x at width 1,000 at 1M; dense unchanged.

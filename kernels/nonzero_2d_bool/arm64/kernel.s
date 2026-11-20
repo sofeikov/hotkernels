@@ -122,6 +122,32 @@
 // cross one and mispredict the test.
 .set WIDE_ROW, 512
 
+// The start of a sparse step: the 64 bytes at x0 as a bitmask in x14 (bit
+// 63 - j for byte j) and their count in x13. Fewer than 64 bytes left go to
+// Lsparse_exit, more than 6 true to Lsparse_tier.
+.macro SPARSE_HEAD
+    sub     x8, x4, x0
+    cmp     x8, #64
+    b.lo    Lsparse_exit
+    ldp     q0, q1, [x0]
+    ldp     q2, q3, [x0, #32]
+    ushl    v0.16b, v0.16b, v28.16b     // byte j becomes bit (j mod 8)
+    ushl    v1.16b, v1.16b, v28.16b
+    ushl    v2.16b, v2.16b, v28.16b
+    ushl    v3.16b, v3.16b, v28.16b
+    addp    v0.16b, v0.16b, v1.16b      // three rounds of pairwise sums
+    addp    v2.16b, v2.16b, v3.16b      // leave one byte per 8 mask bytes
+    addp    v0.16b, v0.16b, v2.16b
+    addp    v0.16b, v0.16b, v0.16b
+    cnt     v1.8b, v0.8b
+    fmov    x14, d0                     // bit j = mask byte j
+    addv    b1, v1.8b
+    rbit    x14, x14                    // bit 63-j = mask byte j
+    fmov    w13, s1                     // number of true bytes
+    cmp     w13, #6
+    b.hi    Lsparse_tier
+.endm
+
 .text
 .globl _nonzero_2d_bool
 .p2align 2
@@ -176,53 +202,51 @@ Lsparse_enter:                          // x0 = the next byte
     mov     x7, v19.d[1]
     sub     x7, x0, x7
     lsl     x7, x7, #1                  // x7 = 2 * its position
-Lsparse:
-    sub     x8, x4, x0
-    cmp     x8, #64
-    b.lo    Lsparse_exit
-    ldp     q0, q1, [x0]
-    ldp     q2, q3, [x0, #32]
-    ushl    v0.16b, v0.16b, v28.16b     // byte j becomes bit (j mod 8)
-    ushl    v1.16b, v1.16b, v28.16b
-    ushl    v2.16b, v2.16b, v28.16b
-    ushl    v3.16b, v3.16b, v28.16b
-    addp    v0.16b, v0.16b, v1.16b      // three rounds of pairwise sums
-    addp    v2.16b, v2.16b, v3.16b      // leave one byte per 8 mask bytes
-    addp    v0.16b, v0.16b, v2.16b
-    addp    v0.16b, v0.16b, v0.16b
-    cnt     v1.8b, v0.8b
-    fmov    x14, d0                     // bit j = mask byte j
-    addv    b1, v1.8b
-    rbit    x14, x14                    // bit 63-j = mask byte j
-    fmov    w13, s1                     // number of true bytes
-    cmp     w13, #6
-    b.hi    Lsparse_tier
-    cmp     x3, #WIDE_ROW
-    b.lo    Lsparse_six
-    umulh   x16, x7, x6                 // row of the block's first byte
-    lsr     x17, x7, #1
-    msub    x17, x16, x3, x17           // and its column
-    add     x8, x17, #64
-    cmp     x8, x3
-    b.hi    Lsparse_six                 // the block crosses a row
-    IN_ROW  0
-    IN_ROW  16
-    IN_ROW  32
-    IN_ROW  48
-    IN_ROW  64
-    IN_ROW  80
-    b       Lsparse_next
-Lsparse_six:
+    b       Lsparse_loop
+Lsparse:                                // rows under WIDE_ROW bytes
+    SPARSE_HEAD
     EXTRACT x8, x12, 0
     EXTRACT x16, x17, 16
     EXTRACT x8, x12, 32
     EXTRACT x16, x17, 48
     EXTRACT x8, x12, 64
     EXTRACT x16, x17, 80
-Lsparse_next:
     add     x5, x5, x13, lsl #4
     add     x0, x0, #64
     add     x7, x7, #128
+    b       Lsparse
+Lsparse_wide:                           // rows of WIDE_ROW bytes or more
+    SPARSE_HEAD
+    umulh   x16, x7, x6                 // row of the block's first byte
+    lsr     x17, x7, #1
+    msub    x17, x16, x3, x17           // and its column
+    add     x8, x17, #64
+    cmp     x8, x3
+    b.hi    Lsparse_cross               // the block crosses a row
+    IN_ROW  0
+    IN_ROW  16
+    IN_ROW  32
+    IN_ROW  48
+    IN_ROW  64
+    IN_ROW  80
+    add     x5, x5, x13, lsl #4
+    add     x0, x0, #64
+    add     x7, x7, #128
+    b       Lsparse_wide
+Lsparse_cross:
+    EXTRACT x8, x12, 0
+    EXTRACT x16, x17, 16
+    EXTRACT x8, x12, 32
+    EXTRACT x16, x17, 48
+    EXTRACT x8, x12, 64
+    EXTRACT x16, x17, 80
+Lsparse_next:                           // after a block of either kind
+    add     x5, x5, x13, lsl #4
+    add     x0, x0, #64
+    add     x7, x7, #128
+Lsparse_loop:
+    cmp     x3, #WIDE_ROW
+    b.hs    Lsparse_wide
     b       Lsparse
 Lsparse_more:                           // 7 to 12 true bytes
     EXTRACT x8, x12, 0
