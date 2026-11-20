@@ -2,7 +2,7 @@
 
 All runs on an Apple M1 Pro (macOS, native), with `--unlocked`: the spec and naive C were new on this branch and not yet on `main`, and the branch's `pyproject.toml` and `uv.lock` carry the applications study's dependency group. Other agents were timing on the same machine, at a load average of about 2.5 to 3.5, so figures from about 100,000 elements up are noisier than usual.
 
-There is no x86-64 log: no x86-64 machine was at hand, nothing has been tried there, and the kernel ships as its naive C on x86-64, compiled by clang (`docs/unique-design.md`). The first x86-64 attempt starts `kernels/unique_i64/x86_64/attempts.md`. AVX2's `vpsllvq`, which shifts each 64-bit lane by its own count and gives zero for counts of 64 or more, may serve the set below.
+No x86-64 machine was at hand when this log was written, and the kernel shipped as its naive C there. The x86-64 kernel was written afterwards and has a log of its own, `kernels/unique_i64/x86_64/attempts.md`: its set is built with AVX2's `vpsllvq`, which shifts each 64-bit lane by its own count and gives zero for counts of 64 or more, so it needs neither the test of a chunk nor the second reading below.
 
 What the naive C costs here (Apple clang, `-O3`): about 0.24 ns per element from 1,024 elements up, on two values and on ten, with ten or 256 values of range: one store per element, unrolled eight times with a test and branch each. With a range of 256 the table of 2 KB is cleared by `bzero` and read back, about 110 ns at 16 elements.
 

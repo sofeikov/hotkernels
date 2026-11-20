@@ -114,7 +114,7 @@ The minimum and maximum are read by the binding, not the kernel, as the largest 
 
 ## x86-64
 
-There is no x86-64 machine here. The kernel ships as its naive C on x86-64, compiled with clang for the x86-64-v3 level, until someone with that hardware writes assembly and the judge keeps it. The judge's self-test and `delivery check` run on x86-64 in CI (`judge-linux`), so the C and the binding are checked there for correctness. No x86-64 speed figure is claimed.
+When this was designed there was no x86-64 machine at hand, and the kernel shipped as its naive C on x86-64, compiled with clang for the x86-64-v3 level. It has x86-64 assembly since ([What changed in the building](#what-changed-in-the-building)); the rest of this section is why the Linux wheels are built with clang, which the `argsort` and bottleneck kernels, C on x86-64 still, go on needing.
 
 The Linux wheels are built by `cibuildwheel` in a manylinux image whose compiler is gcc. [release-design.md](release-design.md#more-than-one-platform) records that this is acceptable only while no kernel ships as C on x86-64, and that the day one does, the image has to install clang and the build point `CC` at it. This change makes that day: `[tool.cibuildwheel.linux]` gets both.
 
@@ -135,7 +135,7 @@ The Linux wheels are built by `cibuildwheel` in a manylinux image whose compiler
 - **`return_counts`, `return_inverse`, `return_index`.** `np.unique(y, return_inverse=True)` is what `LabelEncoder` calls in an estimator's `fit`, and `return_counts=True` what class weights are computed with. The same table gives both (counts are what the bincount kernels compute), but they need a second kernel or a second output, and no call in the application asks for them. Recorded as [issue 200](https://github.com/sofeikov/hotkernels/issues/200).
 - **Other element types.** Labels from Python lists are `int64` on both platforms; `int32` and `uint8` labels can follow with kernels of their own.
 - **`sorted=False` and `np.unique_values`.** Their order is NumPy's hash set's.
-- **x86-64 assembly.**
+- **Labels spread over 65 or more values, on x86-64.** The x86-64 kernel's window takes ten neighbouring values in a range of 256, which is all the spec times; spread labels are a store each ([issue 241](https://github.com/sofeikov/hotkernels/issues/241)).
 
 ## What changed in the building
 
@@ -143,10 +143,11 @@ The Linux wheels are built by `cibuildwheel` in a manylinux image whose compiler
 |---|---|---|
 | The range is tested in unsigned arithmetic, so `lo + span` may pass the largest `int64` | The kernel is defined only for ranges whose last value, `lo + span - 1`, is at most the largest `int64` | A range that wraps past it gives its values in unsigned order, not NumPy's; the judge found it in the reference. The binding never passes one: its range runs from the smallest element to the largest |
 | The naive C, with assembly where it beats it | ARM64 assembly: a 64-bit set built with `ushl` for ranges of up to 64 values, without the subtraction for labels from zero, and a byte table in the top of `out` above that | 1.44x over the naive C overall; `kernels/unique_i64/arm64/attempts.md` |
-| An attempts log on each architecture | An ARM64 log only; it says why there is no x86-64 one | Nothing was tried on x86-64, and the documentation site refuses a log without a numbered attempt |
+| An attempts log on each architecture | An ARM64 log only at first; the x86-64 log came with the x86-64 kernel | Nothing had been tried on x86-64, and the documentation site refuses a log without a numbered attempt |
+| The naive C on x86-64 until someone with the hardware writes assembly | x86-64 assembly, written afterwards on an Intel Core i5-14600KF: the set by `vpsllvq`, and in front of the byte table a window of 64 values that follows the data | 3.00x over the naive C overall, 1.3x to 1.9x at a million elements; from Python `np.unique(x)` went from 374 µs to 279 µs at a million elements and from 1.49 µs to 835 ns at 4,096. `kernels/unique_i64/x86_64/attempts.md` |
 | A survey entry | The group `applications` in `survey/candidates.py`, recorded in `survey/results/apple-m1-pro-unique.md` | NumPy is 11.1x behind the naive C from 65,536 elements up |
 
-Decision 2, the limit on the range, is left as recommended. Decision 1 is left for review: the kernel ships as C on x86-64 and the Linux wheels are built with clang. That change to the wheel build has not been run: the `build-linux` job of the release workflow runs it on the pull request, since it touches `kernels/` and `hotkernels/`.
+Decision 2, the limit on the range, is left as recommended. Decision 1 was left for review: the kernel shipped as C on x86-64, until its assembly was written, and the Linux wheels are built with clang. That change to the wheel build has not been run: the `build-linux` job of the release workflow runs it on the pull request, since it touches `kernels/` and `hotkernels/`.
 
 ## Decisions still open
 
