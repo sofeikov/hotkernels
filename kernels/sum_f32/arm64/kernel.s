@@ -50,9 +50,9 @@
 .set SUMS, 96                   // stack of sums, 4 bytes each
 .set NODES, 352                 // node stack, 16 bytes a node
 .set LONG, 2400                 // non-zero when the array is beyond the L1
-.set SAVED, 2408                // the right group of two in sequence: start, length
-.set PART, 2424                 // and the sum of the left one
-.set FRAME, 2432
+.set SAVED, 2408                // groups in sequence: start and length of each after the first
+.set PART, 2456                 // and the sums of those before
+.set FRAME, 2480
 // From this many elements (128 KB, the first-level cache of a performance
 // core) the groups of eight read their leaves 64 bytes at a time.
 .set LONG_N, 32768
@@ -616,6 +616,9 @@ Lplain:
     sub     x0, x7, #136
     cmp     x0, #256 - 136
     b.ls    Locto2
+    sub     x0, x7, #272
+    cmp     x0, #512 - 272
+    b.ls    Locto4
     cmp     x7, #128
     b.hi    Lsplit
     cmp     x7, #16
@@ -725,6 +728,44 @@ Lq_sum:
 
 Locto:      // 68..128 vectors: eight leaves
     OCTO
+    b       Lpush
+
+Locto4:     // 272..512 vectors: four groups of eight, one after the other
+    lsr     x8, x7, #1                  // left half
+    sub     x10, x7, x8                 // right half
+    lsr     x11, x8, #1                 // group 0
+    sub     x12, x8, x11                // group 1
+    lsr     x13, x10, #1                // group 2
+    sub     x14, x10, x13               // group 3
+    add     x15, x6, x11, lsl #5        // start of group 1
+    add     x16, x6, x8, lsl #5         // of group 2
+    add     x17, x16, x13, lsl #5       // of group 3
+    str     x15, [sp, #SAVED]
+    str     x12, [sp, #SAVED + 8]
+    str     x16, [sp, #SAVED + 16]
+    str     x13, [sp, #SAVED + 24]
+    str     x17, [sp, #SAVED + 32]
+    str     x14, [sp, #SAVED + 40]
+    mov     x7, x11
+    OCTO
+    str     s0, [sp, #PART]
+    ldr     x6, [sp, #SAVED]
+    ldr     x7, [sp, #SAVED + 8]
+    OCTO
+    str     s0, [sp, #PART + 4]
+    ldr     x6, [sp, #SAVED + 16]
+    ldr     x7, [sp, #SAVED + 24]
+    OCTO
+    str     s0, [sp, #PART + 8]
+    ldr     x6, [sp, #SAVED + 32]
+    ldr     x7, [sp, #SAVED + 40]
+    OCTO
+    ldr     s1, [sp, #PART]
+    ldr     s2, [sp, #PART + 4]
+    ldr     s3, [sp, #PART + 8]
+    fadd    s1, s1, s2
+    fadd    s0, s3, s0
+    fadd    s0, s1, s0
     b       Lpush
 
 Locto2:     // 136..256 vectors: two groups of eight, one after the other

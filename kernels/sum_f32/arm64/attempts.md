@@ -189,3 +189,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly faster, 1.005x [1.004 – 1.006]
 - **Kept:** yes
 - **Notes:** 1.02x at 4,096 (122 ns), 1.03x at 16,384, nothing beyond the first-level cache, where float32's groups of eight already pass once per 4 KB. Load average 9.4.
+
+## 24. Four groups of eight in sequence
+
+- **Idea:** attempt 23 one level up: a node of 272 to 512 vectors has its four groups of eight summed one after another, starts, lengths and sums kept in the frame, combined as ((G0 + G1) + (G2 + G3)). The walk passes once per 4,096 elements.
+- **check:** pass
+- **compare:** significantly faster, 1.004x [1.002 – 1.006]
+- **Kept:** yes
+- **Notes:** 1.03x at 4,096 (120 ns), 1.01x at 16,384, nothing elsewhere. Load average 5.8.
