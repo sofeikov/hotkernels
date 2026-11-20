@@ -50,12 +50,20 @@
 #
 # The table path keeps six values in the 128 bytes below the stack
 # pointer, which is not moved. No constants.
+#
+# From FAR_MIN_BYTES of x, every vector loop asks for the cache lines AHEAD
+# bytes on with prefetcht0, which reads nothing: an address past the end of
+# x is ignored.
 
 # Largest span of the bits path: one bit per value of a 64-bit register.
 .set BITS_SPAN, 64
 # From this many elements the bits path aligns its loads to 32 bytes, so that
 # none straddles two cache lines.
 .set ALIGN_MIN_N, 32
+# From this many bytes of x, more than the first-level cache holds, the
+# vector loops ask for the lines AHEAD bytes on.
+.set FAR_MIN_BYTES, 65536
+.set AHEAD, 2048
 # What the table path stores for a value that is present: the top bit of
 # the byte, which is the bit vpmovmskb reads.
 .set PRESENT, 0x80
@@ -209,6 +217,8 @@ unique_i64:
 .Lraw_start:
     cmp     rdi, r11
     ja      .Lraw_singles
+    cmp     rdx, FAR_MIN_BYTES / 8
+    jae     .Lbits_raw16_far
 .Lbits_raw16:
     vpsllvq ymm4, ymm15, [rdi]
     vpsllvq ymm5, ymm15, [rdi + 32]
@@ -221,6 +231,24 @@ unique_i64:
     vpor    ymm3, ymm3, ymm7
     cmp     rdi, r11
     jbe     .Lbits_raw16
+    jmp     .Lraw_singles
+    # The same with the lines AHEAD bytes on asked for, for an x beyond
+    # the first-level cache.
+    .p2align 5
+.Lbits_raw16_far:
+    prefetcht0 [rdi + AHEAD]
+    prefetcht0 [rdi + AHEAD + 64]
+    vpsllvq ymm4, ymm15, [rdi]
+    vpsllvq ymm5, ymm15, [rdi + 32]
+    vpsllvq ymm6, ymm15, [rdi + 64]
+    vpsllvq ymm7, ymm15, [rdi + 96]
+    add     rdi, 128
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    cmp     rdi, r11
+    jbe     .Lbits_raw16_far
 .Lraw_singles:
     lea     r11, [r10 - 32]             # the last vector, which ends at n
     cmp     rdi, r11
@@ -253,6 +281,8 @@ unique_i64:
 .Lbits_start:
     cmp     rdi, r11
     ja      .Lbits_singles
+    cmp     rdx, FAR_MIN_BYTES / 8
+    jae     .Lbits16_far
 .Lbits16:
     vpaddq  ymm4, ymm14, [rdi]
     vpaddq  ymm5, ymm14, [rdi + 32]
@@ -269,6 +299,26 @@ unique_i64:
     vpor    ymm3, ymm3, ymm7
     cmp     rdi, r11
     jbe     .Lbits16
+    jmp     .Lbits_singles
+    .p2align 5
+.Lbits16_far:
+    prefetcht0 [rdi + AHEAD]
+    prefetcht0 [rdi + AHEAD + 64]
+    vpaddq  ymm4, ymm14, [rdi]
+    vpaddq  ymm5, ymm14, [rdi + 32]
+    vpaddq  ymm6, ymm14, [rdi + 64]
+    vpaddq  ymm7, ymm14, [rdi + 96]
+    add     rdi, 128
+    vpsllvq ymm4, ymm15, ymm4
+    vpsllvq ymm5, ymm15, ymm5
+    vpsllvq ymm6, ymm15, ymm6
+    vpsllvq ymm7, ymm15, ymm7
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    cmp     rdi, r11
+    jbe     .Lbits16_far
 .Lbits_singles:
     lea     r11, [r10 - 32]             # the last vector, which ends at n
     cmp     rdi, r11
@@ -388,8 +438,9 @@ unique_i64:
     # A chunk: t = x - (the window's first value) for sixteen elements,
     # 1 << t into the sets, and the or of every t tested for a bit from 64
     # up. Without one, every element of the chunk is a bit of the sets.
-    # Two loops: for a window that starts at the value 0, t is the element
-    # itself and the four subtractions are not needed.
+    # Four loops: for a window that starts at the value 0, t is the element
+    # itself and the four subtractions are not needed; and for an x beyond
+    # the first-level cache the lines AHEAD bytes on are asked for.
     jmp     .Lwin_go
     .p2align 5
 .Lwin16:
@@ -437,6 +488,57 @@ unique_i64:
     cmp     rdi, r11
     jbe     .Lwin_raw16
 
+    jmp     .Lwin_head
+    .p2align 5
+.Lwin16_far:
+    prefetcht0 [rdi + AHEAD]
+    prefetcht0 [rdi + AHEAD + 64]
+    vpaddq  ymm4, ymm14, [rdi]
+    vpaddq  ymm5, ymm14, [rdi + 32]
+    vpaddq  ymm6, ymm14, [rdi + 64]
+    vpaddq  ymm7, ymm14, [rdi + 96]
+    vpor    ymm8, ymm4, ymm5
+    vpor    ymm9, ymm6, ymm7
+    vpsllvq ymm4, ymm15, ymm4
+    vpsllvq ymm5, ymm15, ymm5
+    vpsllvq ymm6, ymm15, ymm6
+    vpsllvq ymm7, ymm15, ymm7
+    vpor    ymm8, ymm8, ymm9
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    vptest  ymm8, ymm13
+    jnz     .Lwin_fail
+    add     rdi, CHUNK_BYTES
+    cmp     rdi, r11
+    jbe     .Lwin16_far
+    jmp     .Lwin_head
+    .p2align 5
+.Lwin_raw16_far:
+    prefetcht0 [rdi + AHEAD]
+    prefetcht0 [rdi + AHEAD + 64]
+    vmovdqu ymm4, [rdi]
+    vmovdqu ymm5, [rdi + 32]
+    vmovdqu ymm6, [rdi + 64]
+    vmovdqu ymm7, [rdi + 96]
+    vpor    ymm8, ymm4, ymm5
+    vpor    ymm9, ymm6, ymm7
+    vpsllvq ymm4, ymm15, ymm4
+    vpsllvq ymm5, ymm15, ymm5
+    vpsllvq ymm6, ymm15, ymm6
+    vpsllvq ymm7, ymm15, ymm7
+    vpor    ymm8, ymm8, ymm9
+    vpor    ymm0, ymm0, ymm4
+    vpor    ymm1, ymm1, ymm5
+    vpor    ymm2, ymm2, ymm6
+    vpor    ymm3, ymm3, ymm7
+    vptest  ymm8, ymm13
+    jnz     .Lwin_fail
+    add     rdi, CHUNK_BYTES
+    cmp     rdi, r11
+    jbe     .Lwin_raw16_far
+
 
     # The next chunk, or the last one, which ends at n.
 .Lwin_head:
@@ -446,9 +548,14 @@ unique_i64:
     je      .Lmark_done
     mov     rdi, r11
 .Lwin_go:
+    cmp     qword ptr [rsp - SIZE_SLOT], FAR_MIN_BYTES
+    jae     1f
     test    r9, r9
     jz      .Lwin_raw16
     jmp     .Lwin16
+1:  test    r9, r9
+    jz      .Lwin_raw16_far
+    jmp     .Lwin16_far
 
     # A chunk with an element outside the window. Its elements are marked
     # in the table, one at a time; the bits it set stay, since each is a
