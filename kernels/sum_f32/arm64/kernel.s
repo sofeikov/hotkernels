@@ -57,6 +57,17 @@
     str     x0, [sp, #EXTRAS + 8 * \slot]
 .endm
 
+// Two steps of a leaf of a group of eight: its vectors 2k and 2k + 1 after
+// the pointer \p, 64 bytes, into its running sums v\lo and v\hi.
+.macro DSTEP2 lo, hi, p, k
+    ldp     q0, q1, [\p, #\k * 2 * VEC]
+    ldp     q2, q3, [\p, #\k * 2 * VEC + VEC]
+    fadd    v\lo\().4s, v\lo\().4s, v0.4s
+    fadd    v\hi\().4s, v\hi\().4s, v1.4s
+    fadd    v\lo\().4s, v\lo\().4s, v2.4s
+    fadd    v\hi\().4s, v\hi\().4s, v3.4s
+.endm
+
 // One step of a leaf of a group of eight: its vector \k after the pointer
 // \p into its running sums v\lo (lanes 0..3) and v\hi (lanes 4..7).
 .macro DSTEP lo, hi, p, k
@@ -338,6 +349,85 @@ Lo_setup:
     // 256-byte blocks at once slowly. So 8 steps are taken in a diagonal
     // order: leaf j's step k beside leaf 0's step k + j.
     tbnz    x8, #0, Lo_plain
+    cmp     x8, #8
+    b.lo    Lo_plain
+    cmp     x8, #16
+    b.lo    Lo_diag
+Lo_diag16:
+    DSTEP2  16, 17, x6, 0
+    DSTEP2  16, 17, x6, 1
+    DSTEP2  18, 19, x10, 0
+    DSTEP2  16, 17, x6, 2
+    DSTEP2  18, 19, x10, 1
+    DSTEP2  20, 21, x11, 0
+    DSTEP2  16, 17, x6, 3
+    DSTEP2  18, 19, x10, 2
+    DSTEP2  20, 21, x11, 1
+    DSTEP2  22, 23, x12, 0
+    DSTEP2  16, 17, x6, 4
+    DSTEP2  18, 19, x10, 3
+    DSTEP2  20, 21, x11, 2
+    DSTEP2  22, 23, x12, 1
+    DSTEP2  24, 25, x13, 0
+    DSTEP2  16, 17, x6, 5
+    DSTEP2  18, 19, x10, 4
+    DSTEP2  20, 21, x11, 3
+    DSTEP2  22, 23, x12, 2
+    DSTEP2  24, 25, x13, 1
+    DSTEP2  26, 27, x14, 0
+    DSTEP2  16, 17, x6, 6
+    DSTEP2  18, 19, x10, 5
+    DSTEP2  20, 21, x11, 4
+    DSTEP2  22, 23, x12, 3
+    DSTEP2  24, 25, x13, 2
+    DSTEP2  26, 27, x14, 1
+    DSTEP2  28, 29, x15, 0
+    DSTEP2  16, 17, x6, 7
+    DSTEP2  18, 19, x10, 6
+    DSTEP2  20, 21, x11, 5
+    DSTEP2  22, 23, x12, 4
+    DSTEP2  24, 25, x13, 3
+    DSTEP2  26, 27, x14, 2
+    DSTEP2  28, 29, x15, 1
+    DSTEP2  30, 31, x16, 0
+    DSTEP2  18, 19, x10, 7
+    DSTEP2  20, 21, x11, 6
+    DSTEP2  22, 23, x12, 5
+    DSTEP2  24, 25, x13, 4
+    DSTEP2  26, 27, x14, 3
+    DSTEP2  28, 29, x15, 2
+    DSTEP2  30, 31, x16, 1
+    DSTEP2  20, 21, x11, 7
+    DSTEP2  22, 23, x12, 6
+    DSTEP2  24, 25, x13, 5
+    DSTEP2  26, 27, x14, 4
+    DSTEP2  28, 29, x15, 3
+    DSTEP2  30, 31, x16, 2
+    DSTEP2  22, 23, x12, 7
+    DSTEP2  24, 25, x13, 6
+    DSTEP2  26, 27, x14, 5
+    DSTEP2  28, 29, x15, 4
+    DSTEP2  30, 31, x16, 3
+    DSTEP2  24, 25, x13, 7
+    DSTEP2  26, 27, x14, 6
+    DSTEP2  28, 29, x15, 5
+    DSTEP2  30, 31, x16, 4
+    DSTEP2  26, 27, x14, 7
+    DSTEP2  28, 29, x15, 6
+    DSTEP2  30, 31, x16, 5
+    DSTEP2  28, 29, x15, 7
+    DSTEP2  30, 31, x16, 6
+    DSTEP2  30, 31, x16, 7
+    add     x6, x6, #16 * VEC
+    add     x10, x10, #16 * VEC
+    add     x11, x11, #16 * VEC
+    add     x12, x12, #16 * VEC
+    add     x13, x13, #16 * VEC
+    add     x14, x14, #16 * VEC
+    add     x15, x15, #16 * VEC
+    add     x16, x16, #16 * VEC
+    sub     x8, x8, #16
+    cbz     x8, Lo_extra
     cmp     x8, #8
     b.lo    Lo_plain
 Lo_diag:

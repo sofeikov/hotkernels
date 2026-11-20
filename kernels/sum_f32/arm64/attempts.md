@@ -53,3 +53,11 @@ All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge com
 - **compare:** significantly slower, 0.990x [0.989 – 0.992]
 - **Kept:** no
 - **Notes:** 0.94x at 1,024, 0.98x at 4,096 and 16,384, nothing in the second-level cache. A block of four visits has only 11 diagonals, with few leaves active at its two ends, and each visit's two additions to a running sum wait for each other; the microbenchmark's block was 8 visits long.
+
+## 7. A diagonal block of 16 vectors in steps of 64 bytes
+
+- **Idea:** attempt 6 with the microbenchmark's block length: when at least 16 steps remain and q is even, a block of 8 visits of two vectors per leaf, 15 diagonals, as measured there.
+- **check:** pass
+- **compare:** significantly faster, 1.006x [1.001 – 1.011]
+- **Kept:** yes
+- **Notes:** 1.04x from 65,536 to 1,048,576 (57.2 us), as the microbenchmark said; but 0.95x at 1,024 and 0.97x to 0.98x at 4,096 and 16,384, in the first-level cache. Load average 3.5.
