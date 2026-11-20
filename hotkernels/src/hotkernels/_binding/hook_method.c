@@ -138,16 +138,13 @@ static PyObject *method_sum(PyObject *self, PyObject *const *args, Py_ssize_t na
 // ----------------------------------------------------------------- nonzero
 
 // mask.nonzero() for a contiguous one-dimensional boolean array: a tuple
-// holding one int64 array of the positions that are True. Shared with the
-// function hook for np.where(mask).
+// holding one int64 array of the positions that are True.
 //
 // The kernel's output is scratch: it needs room for n indices and may write
 // anywhere in it, whatever it reports. So it runs on a buffer of the
 // binding's own, and the reported indices are copied into an array of
 // exactly that size.
-HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
-    if (!hk_is_flat_1d(self, NPY_BOOL)) return NULL;
-    PyArrayObject *mask = (PyArrayObject *)self;
+static HK_NOINLINE PyObject *try_nonzero_1d(PyArrayObject *mask) {
     const npy_intp n = PyArray_SIZE(mask);
     const size_t bytes = (size_t)n * sizeof(int64_t);
     int64_t on_stack[HK_STACK_SCRATCH_BYTES / sizeof(int64_t)];
@@ -176,6 +173,102 @@ HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
     }
     hk_take(HK_NONZERO_BOOL);
     return result;
+}
+
+// The dimensions of a boolean matrix whose nonzero the binding builds: a row
+// index and a column index per True element.
+#define NONZERO_2D_DIMENSIONS 2
+
+// The tuple NumPy's nonzero returns for `pairs`, a new (count, 2) int64 array
+// of (row, column) pairs: two one-dimensional views of it, of its first and
+// its second column, with a stride of one pair. This is how NumPy builds it
+// (PyArray_Nonzero): the views have `pairs` as their base and its flags, and
+// when there are no pairs both start at its first byte. Steals `pairs`.
+static PyObject *pair_views(PyObject *pairs) {
+    PyArrayObject *base = (PyArrayObject *)pairs;
+    npy_intp count = PyArray_DIM(base, 0);
+    npy_intp stride = NONZERO_2D_DIMENSIONS * (npy_intp)sizeof(npy_intp);
+    PyObject *result = PyTuple_New(NONZERO_2D_DIMENSIONS);
+    for (int i = 0; result != NULL && i < NONZERO_2D_DIMENSIONS; i++) {
+        const npy_intp offset = count == 0 ? 0 : i * (npy_intp)sizeof(npy_intp);
+        PyObject *view = PyArray_NewFromDescr(&PyArray_Type, PyArray_DescrFromType(NPY_INTP), 1, &count, &stride,
+                                              PyArray_BYTES(base) + offset, PyArray_FLAGS(base), NULL);
+        if (view == NULL) {
+            Py_CLEAR(result);
+            break;
+        }
+        Py_INCREF(pairs);
+        if (PyArray_SetBaseObject((PyArrayObject *)view, pairs) < 0) {
+            Py_DECREF(view);
+            Py_CLEAR(result);
+            break;
+        }
+        PyTuple_SET_ITEM(result, i, view);
+    }
+    Py_DECREF(pairs);
+    return result;
+}
+
+// mask.nonzero() for a C-contiguous two-dimensional boolean array: the
+// nonzero_2d_bool kernel writes the (row, column) pair of each True element
+// in C order, which is the array NumPy builds and returns two views of.
+//
+// As for one dimension, the kernel's output is scratch, with room for two
+// int64 per element: it runs on a buffer of the binding's own and the
+// reported pairs are copied into an array of exactly their size. A matrix
+// with no elements is not given to the kernel, which needs a width of at
+// least 1.
+//
+// The copy is not free. Timed in C on the Apple M1 Pro, a million elements in
+// rows of 22, half True: the kernel alone 0.31 ms, with the copy 0.44 ms
+// (with 5% True, 0.081 and 0.097 ms). Running the kernel on an array of n
+// pairs and shrinking it with realloc took 0.91 ms, since macOS moves a
+// block that large. Running it straight into an array of the final size,
+// counted first, would need the kernel to promise how far past the reported
+// pairs it writes, and its spec gives it the whole 2n.
+static HK_NOINLINE PyObject *try_nonzero_2d(PyArrayObject *mask) {
+    const npy_intp n = PyArray_SIZE(mask);
+    const size_t bytes = (size_t)n * NONZERO_2D_DIMENSIONS * sizeof(int64_t);
+    int64_t on_stack[HK_STACK_SCRATCH_BYTES / sizeof(int64_t)];
+    int64_t *scratch = bytes <= sizeof on_stack ? on_stack : malloc(bytes);
+    if (scratch == NULL) return NULL;
+
+    npy_intp count = -1;
+    {
+        HK_BEGIN_NOGIL(n)
+        if (n == 0) {
+            count = 0;
+        } else if (hk_mask_is_clean(PyArray_DATA(mask), (size_t)n)) {
+            const size_t width = (size_t)PyArray_DIM(mask, 1);
+            count = (npy_intp)(nonzero_2d_bool(PyArray_DATA(mask), scratch, (size_t)n, width) /
+                               NONZERO_2D_DIMENSIONS);
+        }
+        HK_END_NOGIL
+    }
+    npy_intp shape[NONZERO_2D_DIMENSIONS] = {count, NONZERO_2D_DIMENSIONS};
+    PyObject *pairs = count >= 0 ? PyArray_SimpleNew(NONZERO_2D_DIMENSIONS, shape, NPY_INTP) : NULL;
+    PyObject *result = NULL;
+    if (pairs != NULL) {
+        memcpy(PyArray_DATA((PyArrayObject *)pairs), scratch, (size_t)count * NONZERO_2D_DIMENSIONS * sizeof(int64_t));
+        result = pair_views(pairs);
+    }
+    if (scratch != on_stack) free(scratch);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    hk_take(HK_NONZERO_2D_BOOL);
+    return result;
+}
+
+// mask.nonzero() for a contiguous boolean array of one dimension or two. Shared with the function hook for np.where(mask). Any other
+// array is left to NumPy.
+HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
+    if (!hk_is_flat(self, NPY_BOOL)) return NULL;
+    PyArrayObject *mask = (PyArrayObject *)self;
+    if (PyArray_NDIM(mask) == 1) return try_nonzero_1d(mask);
+    if (PyArray_NDIM(mask) == NONZERO_2D_DIMENSIONS) return try_nonzero_2d(mask);
+    return NULL;
 }
 
 // Called with a tuple of positional arguments (METH_VARARGS).

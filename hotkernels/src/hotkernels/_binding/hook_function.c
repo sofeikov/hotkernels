@@ -1339,11 +1339,12 @@ static void prepare_clip(PyObject *object) {
 //
 // np.where has two operations behind one name. With the condition alone it
 // gives the positions that are True, as np.nonzero does: the nonzero_bool
-// kernel, counted under nonzero. With `x` and `y` it selects, element by
-// element, from `x` where the condition is True and from `y` where it is
-// not: the where_f64 kernel, counted under where. NumPy accepts no keywords
-// for either, and a call with keywords or another number of arguments is
-// passed on without being counted.
+// kernel, and for a matrix the nonzero_2d_bool kernel, counted under
+// nonzero. With `x` and `y` it selects, element by element, from `x` where
+// the condition is True and from `y` where it is not: the where_f64 kernel,
+// counted under where. NumPy accepts no keywords for either, and a call with
+// keywords or another number of arguments is passed on without being
+// counted.
 //
 // The selection is taken only when it needs no broadcasting and no type
 // conversion: the condition and the arrays have one shape, and the arrays
@@ -1442,8 +1443,8 @@ static HK_NOINLINE PyObject *try_where(PyObject *condition, PyObject *x, PyObjec
 }
 
 // np.where(condition, x, y), and np.where(condition) with nothing but a
-// one-dimensional contiguous boolean array: the positions that are True, as
-// np.nonzero gives them. np.where calls NumPy's C code for nonzero directly,
+// contiguous boolean array of one dimension or two: the positions that are
+// True, as np.nonzero gives them. np.where calls NumPy's C code for nonzero directly,
 // so the method hook does not see that call.
 static PyObject *call_where(HK_VECTORCALL_PARAMETERS) {
     const Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
