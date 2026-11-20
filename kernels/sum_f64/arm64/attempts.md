@@ -1,6 +1,6 @@
 # sum_f64 attempts (arm64)
 
-All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge command in this run takes `--unlocked`**: the kernel's `spec.py` and `naive.c` are new on this branch and not yet on `main` (docs/coverage-gaps-design.md, "Order of work"). `spec.py`, `naive.c` and `judge/` were not edited after the reference was committed. Other agents timed kernels on the same machine throughout, at load averages of 3 to 6, so every figure here is indicative.
+All runs on an Apple M1 Pro (performance core), macOS, native. **Every judge command in this run takes `--unlocked`**: the kernel's `spec.py` and `naive.c` are new on this branch and not yet on `main` (docs/coverage-gaps-arm64.md). `spec.py`, `naive.c` and `judge/` were not edited after the reference was committed. Other agents timed kernels on the same machine throughout, at load averages of 3 to 6, so every figure here is indicative.
 
 The float32 kernel, `kernels/sum_f32/arm64/`, came first; its log says what was found about NumPy's order, the freedom the sign of a zero gives, and this core's first-level cache. This kernel is the same idea at another width: a vector of eight elements is four NEON registers, so a group of eight leaves would need 32 registers of running sums and the largest group here is four.
 
@@ -159,3 +159,7 @@ Ten attempts, the last two rejected; the run was paused at the coordinator's req
 ## Where this run stands
 
 Eighteen attempts. Recorded `uv run judge run sum_f64 --unlocked --record` at a load average of 6.1, not flagged noisy: 1.31x [1.31 – 1.32] over the naive C and 10.6x over NumPy overall, no size slower than the C: 2.26x at 16, 1.40x at 64, 1.35x at 256, 1.44x to 1.52x from 1,024 to 16,384, 1.10x to 1.11x from 65,536 to 1,048,576, 1.07x at 4,194,304 and 1.02x at 16,777,216. The outside timer, kernel and C alternately, six rounds, at a load average of 5.8: 1.098x, 1.100x, 1.069x, 1.084x and 1.020x from 65,536 to 16,777,216.
+
+## Recorded on a quiet machine
+
+`uv run judge run sum_f64 --unlocked --record` on 20 November 2026, load average 2.3, nothing else running: 1.31x [1.31 – 1.32] over the naive C and 10.6x over NumPy. Over the C: 2.26x at 16, 1.39x at 64, 1.35x at 256, 1.46x to 1.52x from 1,024 to 16,384, 1.10x from 65,536 to 1,048,576, 1.07x at 4,194,304, 1.01x at 16,777,216. No size is slower than the C.

@@ -68,7 +68,7 @@ typedef enum {
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
     // Taken on ARM64 only (docs/coverage-gaps-arm64.md).
-    HK_SUM_F32,
+    HK_SUM_F32, HK_SUM_F64,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.

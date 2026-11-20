@@ -24,7 +24,7 @@ static const char *const HK_KERNEL_NAMES[HK_KERNEL_COUNT] = {
     "bincount_i16", "bincount_i64", "unique_i64",
     "argsort_f64", "argsort_i64", "argsort_u64",
     // Taken on ARM64 only.
-    "sum_f32",
+    "sum_f32", "sum_f64",
     // Served through bottleneck's functions.
     "nanmean_cols_f64", "nanstd_cols_f64", "nanmin_cols_f64", "nanmax_cols_f64",
     // Built into the binding.

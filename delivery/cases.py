@@ -2067,7 +2067,7 @@ _SUM_LEFT_SPELLINGS = (
 )
 # The float sum kernels, by element type: on ARM64 only, until measured on
 # x86-64 (docs/coverage-gaps-arm64.md).
-SUM_FLOAT_KERNELS = {"f32": "sum_f32"} if ON_ARM64 else {}
+SUM_FLOAT_KERNELS = {"f32": "sum_f32", "f64": "sum_f64"} if ON_ARM64 else {}
 # Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
 # do not give it: leaves of different lengths, a node of 33 or 65 to 67
 # vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a

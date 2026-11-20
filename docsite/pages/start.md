@@ -74,7 +74,7 @@ Importing the package changes nothing; only `install()` does. Calling it twice i
 `print(hotkernels.report())` after your code has run:
 
 ```text
-hotkernels 0.3.1: installed, 38 of 40 kernels (NumPy 2.5.5)
+hotkernels 0.3.1: installed, 39 of 41 kernels (NumPy 2.5.5)
 
 NumPy call         Elements Kernel    Result            Kernel calls  Left to NumPy
 np.argmax          float32  assembly  exact                        0              0
@@ -120,7 +120,7 @@ A kernel takes a call only when the array is a plain, contiguous `ndarray` of th
 | `w -= b`, `w += b`, `np.subtract(w, b, out=w)`, `np.add(w, b, out=w)` | float64, on arrays of 131,072 elements (1 MB) or more; Apple Silicon only | The result goes into the first operand, and `w` and `b` are contiguous arrays of one shape. Gains only in one situation: see below |
 | `np.median(x)`, `np.median(x, axis=None)` | float64 | The array alone, of any shape, with no other argument than `axis=None`; no NaN. A zero median beside a negative zero, and a mean of the two middle elements that overflows, goes to NumPy: see below |
 | `np.argsort(x, kind="stable")`, `x.argsort(kind="stable")` | float64, int64, uint64 | `x` is one-dimensional with at least 256 elements, and need not be contiguous: a reversed view or one with a step is taken too; `kind` is `"stable"` or `"mergesort"`, or `stable=True` is given with no `kind`; no `order` or `descending`, and `axis` left out, 0 or -1. The default kind stays with NumPy: see below |
-| `np.sum(x)`, `x.sum()` | uint8, bool; float32 on Apple Silicon | No other arguments. For float32, `x` is one-dimensional and its sum is finite: see below |
+| `np.sum(x)`, `x.sum()` | uint8, bool; float32 and float64 on Apple Silicon | No other arguments. For the floats, `x` is one-dimensional and its sum is finite: see below |
 | `np.count_nonzero(x)` | int64, float64 | No `axis` |
 | `np.histogram(x, bins, range)` | float64 | An integer bin count; no weights or density |
 | `np.bincount(x)`, `np.bincount(x, minlength=m)` | uint8, int16, int64 | `x` is one-dimensional; no weights; `minlength`, if given, is a Python int. For int16 and int64, `x` has at least one element, none negative, and the result is no longer than 65,536 counts or than `x` |
@@ -137,7 +137,7 @@ How much faster each one is, from Python and at three sizes, is in [the results]
 ## Things worth knowing
 
 - **Float `cumsum` is opt-in for a reason.** The fast kernels add in a different order from NumPy. The result is as accurate, but not bit-identical, and the output of a non-negative input is not guaranteed to be non-decreasing. Code such as `np.searchsorted(np.cumsum(p), r)` relies on that. Use `install(inexact=True)` only when it does not matter to you. [Why it cannot be both exact and fast]([[ root ]]report/arithmetic/#cumsum-the-chain-you-cannot-break).
-- **`np.sum` on float32 gives NumPy's result bit for bit, on Apple Silicon.** NumPy adds the elements in a fixed order, in blocks of up to 128 whose sums it adds in pairs, and hotkernels makes exactly the same additions in the same order, only several blocks at a time. So, unlike float `cumsum`, it is installed by default. On an Apple M1 Pro `np.sum(x)` is about 20x faster than NumPy on 16 elements, 10x on 4,096 and 3x on a million. Only `np.sum(x)` and `x.sum()` with nothing else are taken: `axis=None`, `axis=0`, `dtype`, `out`, `keepdims`, `initial` and `where` go to NumPy, and so do a matrix, a strided array, and an array whose elements are not aligned to 4 bytes, which NumPy itself adds in another order. A sum that overflows or meets a NaN or an infinity is handed to NumPy, so that the result and the warning are NumPy's own. On x86-64 nothing changes yet: the call stays with NumPy until it has been measured there, and `report()` says so.
+- **`np.sum` on float32 and float64 gives NumPy's result bit for bit, on Apple Silicon.** NumPy adds the elements in a fixed order, in blocks of up to 128 whose sums it adds in pairs, and hotkernels makes exactly the same additions in the same order, only several blocks at a time. So, unlike float `cumsum`, it is installed by default. On an Apple M1 Pro `np.sum(x)` on float32 is about 20x faster than NumPy on 16 elements, 10x on 4,096 and 3x on a million, and on float64 about 20x, 6x and 1.9x. Only `np.sum(x)` and `x.sum()` with nothing else are taken: `axis=None`, `axis=0`, `dtype`, `out`, `keepdims`, `initial` and `where` go to NumPy, and so do a matrix, a strided array, and an array whose elements are not aligned to their size (4 or 8 bytes), which NumPy itself adds in another order. A sum that overflows or meets a NaN or an infinity is handed to NumPy, so that the result and the warning are NumPy's own. On x86-64 nothing changes yet: the call stays with NumPy until it has been measured there, and `report()` says so.
 - **`x[mask] = v` rewrites elements it does not change**, and so do `np.putmask` and `np.copyto(x, v, where=mask)`. On a dense mask the kernel stores unselected elements back with their own bits. The result is identical; the array must be writable throughout, which a normal array is.
 - **A mask holding a byte other than 0 or 1 goes to NumPy.** NumPy treats any non-zero byte as True, and a boolean view of other data can hold a 2. Every mask is read once before a kernel sees it, in the indexing syntax, in the function forms, in `mask.sum()`, in `np.cumsum(mask)`, in `np.where(mask, a, b)` and in `m.any(axis=1)` alike.
 - **The mask functions are counted under the indexing syntax.** In `report()`, `np.compress` and `np.extract` count on the `x[mask]` rows, `np.putmask` and `np.copyto` on `x[mask] = v`, and `np.where(mask)` on `np.nonzero`. `np.copyto` without `where` is another operation and is not counted at all. `np.where(mask, a, b)` has a row of its own, `np.where(c, a, b)`, whose element type reads `float64`: it counts int64 calls too, for the same reason as `x[mask]` below. `mask.sum()` counts on the `np.sum` row, whose element type reads `uint8`: one kernel adds the bytes of both. In the same way `x[mask]` on int64 counts on the float64 row of `x[mask]`: that kernel moves 64-bit elements without computing on them, so it serves both types.
@@ -178,7 +178,7 @@ From a clone of the repository:
 
 ```bash
 uv run delivery demo          # run examples/workload.py with and without hotkernels, and compare
-uv run delivery check         # 239,684 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
+uv run delivery check         # 242,226 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
 uv run delivery time          # time each statement from Python on your machine
 uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two
 ```
