@@ -59,6 +59,9 @@ TIMED_COLUMNS = 4
 # Columns of the timed boolean matrices of any(axis=1): the width its kernel
 # was timed for by the judge.
 ANY_COLUMNS = 22
+# Columns of the timed boolean matrices of any(axis=0): the width of the
+# masks its kernel was asked for.
+ANY_COLS_COLUMNS = 31
 # Share of a mask that is True in the two mask distributions.
 HALF = 0.5
 FEW = 0.05
@@ -291,20 +294,21 @@ def _mask(share: float, n: int) -> tuple:
     return (_rng(n).random(n) < share,)
 
 
-def _matrix(share: float, n: int) -> tuple:
-    """Build a boolean matrix of ANY_COLUMNS columns that is True for `share` of its elements.
+def _matrix(share: float, n: int, columns: int = ANY_COLUMNS) -> tuple:
+    """Build a boolean matrix of `columns` columns that is True for `share` of its elements.
 
     Args:
         share: Probability that an element is True, from 0 to 1.
-        n: Element count asked for. The matrix has `n // ANY_COLUMNS` rows,
-            and one when that is none, so it holds about `n` elements, and
-            ANY_COLUMNS at the smallest size.
+        n: Element count asked for. The matrix has `n // columns` rows, and
+            one when that is none, so it holds about `n` elements, and
+            `columns` at the smallest size.
+        columns: Elements per row, at least 1.
 
     Returns:
         (matrix,), C-ordered.
     """
-    rows = max(n // ANY_COLUMNS, 1)
-    return (_rng(n).random((rows, ANY_COLUMNS)) < share,)
+    rows = max(n // columns, 1)
+    return (_rng(n).random((rows, columns)) < share,)
 
 
 def _window(n: int, center: float = 0.0, spread: float = 1.0) -> tuple:
@@ -588,6 +592,10 @@ TAKEN: tuple[Timed, ...] = (
           lambda m: m.any(axis=1), "any_rows_bool"),
     Timed("any", "np.any(m, axis=1)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW),
           lambda m: np.any(m, axis=1), "any_rows_bool"),
+    Timed("any", "m.any(axis=0)", f"bool, {ANY_COLS_COLUMNS} columns, few True",
+          partial(_matrix, FEW, columns=ANY_COLS_COLUMNS), lambda m: m.any(axis=0), "any_cols_bool"),
+    Timed("any", "np.any(m, axis=0)", f"bool, {ANY_COLS_COLUMNS} columns, few True",
+          partial(_matrix, FEW, columns=ANY_COLS_COLUMNS), lambda m: np.any(m, axis=0), "any_cols_bool"),
     Timed("cumsum", "np.cumsum(x)", "float32", partial(_floats, np.float32), np.cumsum, "cumsum_f32", inexact=True),
     Timed("cumsum", "np.cumsum(x)", "float64", partial(_floats, np.float64), np.cumsum, "cumsum_f64", inexact=True),
     Timed("astype", "x.astype(np.float32)", "uint8", _bytes, lambda x: x.astype(np.float32), "cast_u8_f32"),
@@ -659,8 +667,8 @@ LEFT: tuple[Timed, ...] = (
     Timed("accumulate", "np.maximum.accumulate(x)", "float64", partial(_floats, np.float64), np.maximum.accumulate,
           None),
     Timed("any", "m.any()", "bool, one-dimensional", partial(_mask, HALF), lambda m: m.any(), None),
-    Timed("any", "m.any(axis=0)", f"bool, {ANY_COLUMNS} columns", partial(_matrix, FEW), lambda m: m.any(axis=0),
-          None),
+    Timed("any", "m.any(axis=0, keepdims=True)", f"bool, {ANY_COLUMNS} columns", partial(_matrix, FEW),
+          lambda m: m.any(axis=0, keepdims=True), None),
     Timed("reduceat", "np.add.reduceat(x, starts)", f"float64, runs of {REDUCEAT_RUN}",
           partial(_runs, nan=0.0), np.add.reduceat, None),
     Timed("histogram", "np.histogram(x, 50, (-3.0, 3.0), density=False)", "float64", partial(_floats, np.float64), lambda x: np.histogram(x, BINS, RANGE, density=False), None),

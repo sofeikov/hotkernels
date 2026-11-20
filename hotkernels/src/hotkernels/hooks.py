@@ -93,9 +93,13 @@ PROBE_RUN = 16
 # rows the binding gives to the kernels, so its own loop takes them.
 PROBE_ROWS_COLS = 3
 
-# Columns of the matrix the any(axis=1) probes reduce: the width the kernel
-# was timed for. PROBE_N is a whole number of such rows' worth or more.
+# Columns of the matrix the any(axis=1) and any(axis=0) probes reduce: the
+# width the first kernel was timed for. PROBE_N is a whole number of such
+# rows' worth or more.
 PROBE_COLS = 22
+# A byte other than 1 that one True of the any(axis=0) probe is stored as.
+# Its top bit is set, so a kernel that compared bytes as signed fails.
+PROBE_TRUE_BYTE = 0x80
 
 # Number of distinct codes the int16 and int64 bincount probes count: their
 # element i is i modulo it. PROBE_N is not a multiple of it, so the first
@@ -651,6 +655,42 @@ def _any_function(m: np.ndarray) -> np.ndarray:
     return np.any(m, axis=1)
 
 
+def _any_cols(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
+    """Probe an any(axis=0) hook on a boolean matrix of PROBE_COLS columns.
+
+    Every PROBE_STRIDE-th column holds one True, at a row that moves from
+    column to column; the others hold none. The first of them is stored as
+    the byte PROBE_TRUE_BYTE rather than 1, which NumPy takes as True and
+    answers with a 1. A kernel that reduced the wrong elements or along the
+    wrong axis, or that passed such a byte on, fails.
+
+    Args:
+        reduce: Takes the matrix and returns NumPy's `m.any(axis=0)` for it.
+
+    Returns:
+        Whether the result is a one-dimensional boolean array of bytes 0 and
+        1 with True at exactly the columns that hold one.
+    """
+    rows = PROBE_N // PROBE_COLS
+    m = np.zeros((rows, PROBE_COLS), np.bool_)
+    marked = np.arange(0, PROBE_COLS, PROBE_STRIDE)
+    m[(marked * PROBE_STRIDE) % rows, marked] = True
+    m.view(np.uint8)[0, 0] = PROBE_TRUE_BYTE
+    result = reduce(m)
+    return (result.dtype == np.bool_ and bool(result.view(np.uint8).max() == 1)
+            and bool(np.array_equal(result, np.arange(PROBE_COLS) % PROBE_STRIDE == 0)))
+
+
+def _any_cols_method(m: np.ndarray) -> np.ndarray:
+    """Return `m.any(axis=0)`."""
+    return m.any(axis=0)
+
+
+def _any_cols_function(m: np.ndarray) -> np.ndarray:
+    """Return `np.any(m, axis=0)`."""
+    return np.any(m, axis=0)
+
+
 def _astype() -> bool:
     """Probe the method hook: `x.astype(np.float32)` on bytes."""
     result = np.full(PROBE_N, PROBE_BYTE, np.uint8).astype(np.float32)
@@ -899,7 +939,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("clip_f64", partial(_clip, np.float64)),
         Probe("clip_i64", partial(_clip_i64_with, np.clip)),
     )),
-    Hook("function.any", FUNCTION, (Probe("any_rows_bool", partial(_any_rows, _any_function)),)),
+    Hook("function.any", FUNCTION, (
+        Probe("any_rows_bool", partial(_any_rows, _any_function)),
+        Probe("any_cols_bool", partial(_any_cols, _any_cols_function)),
+    )),
     Hook("function.round", FUNCTION, (Probe("round_f64", partial(_round_with, np.round)),)),
     Hook("function.around", FUNCTION, (Probe("round_f64", partial(_round_with, np.around)),)),
     Hook("function.median", FUNCTION, (Probe("median_f64", _median),)),
@@ -947,7 +990,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("cumfmax_rows_f64", _rows_cumfmax),
     )),
     Hook("ufunc.reduceat", METHOD, (Probe("fmax_reduce_f64", _fmax_reduceat),)),
-    Hook("method.any", METHOD, (Probe("any_rows_bool", partial(_any_rows, _any_method)),)),
+    Hook("method.any", METHOD, (
+        Probe("any_rows_bool", partial(_any_rows, _any_method)),
+        Probe("any_cols_bool", partial(_any_cols, _any_cols_method)),
+    )),
     Hook("method.round", METHOD, (Probe("round_f64", partial(_round_with, _round_method)),)),
     Hook("method.argsort", METHOD, (
         Probe("argsort_f64", partial(_argsort, np.float64)),
@@ -1030,6 +1076,7 @@ KERNELS: tuple[KernelInfo, ...] = (
                builtin=True),
     KernelInfo("fmax_reduce_f64", "fmax.reduceat", "float64", "reduceat", ("ufunc.reduceat",)),
     KernelInfo("any_rows_bool", "m.any(axis=1)", "bool", "any", ("method.any", "function.any")),
+    KernelInfo("any_cols_bool", "m.any(axis=0)", "bool", "any", ("method.any", "function.any")),
     KernelInfo("unique_i64", "np.unique", "int64", "unique", ("function.unique",)),
     # The stable kinds only: kind='stable', kind='mergesort' and stable=True.
     KernelInfo("argsort_f64", "np.argsort, stable", "float64", "argsort", ("method.argsort",)),

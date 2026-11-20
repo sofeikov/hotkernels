@@ -1448,23 +1448,64 @@ HK_NOINLINE PyObject *hk_try_any_rows(PyObject *mask) {
     return result;
 }
 
+// m.any(axis=0) for a two-dimensional boolean array, by either spelling: the
+// caller has tested that `mask` is a plain ndarray of bool with two
+// dimensions (hk_is_bool_matrix) and that `axis` was 0 or -2 with no other
+// argument. Shared with the function hook for np.any(m, axis=0).
+//
+// The result is a new one-dimensional boolean array of one element per
+// column, as NumPy's is. The kernel needs C order and at least one column.
+// A matrix with no rows is NumPy's as well: its answer is all False, which
+// the kernel would give too, and nothing is gained by taking it. The new
+// array cannot overlap the mask.
+//
+// The mask's bytes are not checked to be 0 or 1, unlike for axis=1. A result
+// here is whether the column holds a byte that is not zero, on every path of
+// the kernel and in its C, and that is what NumPy computes: its loop along
+// axis 0 or's each row into the results and takes any non-zero byte as True.
+// So the mask is read once.
+HK_NOINLINE PyObject *hk_try_any_cols(PyObject *mask) {
+    PyArrayObject *m = (PyArrayObject *)mask;
+    if (!PyArray_IS_C_CONTIGUOUS(m)) return NULL;
+    const npy_intp rows = PyArray_DIM(m, 0);
+    npy_intp cols = PyArray_DIM(m, 1);
+    if (rows < 1 || cols < 1) return NULL;
+    PyObject *result = PyArray_SimpleNew(1, &cols, NPY_BOOL);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    {
+        HK_BEGIN_NOGIL(rows * cols)
+        // n is a whole number of rows, so the kernel has no partial row to
+        // skip. It writes exactly `cols` results.
+        any_cols_bool(PyArray_DATA(m), PyArray_DATA((PyArrayObject *)result), (size_t)(rows * cols), (size_t)cols);
+        HK_END_NOGIL
+    }
+    hk_take(HK_ANY_COLS_BOOL);
+    return result;
+}
+
 // The work of method_any once the array is a boolean matrix: the arguments
-// must be `axis` alone, by position or by keyword, the Python int 1 or -1.
-// The method passes its arguments to NumPy's `_methods._any`, whose
-// parameters are axis, dtype, out, keepdims and where; any of the others,
-// even at its default, leaves the call to NumPy.
+// must be `axis` alone, by position or by keyword, the Python int 1 or -1
+// for the rows, 0 or -2 for the columns. The method passes its arguments to
+// NumPy's `_methods._any`, whose parameters are axis, dtype, out, keepdims
+// and where; any of the others, even at its default, leaves the call to
+// NumPy.
 static HK_NOINLINE PyObject *try_any(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames) {
     const Py_ssize_t keywords = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
     if (nargs + keywords != 1) return NULL;
     if (keywords == 1 && !hk_text_is(PyTuple_GET_ITEM(kwnames, 0), "axis")) return NULL;
     // A keyword's value follows the positional arguments, so either way the
     // one argument is args[0].
-    if (!hk_is_last_axis(args[0])) return NULL;
-    return hk_try_any_rows(self);
+    if (hk_is_last_axis(args[0])) return hk_try_any_rows(self);
+    if (hk_is_first_axis(args[0])) return hk_try_any_cols(self);
+    return NULL;
 }
 
-// m.any(axis=1). `m.any()` with no argument is one of the commonest NumPy
-// calls there is and has no kernel: it goes on at the first test, uncounted.
+// m.any(axis=1) and m.any(axis=0). `m.any()` with no argument is one of the
+// commonest NumPy calls there is and has no kernel: it goes on at the first
+// test, uncounted.
 // So does any call on an array that is not a plain boolean one of two
 // dimensions. A call on such an array with arguments that is not taken is
 // counted.
