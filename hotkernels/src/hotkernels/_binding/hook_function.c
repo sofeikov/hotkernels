@@ -395,7 +395,7 @@ static HK_NOINLINE PyObject *try_sum_bool(PyArrayObject *mask) {
 // give, with its warning and the bits of its NaN, and the call is passed on.
 // The flags are left as NumPy leaves them (hk_clear_reported_float_flags).
 // ARM64 only: on x86-64 the call stays with NumPy until the kernel is
-// measured there (docs/coverage-gaps-design.md).
+// measured there (docs/coverage-gaps-arm64.md).
 static HK_NOINLINE PyObject *try_sum_f32(PyArrayObject *a) {
     const npy_intp n = PyArray_SIZE(a);
     float total;

@@ -50,10 +50,10 @@ ON_ARM64 = platform.machine() in ARM64_MACHINES
 INPLACE = "inplace"
 # Why the in-place loops are not installed on another architecture.
 INPLACE_ARM64_ONLY = "ARM64 only: see docs/gradient-step-findings.md"
-# Why the kernels of docs/coverage-gaps-design.md are not installed on
+# Why the kernels of docs/coverage-gaps-arm64.md are not installed on
 # another architecture: their calls stay with NumPy there until each kernel
 # is measured on it.
-COVERAGE_GAPS_ARM64_ONLY = "ARM64 only until measured on x86-64: see docs/coverage-gaps-design.md"
+COVERAGE_GAPS_ARM64_ONLY = "ARM64 only until measured on x86-64: see docs/coverage-gaps-arm64.md"
 # Element count of the in-place probes: the fewest the loops take
 # (INPLACE_MIN_N in hook_loop.c).
 PROBE_INPLACE_N = 131072

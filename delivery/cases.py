@@ -2066,7 +2066,7 @@ _SUM_LEFT_SPELLINGS = (
     Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
 )
 # The float sum kernels, by element type: on ARM64 only, until measured on
-# x86-64 (docs/coverage-gaps-design.md).
+# x86-64 (docs/coverage-gaps-arm64.md).
 SUM_FLOAT_KERNELS = {"f32": "sum_f32"} if ON_ARM64 else {}
 # Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
 # do not give it: leaves of different lengths, a node of 33 or 65 to 67

@@ -471,7 +471,7 @@ def _subtract_scalar(w: np.ndarray) -> None:
 # calls left to NumPy, and so they are below INPLACE_MIN_N elements.
 INPLACE_MIN_N = 131072
 # The float sum kernels take their calls on ARM64 only, until measured on
-# x86-64 (docs/coverage-gaps-design.md).
+# x86-64 (docs/coverage-gaps-arm64.md).
 SUM_F32 = "sum_f32" if ON_ARM64 else None
 SUBTRACT_IN_PLACE = "subtract_inplace_f64" if ON_ARM64 else None
 ADD_IN_PLACE = "add_inplace_f64" if ON_ARM64 else None

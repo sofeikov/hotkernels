@@ -20,7 +20,7 @@ The kernels exist for two architectures: ARM64, and x86-64 on Linux, written aft
 - **Twenty-two of the 23 kernels have assembly that the judge reports as significantly faster than naive C.** The exception, `cast_u8_f32`, ties the compiler and ships as its C. Every kernel is faster than NumPy at every size measured. Twenty-one are bit-identical to NumPy. The two float `cumsum` kernels are within a declared tolerance, which is what makes them faster at all.
 - **The second shortlist added six kernels with ARM64 assembly:** `cummax_i64`, `cumsum_bool`, `any_rows_bool`, `bincount_i16`, `bincount_i64` and `where_f64`, 3.27x, 2.90x, 7.71x, 2.45x, 1.60x and 1.82x over naive C across the judge's sizes, all bit-identical to NumPy, recorded on a quiet machine at the top of their stack. Their rows come before the last two kernels'. The other two have ARM64 assembly since their specs were narrowed to what the binding passes ([fmax-references-design.md](fmax-references-design.md)), both recorded `--unlocked` (their specs differ from `main` until the narrowed specs merge) on a quiet machine at the top of their stack, in the last rows: `fmax_reduce_f64` 8.24x over naive C and `cumfmax_f64` 13.8x. The counts in this section are of the first 23.
 - **`unique_i64` was added for `np.unique` on int64 labels** ([issue 189](https://github.com/sofeikov/hotkernels/issues/189)): 1.44x over naive C and 41.6x over NumPy across its four timed cases, bit-identical, on a busy machine. See [Distinct labels](#distinct-labels-npunique-on-int64).
-- **`sum_f32` was added for `np.sum` on float32** ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [coverage-gaps-design.md](coverage-gaps-design.md)): NumPy's own result bit for bit, by making its additions in its order, several of its blocks at a time. 2.11x over naive C and 18.7x over NumPy across the judge's sizes, recorded `--unlocked` on a quiet machine. See [`np.sum` on floats](#npsum-on-floats-in-numpys-order).
+- **`sum_f32` was added for `np.sum` on float32** ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [coverage-gaps-arm64.md](coverage-gaps-arm64.md#built-on-arm64)): NumPy's own result bit for bit, by making its additions in its order, several of its blocks at a time. 2.11x over naive C and 18.7x over NumPy across the judge's sizes, recorded `--unlocked` on a quiet machine. See [`np.sum` on floats](#npsum-on-floats-in-numpys-order).
 - **Three kernels are a different algorithm, not NumPy's loop made faster:** `argsort_f64`, `argsort_i64` and `argsort_u64`, a stable `argsort` by radix sort where NumPy merges. They ship as C: 13x to 18x faster than NumPy at a million elements on keys that differ in all their bits, 65x to 78x on small integers. A merge sort in C only ties NumPy, and the one hot loop of the radix sort, written by hand, tied the compiler's. See [Stable `argsort`](#stable-argsort).
 - **The survey's prediction for the "C kernels" was wrong.** It expected assembly to tie the compiler on `clip`, `astype`, `np.sum` on `uint8` and `count_nonzero`, because clang vectorises those loops. Tried, assembly beat the C on five of the six: by 5.9x on `sum_u8`, by 1.3x to 1.4x on the counts, and by 1.36x to 1.38x on `clip` for bounds that allow its fast path. A vectorised loop is not necessarily a good one.
 - **Three results are narrower than their headline number.** `isin_i64` is fast only for test values that lie close together, and the two `clip` kernels only for some bounds and, with a lower bound of zero, only for data without negative zeros. Each is set out below.
@@ -593,7 +593,7 @@ Added for the applications study's [issue 189](https://github.com/sofeikov/hotke
 
 ### `np.sum` on floats, in NumPy's order
 
-From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/issues/160), designed in [coverage-gaps-design.md](coverage-gaps-design.md).
+From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/issues/160), recorded in [coverage-gaps-arm64.md](coverage-gaps-arm64.md#built-on-arm64).
 
 #### The operation
 
@@ -631,7 +631,7 @@ From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/iss
 
 #### On x86-64
 
-Not built. The call stays with NumPy, and `report()` lists the kernel as not installed, until it is written and measured there ([coverage-gaps-design.md](coverage-gaps-design.md#built-on-arm64)). `naive.c` is portable C and CI checks it against NumPy on Linux.
+Not built. The call stays with NumPy, and `report()` lists the kernel as not installed, until it is written and measured there ([coverage-gaps-arm64.md](coverage-gaps-arm64.md#built-on-arm64)). `naive.c` is portable C and CI checks it against NumPy on Linux.
 
 ### bottleneck's NaN-aware reductions
 
