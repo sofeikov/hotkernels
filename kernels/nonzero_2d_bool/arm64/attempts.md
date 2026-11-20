@@ -49,3 +49,11 @@ All judge commands in this run were passed `--unlocked`, because the spec is not
 - **compare:** significantly faster, 1.13x [1.13 – 1.13]
 - **Kept:** yes
 - **Notes:** width 3 dense 2.05x (0.38 ns per element, from 0.80), sparse 1.33x, n=16 1.38x; the other widths unchanged but for 0.97x at n=16 (one more compare and branch per row).
+
+## 7. A second sparse tier: 12 extractions for 7 to 12 true bytes
+
+- **Idea:** as `nonzero_bool` attempt 5. At 5% true about one 64-byte block in 25 holds more than 6, and each such block went to the dense code for at least 64 bytes and the rest of the row, at about 0.24 ns per element against 0.1. A second copy of the extraction takes 12 positions; only blocks with more than 12 go dense.
+- **check:** pass
+- **compare:** significantly faster, 1.11x [1.10 – 1.11]
+- **Kept:** yes
+- **Notes:** sparse 1.11x to 1.41x (1.41x at width 1,000, where a dense trip ran to the end of a 1,000-byte row); dense unchanged. Sparse is now about 0.08 ns per element at every width.

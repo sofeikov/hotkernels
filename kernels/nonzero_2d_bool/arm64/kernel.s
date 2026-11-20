@@ -7,11 +7,11 @@
 // Sparse (64 bytes per step, any width): the 64 bytes are packed into a 64-bit
 // word, first byte in the top bit, and the true ones are counted. If at most 6
 // are true, the positions of the first 6 set bits are extracted one after
-// another with `clz`, with no branches. Each position f becomes a row and a
+// another with `clz`, with no branches; if 7 to 12, a second copy extracts 12. Each position f becomes a row and a
 // column without a division: row = high half of (2f * M), M = ceil(2^63 / w),
 // exact while f * w < 2^63, and column = f - row * w. Positions past the true
 // count are rubbish that the next store overwrites (`out` is scratch). More
-// than 6 true bytes send those 64 bytes to the dense code.
+// than 12 true bytes send those 64 bytes to the dense code.
 //
 // Dense (a row at a time): chunks of 8 bytes and a last chunk of what is left
 // of the row, so that no chunk crosses a row; in the last chunk the bytes past
@@ -151,17 +151,35 @@ Lsparse:
     rbit    x14, x14                    // bit 63-j = mask byte j
     fmov    w13, s1                     // number of true bytes
     cmp     w13, #6
-    b.hi    Lsparse_fail
+    b.hi    Lsparse_tier
     EXTRACT x8, x12, 0
     EXTRACT x16, x17, 16
     EXTRACT x8, x12, 32
     EXTRACT x16, x17, 48
     EXTRACT x8, x12, 64
     EXTRACT x16, x17, 80
+Lsparse_next:
     add     x5, x5, x13, lsl #4
     add     x0, x0, #64
     add     x7, x7, #128
     b       Lsparse
+Lsparse_more:                           // 7 to 12 true bytes
+    EXTRACT x8, x12, 0
+    EXTRACT x16, x17, 16
+    EXTRACT x8, x12, 32
+    EXTRACT x16, x17, 48
+    EXTRACT x8, x12, 64
+    EXTRACT x16, x17, 80
+    EXTRACT x8, x12, 96
+    EXTRACT x16, x17, 112
+    EXTRACT x8, x12, 128
+    EXTRACT x16, x17, 144
+    EXTRACT x8, x12, 160
+    EXTRACT x16, x17, 176
+    b       Lsparse_next
+Lsparse_tier:
+    cmp     w13, #12
+    b.ls    Lsparse_more
 Lsparse_fail:                           // a dense stretch of at least 64 bytes
     add     x13, x0, #64
     b       Lsparse_leave
