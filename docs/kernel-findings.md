@@ -104,8 +104,17 @@ The kernels exist for two architectures: ARM64, and x86-64 on Linux, written aft
 | `cumfmax_f64` | rising | 13.9x [13.27 – 13.92] | 5.28x | 21.4x | 12.9x | 12.7x | 28.1x | 17.8x |
 | `cumfmax_f64` | 5% NaN | 13.9x [13.53 – 14.12] | 5.28x | 24.9x | 13.1x | 12.9x | 28.2x | 18.2x |
 | `cumfmax_f64` | all three tables | 13.8x [13.49 – 13.83] | | | | | 28.0x | |
+| `nonzero_2d_bool` | 5% true, rows of 22 § | 10.9x [10.85 – 10.87] | 2.29x | 13.9x | 14.0x | 13.5x | 47.6x | 35.7x |
+| `nonzero_2d_bool` | 5% true, rows of 3 § | 10.5x [10.45 – 10.46] | 1.68x | 13.8x | 14.0x | 13.5x | 57.9x | 46.8x |
+| `nonzero_2d_bool` | 5% true, rows of 32 § | 10.9x [10.88 – 10.89] | 2.29x | 13.9x | 14.0x | 13.6x | 47.2x | 34.8x |
+| `nonzero_2d_bool` | 5% true, rows of 1,000 § | 14.0x [14.01 – 14.03] | 2.29x | 19.2x | 20.5x | 18.1x | 54.6x | 47.4x |
+| `nonzero_2d_bool` | half true, rows of 22 § | 3.49x [3.47 – 3.55] | 2.29x | 4.39x | 3.67x | 3.19x | 25.5x | 22.5x |
+| `nonzero_2d_bool` | half true, rows of 3 § | 3.41x [3.39 – 3.46] | 1.68x | 4.27x | 3.81x | 3.32x | 28.1x | 24.8x |
+| `nonzero_2d_bool` | half true, rows of 32 § | 3.91x [3.89 – 3.98] | 2.29x | 5.05x | 4.22x | 3.41x | 28.6x | 25.5x |
+| `nonzero_2d_bool` | half true, rows of 1,000 § | 3.96x [3.93 – 4.01] | 2.29x | 5.13x | 4.27x | 3.71x | 26.8x | 25.0x |
+| `nonzero_2d_bool` | all eight tables § | 6.50x [6.49 – 6.53] | | | | | 37.5x | |
 
-Every figure is how many times faster the kernel is. "vs naive C" and "vs NumPy" are geometric means over the eleven sizes from 16 to 16,777,216 elements, with the 95% interval for the first; the four columns after it are the speedup over naive C at single sizes. "n.s." marks a difference that is not statistically significant. Kernels timed on two kinds of input, or with two sets of scalar values, have a row for each and one for both. The NumPy mean is dominated by NumPy's fixed cost per call at small sizes (for example 1.3 µs for `np.sum` on 16 bytes), which is a property of the call path and not of the loop. The column at 1,048,576 elements shows the loops alone. A row marked † is the mean of ten runs on a machine that was not fully quiet: its brackets hold the lowest and the highest of the ten, not a confidence interval, and "n.s." is not marked on it. [How the numbers were taken](#how-the-numbers-were-taken) has the conditions.
+Every figure is how many times faster the kernel is. "vs naive C" and "vs NumPy" are geometric means over the eleven sizes from 16 to 16,777,216 elements, with the 95% interval for the first; the four columns after it are the speedup over naive C at single sizes. "n.s." marks a difference that is not statistically significant. Kernels timed on two kinds of input, or with two sets of scalar values, have a row for each and one for both. The NumPy mean is dominated by NumPy's fixed cost per call at small sizes (for example 1.3 µs for `np.sum` on 16 bytes), which is a property of the call path and not of the loop. The column at 1,048,576 elements shows the loops alone. A row marked † is the mean of ten runs on a machine that was not fully quiet: its brackets hold the lowest and the highest of the ten, not a confidence interval, and "n.s." is not marked on it. A row marked § is from one `--unlocked` run on a quiet machine on 20 November 2026, at a load average of 1.6; its spec is not yet on `main`. [How the numbers were taken](#how-the-numbers-were-taken) has the conditions.
 
 ### x86-64
 
@@ -246,6 +255,15 @@ Each kernel's `x86_64/attempts.md` has every attempt, the judge's tables and wha
 - **What did not help:** aligning the loads of x, a prefetch.
 - **Found on the way, and used by every later kernel:** a `lea` with a scaled index takes two cycles on this processor, so a write position that advances every step is kept as an element count and advanced with `add`.
 - **What differs for a caller.** Mask bytes other than 0 and 1 are handled: any non-zero byte is true, so [issue 8](https://github.com/sofeikov/hotkernels/issues/8) does not arise on x86-64.
+
+#### `nonzero` on a matrix, on ARM64
+
+`nonzero_2d_bool` serves `np.nonzero(m)` on a C-ordered boolean matrix ([coverage-gaps-arm64.md](coverage-gaps-arm64.md#built-on-arm64)). NumPy's result for a matrix is one (count, 2) int64 array of (row, column) pairs with two views of its columns, so the kernel writes the pairs: two int64 per True element, into a scratch output of 2n. A partial last row is a row like the others. The log is `kernels/nonzero_2d_bool/arm64/attempts.md`.
+
+- **Technique.** Three paths, each without a branch per element. Sparse, any width: `nonzero_bool`'s 64-byte bitmask and its `clz` extraction (6 positions, or 12), with each flat position f turned into its row without a division, as the high half of 2f times ceil(2^63 / w) (`umulh`; exact while f × w < 2^63, so the path runs below 2^31 elements), and its column as f − row × w. In rows of 512 or more a block inside one row skips the multiplication. Dense, rows of 8 or more: a loop over rows whose chunks of 8 bytes never cross a row, the last one masked; the 256-entry position table, the positions widened and added to the chunk's column, and paired with the row by `zip`. Dense, rows under 8: chunks of as many whole rows as fit in 16 bytes, whose positions index two small tables of the row within the chunk and the column (`tbl`). After a dense stretch, at most one true byte in eight goes back to the sparse path.
+- **Result.** Over the naive C, which stores a pair for every element and is 1.1 ns per element whatever the share of True: 10.5x to 14.0x at 5% True and 3.4x to 4.0x at half, at the four widths timed (3, 22, 32 and 1,000); over NumPy 26x to 58x (20 November 2026, load average 1.6). About 0.08 ns per element at 5% True (0.055 in rows of 1,000) and 0.27 to 0.31 at half, at a million elements. A timer outside the judge found no width from 1 to 1,000 slower than the C: the weakest is 17 at half True, 3.0x at a million elements, where every row ends in a chunk of one byte.
+- **Limit.** The dense path stores eight 16-byte pairs per 8 mask bytes, about six cycles per chunk, which looks like the limit of the stores. A 32 KB table of ready-made pairs was slower than building them (0.92x).
+- **What a caller must know.** Every mask byte must be 0 or 1: the count is a multiplication that sums the bytes. The binding reads the mask first, as for `nonzero_bool`. From Python the call copies the pairs out of the binding's buffer; at a million elements, half True, that copy is about 0.13 ms of a 0.44 ms call, and shrinking the buffer in place with `realloc` instead was slower on macOS (0.91 ms). Not yet built for x86-64, where these calls stay with NumPy.
 
 ### Masked assignment
 
@@ -743,6 +761,8 @@ These are constraints on the binding, collected from the kernels. The last colum
 | Kernel | Constraint | Holds on |
 |---|---|---|
 | `compress_*`, `nonzero_bool` | Scratch output: allocate the full capacity, return only the reported elements, never run on a buffer the caller owns | Every architecture: the spec declares it |
+| `nonzero_2d_bool` | Scratch output of two int64 per element, of which the reported (row, column) pairs are kept; `width` at least 1 when `n` is above 0; every mask byte 0 or 1, since the count is a multiplication that sums the bytes and a larger byte would write outside the buffer. The binding reads the mask first and leaves an empty matrix out of the kernel | Every architecture: the spec declares it |
+| `nonzero_2d_bool` | Above 2^31 elements the sparse path is not taken (its row multiplication could overflow), and the kernel runs at its dense speed whatever the share of True | ARM64 |
 | `cumsum_bool` | Every mask byte is 0 or 1. NumPy counts any non-zero byte once. The x86-64 kernel adds the bytes as numbers; the ARM64 kernel does so only while a group of eight bytes sums to at most 255, and above that its byte counts carry into one another. The binding reads the mask for other bytes first | Every architecture: the spec declares it |
 | `where_f64` | Every condition byte is 0 or 1, and the output overlaps neither the condition nor `a` nor `b`. The binding writes into a new array, so it cannot | The bytes on every architecture: the spec declares them. The overlap on x86-64 and on ARM64, whose kernels both end with a block that reads the inputs again for elements already written; the spec does not declare it |
 | `cummax_i64`, `cumfmax_f64` | `out` must not overlap `x` | Every architecture: the specs declare it |
