@@ -67,8 +67,8 @@ typedef enum {
     HK_WHERE_F64, HK_CUMMAX_I64, HK_CUMFMAX_F64, HK_FMAX_REDUCE_F64, HK_ANY_ROWS_BOOL,
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
-    // Taken on ARM64 only (docs/coverage-gaps-arm64.md).
-    HK_SUM_F32, HK_SUM_F64,
+    // Taken on ARM64 only (docs/coverage-gaps-arm64.md); the counters exist everywhere.
+    HK_SUM_F32, HK_SUM_F64, HK_NONZERO_2D_BOOL,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.
@@ -513,9 +513,9 @@ void hk_clip_in_place(hk_kernel kernel, void *data, size_t n, double lo, double 
 // being one-dimensional, tests that first. In hook_index.c.
 PyObject *hk_try_compress(PyObject *x, PyObject *mask);
 
-// The positions where a one-dimensional contiguous boolean array is True, as
-// the one-element tuple NumPy's nonzero returns: the nonzero_bool kernel. In
-// hook_method.c.
+// The positions where a contiguous boolean array is True, as the tuple
+// NumPy's nonzero returns: for one dimension the nonzero_bool kernel, and on
+// ARM64 for two (C order) the nonzero_2d_bool kernel. In hook_method.c.
 PyObject *hk_try_nonzero(PyObject *mask);
 
 // Whether each row of a boolean matrix holds a True, as the new

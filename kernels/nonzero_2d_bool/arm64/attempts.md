@@ -149,3 +149,20 @@ Six attempts in a row (12 to 17) gave nothing worth keeping. The dense step stor
 - **compare:** significantly slower, 0.998x [0.998 – 0.999] (no timed size reaches the new code)
 - **Kept:** no
 - **Notes:** timer outside the judge, 5% true, ns per element, before / after: width 22 at 880 elements 0.090 to 0.094 / 0.082 to 0.086; width 3 at 880 0.093 / 0.083; width 22 at 924 0.084 / 0.083; width 3 at 924 0.094 / 0.085; 1,000 and 1,100 elements unchanged. At most 10 ns per call at the workload's shape, against about 540 ns for the whole call from Python: not a clear gain, and `compare` is a little slower.
+
+## Recorded run
+
+`uv run judge run nonzero_2d_bool --unlocked --record` on a quiet machine on 20 November 2026 (load average 1.6, no other timing running), after attempt 18 was set aside: 28,947 check cases; **6.50x [6.49 – 6.53] over the naive C and 37.5x [37.44 – 37.64] over NumPy** over the eight tables.
+
+| Table | vs naive C | at 16 | at 1,048,576 | vs NumPy |
+|---|---|---|---|---|
+| 5% true, rows of 22 | 10.9x [10.85 – 10.87] | 2.29x | 14.0x | 47.6x |
+| 5% true, rows of 3 | 10.5x [10.45 – 10.46] | 1.68x | 14.0x | 57.9x |
+| 5% true, rows of 32 | 10.9x [10.88 – 10.89] | 2.29x | 14.0x | 47.2x |
+| 5% true, rows of 1,000 | 14.0x [14.01 – 14.03] | 2.29x | 20.5x | 54.6x |
+| half true, rows of 22 | 3.49x [3.47 – 3.55] | 2.29x | 3.67x | 25.5x |
+| half true, rows of 3 | 3.41x [3.39 – 3.46] | 1.68x | 3.81x | 28.1x |
+| half true, rows of 32 | 3.91x [3.89 – 3.98] | 2.29x | 4.22x | 28.6x |
+| half true, rows of 1,000 | 3.96x [3.93 – 4.01] | 2.29x | 4.27x | 26.8x |
+
+The first recording, at a load average of 7.5 to 16, read 6.55x and 38.1x. At 16,777,216 elements with half True the intervals are wide (3.03x to 3.81x in rows of 22): that size is bound by memory.
