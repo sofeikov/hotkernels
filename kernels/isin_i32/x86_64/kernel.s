@@ -40,20 +40,30 @@
 
 # Largest spread of the test values for which their keys fit -32,767 .. 32,766.
 .set NARROW_SPREAD, 65533
-# c - smallest test value: the largest test key.
+# c - smallest test value: the largest test key. Also the largest test value,
+# and NARROW_BOTTOM the smallest, that can be its own key.
 .set NARROW_TOP, 32766
+.set NARROW_BOTTOM, -32767
 # Block sizes, in elements.
 .set BLOCK, 32
 .set SMALL_BLOCK, 8
 
-# One block of 32 elements from r9 on, narrow keys.
-.macro narrow_block
+# One block of 32 elements from r9 on, narrow keys: c - x when keyed is 1,
+# x itself when it is 0.
+.macro narrow_block keyed
+.if \keyed
     vpsubd  ymm0, ymm6, [rdi + r9 * 4]
     vpsubd  ymm1, ymm6, [rdi + r9 * 4 + 32]
     vpsubd  ymm2, ymm6, [rdi + r9 * 4 + 64]
     vpsubd  ymm3, ymm6, [rdi + r9 * 4 + 96]
     vpackssdw ymm0, ymm0, ymm1          # keys of elements 0-15
     vpackssdw ymm2, ymm2, ymm3          # keys of elements 16-31
+.else
+    vmovdqu ymm0, [rdi + r9 * 4]
+    vmovdqu ymm2, [rdi + r9 * 4 + 64]
+    vpackssdw ymm0, ymm0, [rdi + r9 * 4 + 32]
+    vpackssdw ymm2, ymm2, [rdi + r9 * 4 + 96]
+.endif
     vpcmpeqw ymm1, ymm0, ymm8
     vpcmpeqw ymm3, ymm2, ymm8
     vpcmpeqw ymm4, ymm0, ymm9
@@ -196,9 +206,38 @@ isin_i32:
     vmovd   r8d, xmm2
     movsxd  rax, eax
     movsxd  r8, r8d
+    mov     r11, r8                     # largest
     sub     r8, rax                     # spread, at most 2^32 - 1
     cmp     r8, NARROW_SPREAD
     ja      .Lwidesetup
+    cmp     rax, NARROW_BOTTOM
+    jl      .Lkeyed
+    cmp     r11, NARROW_TOP
+    jg      .Lkeyed
+    # Every test value is its own key: no subtraction.
+    vpbroadcastw ymm8, word ptr [rsi + 0]
+    vpbroadcastw ymm9, word ptr [rsi + 4]
+    vpbroadcastw ymm10, word ptr [rsi + 8]
+    vpbroadcastw ymm11, word ptr [rsi + 12]
+    vpbroadcastw ymm12, word ptr [rsi + 16]
+    vpbroadcastw ymm13, word ptr [rsi + 20]
+    vpbroadcastw ymm14, word ptr [rsi + 24]
+    vpbroadcastw ymm15, word ptr [rsi + 28]
+
+.p2align 6
+.Lplain:
+    narrow_block 0
+    add     r9, BLOCK
+    cmp     r9, r10
+    jbe     .Lplain
+    sub     r9, BLOCK
+    cmp     r9, r10
+    je      .Ldone                      # the blocks ended with the last element
+    mov     r9, r10                     # one more block, ending with the last element
+    narrow_block 0
+    jmp     .Ldone
+
+.Lkeyed:
     add     eax, NARROW_TOP             # c, wrapping at 32 bits
     vmovd   xmm6, eax
     vpbroadcastd ymm6, xmm6
@@ -215,7 +254,7 @@ isin_i32:
 
 .p2align 6
 .Lnarrow:
-    narrow_block
+    narrow_block 1
     add     r9, BLOCK
     cmp     r9, r10
     jbe     .Lnarrow
@@ -223,7 +262,7 @@ isin_i32:
     cmp     r9, r10
     je      .Ldone                      # the blocks ended with the last element
     mov     r9, r10                     # one more block, ending with the last element
-    narrow_block
+    narrow_block 1
 
 .Ldone:
     vzeroupper
