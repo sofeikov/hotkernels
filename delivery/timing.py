@@ -467,7 +467,7 @@ def _interp(points: int | None, n: int) -> tuple:
     return (rng.standard_normal(n), np.sort(rng.standard_normal(count)), rng.standard_normal(count))
 
 
-def _assign(value: float, x: np.ndarray, mask: np.ndarray) -> None:
+def _assign(value: object, x: np.ndarray, mask: np.ndarray) -> None:
     """Run `x[mask] = value`. Running it twice changes nothing more."""
     x[mask] = value
 
@@ -581,7 +581,13 @@ TAKEN: tuple[Timed, ...] = (
     Timed("compress", "x[mask]", "float64, half selected", partial(_masked, np.float64, HALF), lambda x, m: x[m], "compress_f64"),
     Timed("compress", "x[mask]", "float64, few selected", partial(_masked, np.float64, FEW), lambda x, m: x[m], "compress_f64"),
     Timed("compress", "x[mask]", "int64, half selected", partial(_masked, np.int64, HALF), lambda x, m: x[m], "compress_f64"),
+    Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], "compress_f32"),
+    Timed("compress", "x[mask]", "int32, few selected", partial(_masked, np.int32, FEW), lambda x, m: x[m], "compress_f32"),
     Timed("maskfill", "x[mask] = 0.0", "float64, half selected", partial(_masked, np.float64, HALF), partial(_assign, 0.0), "maskfill_f64"),
+    Timed("maskfill", "x[mask] = 0.0", "float32, half selected", partial(_masked, np.float32, HALF), partial(_assign, 0.0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0.0", "float32, few selected", partial(_masked, np.float32, FEW), partial(_assign, 0.0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0", "int32, half selected", partial(_masked, np.int32, HALF), partial(_assign, 0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0", "int64, half selected", partial(_masked, np.int64, HALF), partial(_assign, 0), "maskfill_f64"),
     Timed("compress", "np.compress(mask, x)", "float64, half selected", partial(_masked, np.float64, HALF), _compress, "compress_f64"),
     Timed("compress", "np.extract(mask, x)", "float64, half selected", partial(_masked, np.float64, HALF), _extract, "compress_f64"),
     Timed("maskfill", "x[mask] = 0.0", "float64, few selected", partial(_masked, np.float64, FEW), partial(_assign, 0.0), "maskfill_f64"),
@@ -718,9 +724,10 @@ LEFT: tuple[Timed, ...] = (
           np.nonzero, None),
     Timed("compress", "x[3]", "float64", partial(_floats, np.float64), lambda x: x[3], None),
     Timed("compress", "x[1:5]", "float64", partial(_floats, np.float64), lambda x: x[1:5], None),
-    Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], None),
+    Timed("compress", "x[mask]", "int16, half selected", partial(_masked, np.int16, HALF), lambda x, m: x[m], None),
     Timed("maskfill", "x[3] = 1.0", "float64", partial(_floats, np.float64), _set_element, None),
-    Timed("maskfill", "x[mask] = 0.0", "float32, half selected", partial(_masked, np.float32, HALF), partial(_assign, 0.0), None),
+    Timed("maskfill", "x[mask] = 0.0", "float32, value an np.float64", partial(_masked, np.float32, HALF),
+          partial(_assign, np.float64(0.0)), None),
     Timed("maskfill", "np.copyto(x, 0.0)", "float64", partial(_floats, np.float64), lambda x: np.copyto(x, 0.0), None),
     Timed("where", "np.where(mask, 1.0, 0.0)", "bool, half selected", partial(_mask, HALF), lambda m: np.where(m, 1.0, 0.0), None),
     Timed("where", "np.where(mask, a, b)", "float32, half true", partial(_selected, np.float32, HALF), np.where, None),

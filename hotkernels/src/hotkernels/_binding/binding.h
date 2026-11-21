@@ -59,7 +59,7 @@
 typedef enum {
     HK_ARGMAX_F32, HK_ARGMAX_F64, HK_ARGMIN_F32, HK_ARGMIN_F64,
     HK_CLIP_F32, HK_CLIP_F64,
-    HK_COMPRESS_F32, HK_COMPRESS_F64, HK_MASKFILL_F64, HK_NONZERO_BOOL,
+    HK_COMPRESS_F32, HK_COMPRESS_F64, HK_MASKFILL_F64, HK_MASKFILL_F32, HK_NONZERO_BOOL,
     HK_CUMSUM_I64, HK_CUMSUM_F32, HK_CUMSUM_F64, HK_CUMSUM_BOOL,
     HK_CAST_U8_F32, HK_SUM_U8, HK_COUNT_NONZERO_I64, HK_COUNT_NONZERO_F64,
     HK_HISTOGRAM_F64, HK_BINCOUNT_U8, HK_ISIN_I64,
@@ -157,6 +157,14 @@ extern bool hk_inexact;
 
 // The largest magnitude up to which a double represents every integer, 2^53.
 #define HK_EXACT_INT_LIMIT 9007199254740992LL
+
+// The smallest double that a float32 conversion rounds to infinity:
+// FLT_MAX plus half its ulp, 2^128 - 2^103. The tie rounds to even, and
+// FLT_MAX's significand is odd, so the tie itself overflows.
+#define HK_FLOAT32_OVERFLOW 3.4028235677973366e38
+
+// The bit of a double that is set in a quiet NaN and clear in a signalling one.
+#define HK_QUIET_NAN_BIT (1ULL << 51)
 
 // Element count from which a hook releases the interpreter lock around a
 // kernel. Below it, taking the lock back costs more than other threads gain.
@@ -478,6 +486,83 @@ static inline bool hk_as_exact_double(PyObject *obj, double *out) {
     return hk_as_double(obj, out);
 }
 
+// The largest magnitude of a Python int stored into a float32 array that the
+// binding converts itself: every int up to 2**24 is a float32 exactly, so no
+// rounding rule is involved.
+#define HK_EXACT_FLOAT32_INT_LIMIT (1LL << 24)
+
+// Convert a Python float, a Python int of at most 2**24 in magnitude or an
+// np.float32 to the float32 NumPy stores for it in a float32 array. A Python
+// float is rounded once, to nearest, as NumPy's cast does, and taken only when
+// it is a quiet NaN, an infinity or a zero, or rounds to a normal float32: a finite
+// value that overflows makes NumPy warn (or raise, under np.errstate), and one
+// that underflows sets a flag the binding would leave behind. Returns false,
+// with no exception set, for anything else, including bool, np.float64 and the
+// other NumPy scalars: NumPy converts those by its own rules.
+static inline bool hk_as_float32(PyObject *obj, float *out) {
+    if (Py_IS_TYPE(obj, &PyFloat32ArrType_Type)) {
+        *out = PyArrayScalar_VAL(obj, Float32);
+        return true;
+    }
+    if (PyFloat_CheckExact(obj)) {
+        const double v = PyFloat_AS_DOUBLE(obj);
+        if (isnan(v)) {
+            // A signalling NaN raises the invalid flag in the conversion,
+            // and is NumPy's; a quiet one keeps its sign and the top of its
+            // payload, as in NumPy's cast.
+            uint64_t bits;
+            memcpy(&bits, &v, sizeof bits);
+            if ((bits & HK_QUIET_NAN_BIT) == 0) return false;
+            *out = (float)v;
+            return true;
+        }
+        if (v == 0.0 || isinf(v)) {
+            *out = (float)v;
+            return true;
+        }
+        // Rounding is decided on the magnitude, so that no overflow or
+        // underflow flag is raised by the conversion itself: a value that
+        // rounds to FLT_MAX or below is at most FLT_MAX plus half an ulp of it.
+        const double magnitude = fabs(v);
+        if (magnitude < (double)FLT_MIN || magnitude >= HK_FLOAT32_OVERFLOW) return false;
+        *out = (float)v;
+        return true;
+    }
+    if (PyLong_CheckExact(obj)) {
+        int overflow = 0;
+        const long long v = PyLong_AsLongLongAndOverflow(obj, &overflow);
+        if (overflow != 0 || (v == -1 && PyErr_Occurred())) {
+            PyErr_Clear();
+            return false;
+        }
+        if (v < -HK_EXACT_FLOAT32_INT_LIMIT || v > HK_EXACT_FLOAT32_INT_LIMIT) return false;
+        *out = (float)v;
+        return true;
+    }
+    return false;
+}
+
+// Convert an np.int32 or a Python int that fits int32 to an int32. Returns
+// false, with no exception set, for anything else: a Python int outside int32,
+// which NumPy refuses with OverflowError, bool, a float, and the other NumPy
+// integers, which NumPy converts by its own rules.
+static inline bool hk_as_int32(PyObject *obj, int32_t *out) {
+    if (Py_IS_TYPE(obj, &PyInt32ArrType_Type)) {
+        *out = PyArrayScalar_VAL(obj, Int32);
+        return true;
+    }
+    if (!PyLong_CheckExact(obj)) return false;
+    int overflow = 0;
+    const long long v = PyLong_AsLongLongAndOverflow(obj, &overflow);
+    if (overflow != 0 || (v == -1 && PyErr_Occurred())) {
+        PyErr_Clear();
+        return false;
+    }
+    if (v < INT32_MIN || v > INT32_MAX) return false;
+    *out = (int32_t)v;
+    return true;
+}
+
 // Convert an np.int64 or a Python int that fits int64 to an int64. Returns
 // false, with no exception set, for anything else, including bool, the other
 // NumPy integers and a Python int outside int64: NumPy converts those by its
@@ -578,13 +663,23 @@ PyObject *hk_try_any_cols(PyObject *mask);
 PyObject *hk_try_round(PyObject *array, PyObject *decimals);
 
 // Set the elements of `x` where `mask` is True to `value`, in place: the
-// maskfill kernel. `x` is contiguous, writable float64 and `mask` a
-// contiguous boolean array of the same size that does not share memory with
-// it, each of any shape; `value` is a Python float, or a Python int, which
-// is rounded to a double as NumPy rounds it (see hk_as_double). Returns true when the kernel did it, and false, having
-// changed nothing and set no exception, when the call belongs to NumPy. A
-// caller whose NumPy operation needs more, such as matching shapes, tests
-// that first. In hook_index.c.
+// maskfill kernels. `x` is contiguous and writable, and `mask` a contiguous
+// boolean array of the same size that does not share memory with it, each of
+// any shape. Which values are taken depends on x's type, and each is one
+// whose conversion NumPy's result and errors are reproduced for exactly:
+//   float64  a Python float, or a Python int, rounded to a double as NumPy
+//            rounds it (see hk_as_double); maskfill_f64
+//   float32  a Python float that is a quiet NaN, an infinity, a zero, or rounds to
+//            a normal float32 (see hk_as_float32); a Python int of at most
+//            2**24 in magnitude; an np.float32; maskfill_f32
+//   int64    a Python int that fits, or an np.int64 (see hk_as_int64);
+//            maskfill_f64, which moves the bits
+//   int32    a Python int that fits, or an np.int32; maskfill_f32, which
+//            moves the bits
+// Returns true when a kernel did it, and false, having changed nothing and
+// set no exception, when the call belongs to NumPy. A caller whose NumPy
+// operation needs more, such as matching shapes, tests that first. In
+// hook_index.c.
 bool hk_try_maskfill(PyObject *x, PyObject *mask, PyObject *value);
 
 // Build a NumPy scalar of type `type_num` from the value at `value`. Returns

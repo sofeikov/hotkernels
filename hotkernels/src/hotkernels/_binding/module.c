@@ -15,7 +15,7 @@ PyTypeObject *hk_ndarray_type;
 static const char *const HK_KERNEL_NAMES[HK_KERNEL_COUNT] = {
     "argmax_f32", "argmax_f64", "argmin_f32", "argmin_f64",
     "clip_f32", "clip_f64",
-    "compress_f32", "compress_f64", "maskfill_f64", "nonzero_bool",
+    "compress_f32", "compress_f64", "maskfill_f64", "maskfill_f32", "nonzero_bool",
     "cumsum_i64", "cumsum_f32", "cumsum_f64", "cumsum_bool",
     "cast_u8_f32", "sum_u8", "count_nonzero_i64", "count_nonzero_f64",
     "histogram_f64", "bincount_u8", "isin_i64",
