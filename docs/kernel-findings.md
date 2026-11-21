@@ -164,6 +164,7 @@ Every figure is how many times faster the kernel is. "vs naive C" and "vs NumPy"
 | `searchsorted_right_i64` | 64 / 1,000 needles | 2.85x / 8.76x, all 5.00x [4.99 – 5.00] | 5.17x / 2.66x | 2.20x / 1.48x |
 | `any_cols_bool` | sparse, rows of 31 / 8 / 64 / 256 | 8.55x / 14.2x / 4.81x / 1.71x, all 5.72x [5.69 – 5.74] | 80.2x / 183x / 61.7x / 28.1x | 37.5x / 135x / 19.2x / 6.3x |
 | `maskfill_f32` | half / 5% selected | 1.07x / 1.05x, all 1.06x [1.06 – 1.06] | 50.5x / 19.7x | 35.8x / 10.9x |
+| `isin_i32` | values 0 to 999 / whole int32 range | 1.76x / 1.17x, all 1.44x [1.44 – 1.44] | 126x / 29.9x | 108x / 5.28x |
 
 Columns as in the ARM64 table: "vs naive C" and "vs NumPy" are geometric means over the eleven sizes from 16 to 16,777,216 elements. NumPy is timed from Python, where a call costs half a microsecond or more, so its overall column is dominated by the small sizes; the column at 1,048,576 elements is the one that compares loops. The reports the rows are read from are in [`results/`](../results), one per kernel.
 
@@ -692,6 +693,19 @@ The issue counted 36,856 calls of `x[mask] = v` and 30,604 of `x[mask]` left to 
 - **From Python (x86-64),** `uv run delivery time` at a load average of 0.3 to 0.4, half the mask True. `x[mask] = 0.0` on float32: 288 ns on NumPy and 37.5 ns with the hook at 16 elements (7.7x), 4.43 µs and 194 ns at 4,096 (23x), 3.2 ms and 102 µs at 1,048,576 (31x); with 5% 7.4x, 7.2x and 9.6x. `x[mask] = 0` on int32 7.4x, 23x and 32x; on int64 7.3x, 9.9x and 18x. `x[mask]` on int32 2.5x, 13x and 15x with half selected, 2.3x, 4.3x and 9.6x with 5%. A call left to NumPy, such as an `np.float64` value, is within 1.3% of NumPy.
 - **ARM64.** The kernel ships as its C there. Nothing was measured.
 
+#### `np.isin` on int32
+
+The issue's `np.isin` calls on int32 went to NumPy, which has no kernel for them: NumPy over a naive C loop with eight test values on the Intel Core i5-14600KF (load average 0.15) is 289x at 16 elements, 2.9x at 4,096 and 2.8x at 1,048,576. `isin_i32(x, test, out, n)` is `isin_i64` for int32 elements and eight int32 test values; its spec and reference mirror `isin_i64`'s, value classes for padded sets included.
+
+- **Technique (x86-64).** 32 elements per block. When the eight test values lie within 65,533 of each other, each element x becomes the key c - x, with c the smallest test value plus 32,766 and the subtraction wrapping at 32 bits, so the test keys run from -32,767 to 32,766. Two `vpackssdw` narrow 32 keys to 16 bits. Their saturation is what makes this exact without a check of the block: a key outside the test keys' range becomes -32,768 or 32,767, which no test key is, and the subtraction is one-to-one, so equal keys mean equal values. Sixteen `vpcmpeqw` and fourteen ORs test the 32 keys, and `vpacksswb`, one `vpermd` and `vpabsb` give 32 bytes in element order. When every test value is already from -32,767 to 32,766 the subtraction is skipped (1.07x). Any other set is compared at 32 bits, eight `vpcmpeqd` per eight elements, the compiler's loop by hand. The leftover is one more block that overlaps the one before; 8 to 31 elements go eight at a time at 32 bits.
+- **What `isin_i64` did not have.** Its x86-64 narrow path needs every test value from 0 to 32,767 and a check of each block, because 64-bit to 16-bit narrowing is three packs without a saturation it could use. At 32 bits one saturating pack does it, and the wrapping subtraction moves the window to wherever the test values are, the second window its log left untried.
+- **Figures (x86-64),** `uv run judge run isin_i32 --record --unlocked` at a load average of 0.4: 1.44x [1.44 – 1.44] over the naive C across the judge's sizes and both distributions, 61.4x over NumPy. Test values from 0 to 999: 1.76x, 2.2x from 1,024 to 262,144 elements, 2.05x at 1,048,576, 1.1x to 1.3x from 4,194,304, where memory holds both. Values over the whole int32 range: 1.16x at every size. With the output 16 bytes behind the input, no cost (1.04x).
+- **What limits it.** The vector ports: 35 instructions per 32 elements on the narrow path on three ports, 11.7 cycles, measured at about 12; the wide path's 32 compares on two ports, 16 cycles, with 28 ORs beside them. The naive C compiled for x86-64-v3, as the Linux wheels build it, is already the 32-bit compare loop, 0.16 ns per element.
+- **Left untried.** 8-bit keys for test values within 253 of each other, `np.isin(x, [1, 2, 3])` among them: a second saturating pack would halve the compares. Neither distribution of the spec has such a set, so the judge could not have kept it.
+- **The binding.** The `isin` hook takes a contiguous int32 array of any shape, as it takes int64, with one to eight test values that are a contiguous one-dimensional int32 array or a list or tuple of Python ints that each fit int32; a shorter set is padded by repeating its first value. Left to NumPy: test values of any other type (an int64 array, which NumPy compares after promoting both sides, int16, uint32), a Python int outside int32 (it could only never match, but the list is not trimmed), bools and floats in the list, more than eight values or none, a strided or two-dimensional test array, and every spelling with `invert`, `assume_unique`, `kind` or keywords, as for int64. Calls count on a row of their own in `report()`.
+- **From Python (x86-64),** `uv run delivery time --only isin` at a load average of 0.7, eight test values from 0 to 999: `np.isin(x, eight_values)` on int32 takes 9.25 µs on NumPy and 118 ns with the hook at 16 elements (78x), 13.1 µs and 445 ns at 4,096 (29x), 1.59 ms and 77.6 µs at 1,048,576 (20x).
+- **ARM64.** The kernel ships as its C there. Nothing was measured.
+
 ### `np.sum` on floats, in NumPy's order
 
 From the coverage gaps of [issue 160](https://github.com/sofeikov/hotkernels/issues/160), recorded in [coverage-gaps-arm64.md](coverage-gaps-arm64.md#built-on-arm64).
@@ -811,6 +825,7 @@ The second item is about the reference and holds on every architecture. The othe
 **On x86-64:**
 
 - **`isin_i64`: fast only for test values from 0 to 32,767.** Any other set takes the 64-bit compare, which is level with the naive C (1.08x). The ARM64 kernel's second window, around the first test value, is not there.
+- **`isin_i32`: fast for test values within 65,533 of each other.** Any other set takes the 32-bit compare, 1.16x over the naive C.
 - **`searchsorted` and `interp` with 64 needles against a large array.** The judge repeats the same needles, so a branching search learns them: at 16,777,216 elements the kernels are level with NumPy with 64 needles, and 2.6x (searches) and 6.9x (`interp`) ahead with 1,000.
 - **`bincount_u8`: the gain on the judge's data is small** (1.04x to 1.2x over the naive C) and is 4x on bytes that are all equal, which the judge does not time.
 - **`clip`: none of the three ARM64 items.** One path for every pair of ordered bounds and every kind of data.
@@ -899,6 +914,7 @@ These are constraints on the binding, collected from the kernels. The last colum
 | `cumfmax_f64`, `fmax_reduce_f64` | Leave the invalid flag set after any NaN, quiet ones included, through `vmaxpd`. The binding clears MXCSR's flags after them, as NumPy's own loop leaves none set | x86-64 |
 | `fmax_reduce_f64` | One to four elements are read with one masked load (`vmaskmovpd`): fast on this processor, slow on some other x86-64 processors, and slow anywhere when a lane it masks off lies in a page that cannot be read | x86-64 |
 | `isin_i64` | The fast path needs every test value from 0 to 32,767 | x86-64 |
+| `isin_i32` | The fast path needs the eight test values within 65,533 of each other. Writes 32 bytes below the stack pointer, in the red zone, to broadcast the test keys | x86-64 |
 | `searchsorted_f64`, `searchsorted_right_f64`, `interp_f64` | Stay inside their buffers on unsorted input by construction. The output buffer is working storage during the call. One to three needles are searched one at a time; there is no padded group. Use `vgatherqpd`, which is slow on some other x86-64 processors | x86-64 |
 | `searchsorted_i64`, `searchsorted_right_i64` | As the float64 search kernels: inside their buffers on unsorted input by construction, the output buffer is working storage during the call, one to three needles are searched one at a time. Use `vpgatherqq`, which is slow on some other x86-64 processors: from the fourth step of a search on, and at every step for the last needles of a count that is not a multiple of four | x86-64 |
 | `interp_f64` | The last multiply and add are rounded separately, as NumPy's x86-64 build rounds them; results can differ from ARM64's in the last bit, as NumPy's do. No limit of 2^32 sample points | x86-64 |
