@@ -9,7 +9,7 @@ hotkernels.install()
 
 Kernels are written by coding agents iterating against a judge. The judge checks every kernel against NumPy and times it against NumPy and naive `clang -O3` C.
 
-**On an Apple M1 Pro, the 35 kernels measured there are all faster than NumPy at every size measured. At a million elements, 17 of the 22 in the first table below are more than 5x faster and the best is 76x. Thirty-three return NumPy's result bit for bit.**
+**On an Apple M1 Pro, the 38 kernels measured there are all faster than NumPy at every size measured. At a million elements, 17 of the 22 in the first table below are more than 5x faster and the best is 76x. Thirty-six return NumPy's result bit for bit.**
 
 The kernels exist for two architectures, written separately against the same specs: ARM64 NEON for Apple Silicon, and x86-64 AVX2 for Linux on processors of the x86-64-v3 level. The tables below are the ARM64 kernels on an Apple M1 Pro. The x86-64 kernels' figures on an Intel Core i5-14600KF are in [docs/kernel-findings.md](docs/kernel-findings.md#x86-64) from the judge, with the reports in [`results/`](results), and in [delivery/results/intel-r-core-tm-i5-14600kf.md](delivery/results/intel-r-core-tm-i5-14600kf.md) from Python; NumPy is a different opponent there, with vector loops of its own for several of these calls, so the two sets of figures are not expected to agree. The plan the x86-64 kernels were written to is [docs/x86-64-design.md](docs/x86-64-design.md).
 
@@ -97,6 +97,15 @@ One `uv run judge run <kernel> --record` per kernel, one after another, at a loa
 
 One `uv run judge run unique_i64 --record`, `--unlocked` because its spec is not yet on `main`, at a load average of 22: rough. The report is in [`results/`](results). From Python, where the array is first read for its range, `np.unique(x)` on two values is about 18x faster than NumPy at a million elements and 13x at 16. On x86-64, on the Intel Core i5-14600KF, the kernel is 1.3x to 1.9x over the C and 70x to 83x over NumPy at 1,048,576 elements, and 2.9x to 5.6x over the C at 4,096 ([docs/kernel-findings.md](docs/kernel-findings.md#distinct-labels-npunique-on-int64)); from Python `np.unique(x)` is about 39x faster than NumPy at a million elements there and 49x at 4,096.
 
+`sum_f32`, for `np.sum(x)` and `x.sum()` on float32, and its sibling `sum_f64` on float64, come from the calls a production pipeline left to NumPy ([issue 160](https://github.com/sofeikov/hotkernels/issues/160), [docs/coverage-gaps-arm64.md](docs/coverage-gaps-arm64.md#built-on-arm64)). They return NumPy's result bit for bit: NumPy adds in a fixed order, eight running sums over blocks of up to 128 elements with the blocks' sums added in pairs, and the kernels make the same additions in the same order, running several blocks side by side, which a compiler cannot do with NumPy's recursion. They are installed on ARM64 only, until they are measured on x86-64. On the Apple M1 Pro at 1,048,576 elements:
+
+| Call | Elements | vs NumPy | vs `clang -O3` |
+|---|---|---|---|
+| `np.sum(x)` | float32 | 3.22x | 1.64x |
+| `np.sum(x)` | float64 | 1.86x | 1.10x |
+
+One `uv run judge run <kernel> --record` per kernel, `--unlocked` because their specs are not yet on `main`, on 20 November 2026 on a quiet machine (load average 1.5 and 2.3). The report is in [`results/`](results). The clang loop is NumPy's order written in C; it is 2.8x to 3.0x behind from 1,024 to 16,384 elements, where the data fits the first-level cache. From Python, at a load average of 2.2 to 2.3, `np.sum(x)` on float32 is about 23x faster than NumPy at 16 elements, 11x at 4,096 and 3.1x at a million; on float64 about 23x, 6.5x and 1.9x ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-floats-in-numpys-order)).
+
 The stable `argsort` kernels, on the Apple M1 Pro at 1,048,576 elements. They are a radix sort where NumPy merges, written in C: a merge sort in C only ties NumPy, and the radix sort's one hot loop tied the compiler's when written by hand.
 
 | Stable argsort | Elements | vs NumPy | |
@@ -107,9 +116,18 @@ The stable `argsort` kernels, on the Apple M1 Pro at 1,048,576 elements. They ar
 
 One `uv run judge run <kernel> --unlocked` per kernel, on a machine with other work running (load average 6 to 13), so the figures are indicative. The ranges are over the data the kernel is timed on: for float64, normal data at the low end and uniform data and classifier scores at the high end; for the integers, values over the whole range of the type at the low end and values below 1,000, which are sorted in one pass, at the high end. From Python the same calls are 13x to 28x faster ([docs/sort-design.md](docs/sort-design.md#status)).
 
+`nonzero_2d_bool`, for `np.nonzero(m)` on a C-ordered boolean matrix, was added for a pipeline that calls it on matrices of 30 to 50 rows of 22 columns ([docs/coverage-gaps-arm64.md](docs/coverage-gaps-arm64.md#built-on-arm64)). It has assembly for ARM64 only, and is installed on Apple Silicon only. On the Apple M1 Pro at 1,048,576 elements:
+
+| Call | Elements | vs NumPy | vs `clang -O3` |
+|---|---|---|---|
+| `np.nonzero(m)`, rows of 22 | bool | 22.5x – 35.7x | 3.67x – 14.0x |
+| `np.nonzero(m)`, rows of 3, 32 and 1,000 | bool | 24.8x – 47.4x | 3.81x – 20.5x |
+
+One `uv run judge run nonzero_2d_bool --unlocked --record`, `--unlocked` because its spec is not yet on `main`, on a quiet machine on 20 November 2026 at a load average of 1.6. The report is in [`results/`](results). The low ends are half the elements True, the high ends 5%. From Python a matrix of 40 rows of 22 is about 5x faster than NumPy with 5% True (4.9x) and 3.3x with half, and a million elements 27x and 15x.
+
 What stands behind the numbers:
 
-- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Thirty-three of the 35 match bit for bit. The two float `cumsum` kernels regroup the additions, which is where their speed comes from, and stay within a declared error bound.
+- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Thirty-six of the 38 match bit for bit. The two float `cumsum` kernels regroup the additions, which is where their speed comes from, and stay within a declared error bound.
 - **Memory-safe by test.** Each kernel runs with its buffers placed against inaccessible pages, so reading or writing one byte outside them crashes the check.
 - **Assembly only where it wins.** A kernel keeps its assembly only if the judge finds it significantly faster than the compiled C. `astype` from `uint8` to `float32` did not pass that bar and ships as C. The three stable `argsort` kernels ship as C as well: their gain is a radix sort in place of NumPy's merge sort, and the hand-written form of their one hot loop tied the compiler's.
 
@@ -137,6 +155,7 @@ The same machine, timing one Python statement from call to result, on plain NumP
 | `x[mask]`, half selected | float64 | 2.53x | 16.3x |
 | `x[mask] = 0.0`, half selected | float64 | 5.19x | 20.7x |
 | `np.nonzero(mask)`, few selected | bool | 1.25x | 13.4x |
+| `np.nonzero(m)`, rows of 22, few True | bool | 1.27x | 26.9x |
 | `np.cumsum(x)` | int64 | 1.94x | 12.3x |
 | `x.astype(np.float32)` | uint8 | 1.90x | 5.15x |
 | `np.sum(x)` | uint8 | 29.4x | 15.6x |
@@ -162,16 +181,16 @@ At 16 elements most of the gain is NumPy's own call path being skipped, not the 
 - **A call no kernel takes costs under a nanosecond more**, or a percent or so where a hook has to read its arguments. `x[3]` takes 66.7 ns on plain NumPy and 66.6 ns with hotkernels installed; `np.clip(x, -0.5, None)` takes 1.02 µs and 1.04 µs.
 - **An unmodified program.** [examples/workload.py](examples/workload.py) uses eleven of these operations on two million elements. It runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
 - **`np.searchsorted` and `np.interp` are timed with as many needles as elements**, and `np.digitize` with 1,000 bin edges. With a sorted array of 1,000 elements and a million needles `np.searchsorted` is 27x faster on either side and `np.interp` 19x.
-- **Checked from Python.** 221,347 calls, to NumPy and to bottleneck, give the same result, exceptions and warnings with hotkernels as without, and NumPy's own test suite gives the same outcome for each of its 47,234 tests.
-- **Taken on a machine in use**, in one run that started at a load average of 2.2. The full table is in [delivery/results/apple-m1-pro.md](delivery/results/apple-m1-pro.md). The same run on an Apple M4 Max, also at a load average of 2.0, is in [delivery/results/apple-m4-max.md](delivery/results/apple-m4-max.md).
+- **Checked from Python.** 243,601 calls on the Apple M1 Pro, to NumPy and to bottleneck, give the same result, exceptions and warnings with hotkernels as without, and NumPy's own test suite gives the same outcome for each of its 47,234 tests.
+- **Taken on a machine in use**, in one run that started at a load average of 2.2. The row for `np.nonzero(m)` on a matrix is from a later `uv run delivery time --only nonzero`, on a quiet machine on 20 November 2026 at a load average of 1.6. The full table is in [delivery/results/apple-m1-pro.md](delivery/results/apple-m1-pro.md). The same run on an Apple M4 Max, also at a load average of 2.0, is in [delivery/results/apple-m4-max.md](delivery/results/apple-m4-max.md).
 
 ## What is here
 
 - **The judge** (`judge/`): checks a kernel for correctness and memory safety, and reports how fast it is. It runs on macOS ARM64 and on Linux x86-64.
 - **Fixture kernels** (`judge/fixtures/`): `argmax_f32`, `compress_f32`, `compress_scratch_f32`, `tally_u8` and `rank_u8`, used to test the judge itself, each with an ARM64 and an x86-64 version.
 - **The survey** (`survey/`): measures NumPy against naive C per operation, to decide which kernels are worth writing. It runs on macOS ARM64 and on Linux x86-64. Recorded results for both are in `survey/results/`.
-- **Kernels** (`kernels/`): 39 kernels for 23 NumPy operations and four functions of bottleneck, each with a spec, a naive C reference and, where assembly beats the C, an assembly version per architecture: 31 for ARM64 and 32 for x86-64. Each kernel's `attempts.md` lists every optimisation tried, kept or not.
-- **The package** (`hotkernels/`): what a user installs. A C extension points NumPy at the kernels, and `install()`, `uninstall()`, `enabled()` and `report()` control it. `install()` installs the 33 kernels that return NumPy's result bit for bit, and the 4 that return bottleneck's for its `nanmean`, `nanstd`, `nanmin` and `nanmax` once bottleneck is imported (pandas and empyrical call them instead of NumPy's); `install(inexact=True)` the other two.
+- **Kernels** (`kernels/`): 42 kernels for 23 NumPy operations and four functions of bottleneck, each with a spec, a naive C reference and, where assembly beats the C, an assembly version per architecture: 34 for ARM64 and 32 for x86-64. Each kernel's `attempts.md` lists every optimisation tried, kept or not.
+- **The package** (`hotkernels/`): what a user installs. A C extension points NumPy at the kernels, and `install()`, `uninstall()`, `enabled()` and `report()` control it. `install()` installs the 36 kernels that return NumPy's result bit for bit (on ARM64; on x86-64 three of them, the float sums and `np.nonzero` on a matrix, are not yet built), and the 4 that return bottleneck's for its `nanmean`, `nanstd`, `nanmin` and `nanmax` once bottleneck is imported (pandas and empyrical call them instead of NumPy's); `install(inexact=True)` the other two.
 - **The delivery tool** (`delivery/`): tests and times the package from Python. Recorded timings are in `delivery/results/`.
 - **An example** (`examples/workload.py`): a NumPy program written without hotkernels in mind, used to show the effect of the one line.
 - **Release tooling** (`release/`, `release-notes/`): the notes each pull request leaves, and the commands that turn them into a release. Publishing to PyPI runs in [`.github/workflows/release.yml`](.github/workflows/release.yml).
@@ -252,6 +271,8 @@ Pages are Markdown under `docsite/pages/` and are listed in `docsite/site.toml`.
 ## Using the self-hosted runners
 
 The macOS jobs of a pull request run on the maintainer's own Mac when it is online, and on GitHub's runners otherwise. GitHub's macOS runners are often not assigned for a quarter of an hour, after which a job fails. A pull request from a fork and a tag always use GitHub's runners, so a published wheel never comes from that Mac.
+
+The same Mac runs `.github/workflows/nightly.yml` at 02:00 UTC: it times the workloads and pushes the run to the `perf-history` branch. A night when the Mac is offline or busy has no run.
 
 To set the runners up on a Mac with Apple Silicon:
 

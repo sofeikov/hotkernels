@@ -215,6 +215,8 @@ VARIANTS: tuple[Variant, ...] = (
     Variant("zero_d", lambda a: np.array(a[0]), plain=False, dims=0, min_n=1),
 )
 CONTIGUOUS = VARIANTS[0]
+# The variant whose elements are not aligned to their size.
+_MISALIGNED = next(variant for variant in VARIANTS if variant.name == "misaligned")
 
 
 def spec(kernel: str) -> Kernel:
@@ -1962,8 +1964,173 @@ def maskfill_cases() -> Iterator[Case]:
                    partial(function, 1.5), None)
 
 
+# The kernel that takes np.nonzero on a C-ordered boolean matrix: on ARM64
+# only, and elsewhere such a call stays with NumPy.
+NONZERO_2D = "nonzero_2d_bool" if ON_ARM64 else None
+# Shapes of the boolean matrices of the nonzero cases: no rows or no
+# columns, one of either, either side of the 8 and 16 bytes the kernel reads
+# at a time, the workload's matrices of 30 to 50 rows of 22 columns, and
+# wide rows.
+NONZERO_2D_SHAPES = ((0, 0), (0, 1), (1, 0), (0, 22), (40, 0), (1, 1), (1, 22), (22, 1), (2, 3), (3, 2),
+                     (7, 8), (8, 7), (5, 15), (9, 17), (16, 16), (30, 22), (40, 22), (50, 22), (33, 64),
+                     (12, 65), (64, 100), (20, 1000))
+# Shape of the matrices of the layout cases: more than 64 elements, so that
+# the kernel would take its fast paths, and not square, so that a transposed
+# or Fortran-ordered copy is laid out differently from the plain one.
+NONZERO_2D_LAYOUT_SHAPE = (40, 22)
+# Shape of the three-dimensional mask, which NumPy keeps.
+NONZERO_3D_SHAPE = (4, 10, 22)
+
+
+def _nonzero_structure(result: tuple) -> tuple:
+    """Describe how NumPy's nonzero result for a matrix is laid out in memory.
+
+    For a matrix NumPy fills one (count, 2) int64 array of (row, column)
+    pairs and returns two views of it with a stride of 16 bytes. A caller can
+    observe that, and `describe` does not compare strides or bases, so a case
+    returns this beside the result.
+
+    Args:
+        result: The tuple of index arrays.
+
+    Returns:
+        Each array's strides, whether it owns its data and whether it is
+        aligned; whether they share one base, and that base's shape, strides
+        and flags; and how far in bytes each array starts from the first.
+    """
+    first, *rest = result
+    base = first.base
+    starts = [array.__array_interface__["data"][0] for array in result]
+    return (tuple((array.strides, array.flags.owndata, array.flags.aligned) for array in result),
+            all(array.base is base for array in rest),
+            None if base is None else (base.shape, base.strides, base.flags.owndata, base.flags.c_contiguous),
+            tuple(start - starts[0] for start in starts))
+
+
+def _with_structure(function: Callable[[np.ndarray], tuple], mask: np.ndarray) -> tuple:
+    """Call a nonzero spelling and return its result beside its layout in memory.
+
+    Args:
+        function: Takes the mask and returns NumPy's tuple of index arrays.
+        mask: The mask.
+
+    Returns:
+        (the result, `_nonzero_structure` of it).
+    """
+    result = function(mask)
+    return result, _nonzero_structure(result)
+
+
+def _with_strides(function: Callable[[np.ndarray], np.ndarray], mask: np.ndarray) -> tuple:
+    """Call a spelling that returns np.argwhere's (count, 2) array, and return it with its strides.
+
+    Args:
+        function: Takes the mask and returns an array.
+        mask: The mask.
+
+    Returns:
+        (the result, its strides, whether it owns its data).
+    """
+    result = function(mask)
+    return result, result.strides, result.flags.owndata
+
+
+def _matrix(shape: tuple[int, ...], cls: str, position: int = 0, dtype: str = "bool") -> np.ndarray:
+    """Build a C-ordered array of several dimensions from a judge value class.
+
+    Args:
+        shape: The array's shape.
+        cls: Value class name, such as "sparse".
+        position: Index of the interesting element in C order, for positional classes.
+        dtype: Element type as a spec name.
+
+    Returns:
+        A new C-contiguous array of that shape.
+    """
+    return values(dtype, math.prod(shape), cls, position, arg="mask").reshape(shape)
+
+
+def _bad_matrix(shape: tuple[int, int], byte: int) -> np.ndarray:
+    """Return a boolean matrix whose True elements are stored as `byte`, not 1.
+
+    Args:
+        shape: (rows, columns).
+        byte: The byte that stands for True, other than 1.
+
+    Returns:
+        A new C-contiguous boolean array of that shape.
+    """
+    return _bad_mask(math.prod(shape), byte).reshape(shape)
+
+
+# The ways of writing np.nonzero on a matrix, each returning what a caller can
+# observe: (text, call). The first three reach the binding's nonzero; the
+# last two reach it through np.nonzero in NumPy's Python code.
+NONZERO_2D_SPELLINGS = (
+    ("mask.nonzero()", partial(_with_structure, lambda m: m.nonzero())),
+    ("np.nonzero(mask)", partial(_with_structure, np.nonzero)),
+    ("np.where(mask)", partial(_with_structure, np.where)),
+    ("np.argwhere(mask)", partial(_with_strides, np.argwhere)),
+    ("np.transpose(np.nonzero(mask))", partial(_with_strides, lambda m: np.transpose(np.nonzero(m)))),
+)
+
+
+def _nonzero_2d_layouts() -> Iterator[tuple[str, Callable[[], object], str | None]]:
+    """Yield the masks of two or more dimensions to try every spelling on.
+
+    Yields:
+        (name, function that builds the mask, the kernel expected to take
+        it). A plain C-ordered boolean matrix goes to the kernel; any other
+        layout, a subclass, another element type or another number of
+        dimensions stays with NumPy.
+    """
+    shape = NONZERO_2D_LAYOUT_SHAPE
+    plain = partial(_matrix, shape, judge_cases.RANDOM)
+    yield "contiguous", plain, NONZERO_2D
+    yield "readonly", lambda: _readonly(plain()), NONZERO_2D
+    yield "fortran", lambda: np.asfortranarray(plain()), None
+    yield "transposed", lambda: plain().T, None
+    yield "every second column", lambda: _matrix((shape[0], 2 * shape[1]), judge_cases.RANDOM)[:, ::2], None
+    yield "every second row", lambda: _matrix((2 * shape[0], shape[1]), judge_cases.RANDOM)[::2], None
+    yield "subclass", lambda: plain().view(_Subclass), None
+    yield "three dimensions", partial(_matrix, NONZERO_3D_SHAPE, judge_cases.RANDOM), None
+    for dtype in ("u8", "i64", "f64"):
+        yield dtype, partial(_matrix, shape, judge_cases.RANDOM, dtype=dtype), None
+
+
+def nonzero_2d_cases() -> Iterator[Case]:
+    """Yield the cases of `nonzero` on boolean arrays of two or more dimensions.
+
+    Every spelling is compared on its result and on how the result sits in
+    memory: for np.nonzero, two views of one array of pairs, as NumPy builds
+    it.
+
+    Yields:
+        The cases.
+    """
+    plain, positional = judge_cases.classes("bool")
+    for shape in NONZERO_2D_SHAPES:
+        n = math.prod(shape)
+        for text, call in NONZERO_2D_SPELLINGS:
+            for cls in plain:
+                yield Case("nonzero", f"{text} matrix {shape} mask={cls}",
+                           partial(_made, partial(_matrix, shape, cls)), call, NONZERO_2D)
+            if not n:
+                continue
+            for cls in positional:
+                for position in sorted({0, n // 2, n - 1}):
+                    yield Case("nonzero", f"{text} matrix {shape} mask={cls}@{position}",
+                               partial(_made, partial(_matrix, shape, cls, position)), call, NONZERO_2D)
+            for byte in BAD_MASK_BYTES:
+                yield Case("nonzero", f"{text} matrix {shape} mask bytes are {byte}",
+                           partial(_made, partial(_bad_matrix, shape, byte)), call, None)
+    for name, build, expect in _nonzero_2d_layouts():
+        for text, call in NONZERO_2D_SPELLINGS:
+            yield Case("nonzero", f"{text} matrix layout={name}", partial(_made, build), call, expect)
+
+
 def nonzero_cases() -> Iterator[Case]:
-    """Yield the cases of `nonzero` on booleans."""
+    """Yield the cases of `nonzero` on booleans, of one dimension and of two."""
     spellings = (
         Spelling("mask.nonzero()", lambda m: m.nonzero(), any_shape=False),
         Spelling("np.nonzero(mask)", np.nonzero, any_shape=False, normalises=True),
@@ -1973,15 +2140,20 @@ def nonzero_cases() -> Iterator[Case]:
         Spelling("np.where(mask, 1.0, 0.0)", lambda m: np.where(m, 1.0, 0.0), NEVER),
         Spelling("np.where(mask, mask, mask)", lambda m: np.where(m, m, m), NEVER),
     )
-    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
-    yield from unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings)
     # The spellings that would take the kernel for a clean mask.
     taking = (spellings[0], spellings[1], spellings[4])
+    # Labels of the cases in which one of them meets a C-ordered boolean
+    # matrix, which goes to a kernel of its own.
+    matrix_labels = {f"{spelling.text} bool n={n} layout=rows" for spelling in taking for n in LAYOUT_SIZES}
+    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
+    for case in unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings):
+        yield replace(case, expect=NONZERO_2D) if case.label in matrix_labels else case
     for n in LAYOUT_SIZES:
         for byte in BAD_MASK_BYTES:
             for spelling in taking:
                 yield Case("nonzero", f"{spelling.text} n={n} mask bytes are {byte}",
                            lambda n=n, byte=byte: (_bad_mask(n, byte),), spelling.call, None)
+    yield from nonzero_2d_cases()
 
 
 def cumsum_cases(inexact: bool) -> Iterator[Case]:
@@ -2050,20 +2222,132 @@ def _late_bad_mask(n: int, byte: int) -> np.ndarray:
     return raw.view(np.bool_)
 
 
+# The spellings of sum that no kernel takes, whatever the array: an axis given
+# at all, even None or 0, and every other argument.
+_SUM_LEFT_SPELLINGS = (
+    Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
+    Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
+    Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
+    Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
+    Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
+    Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
+    Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+    Spelling("x.sum(0)", lambda x: x.sum(0), NEVER),
+    Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
+)
+# The float sum kernels, by element type: on ARM64 only, until measured on
+# x86-64 (docs/coverage-gaps-arm64.md).
+SUM_FLOAT_KERNELS = {"f32": "sum_f32", "f64": "sum_f64"} if ON_ARM64 else {}
+# Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
+# do not give it: leaves of different lengths, a node of 33 or 65 to 67
+# vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a
+# tree of several levels, and long arrays that are not a power of two.
+SUM_TREE_SIZES = (130, 136, 263, 264, 271, 520, 527, 528, 536, 544, 1032, 1039, 1088, 2056, 4104,
+                  8200, 65544, 65551, 1048583)
+# Element counts of the arrays of negative zeros, whose sum is +0.0.
+SUM_NEGATIVE_ZERO_SIZES = (1, 7, 8, 9, 16, 129, 1024, 4096)
+# Element count of a misaligned array that NumPy sums in more than two blocks
+# of its buffer size (8,192 elements), each summed in NumPy's pairwise order
+# and the blocks' sums added in turn.
+SUM_BUFFERED_N = 20000
+# Element count of the arrays whose sum overflows, and the share of the
+# largest finite value each of their elements is.
+SUM_OVERFLOW_N = 3
+SUM_OVERFLOW_SHARE = 0.75
+
+
+def _sum_expect(kernel: str, maker: Callable[[], np.ndarray]) -> str | None:
+    """Say whether a float sum kernel takes an array: when its sum is finite.
+
+    The binding passes a call on to NumPy when the kernel's sum is a NaN or an
+    infinity, so that NumPy gives its own NaN and its own warning.
+
+    Args:
+        kernel: The kernel for the array's element type.
+        maker: Builds the array.
+
+    Returns:
+        `kernel` when NumPy's sum of the array is finite, otherwise None.
+    """
+    with np.errstate(all="ignore"):
+        finite = bool(np.isfinite(np.add.reduce(maker())))
+    return kernel if finite else None
+
+
+def _negative_zeros(dtype: str, n: int) -> np.ndarray:
+    """Return `n` negative zeros of a float type."""
+    return np.full(n, -0.0, np_dtype(dtype))
+
+
+def _sum_overflowing(dtype: str) -> np.ndarray:
+    """Return SUM_OVERFLOW_N finite values of a float type whose sum overflows."""
+    return np.full(SUM_OVERFLOW_N, np.finfo(np_dtype(dtype)).max * SUM_OVERFLOW_SHARE, np_dtype(dtype))
+
+
+def _sum_out(x: object) -> object:
+    """Return `np.sum(x, out=o)` for a zero-dimensional `o` of the array's type."""
+    return np.sum(x, out=np.empty((), np.asarray(x).dtype))
+
+
+def _float_sum_cases() -> Iterator[Case]:
+    """Yield the cases of `sum` on float32 and float64.
+
+    A kernel takes `np.sum(x)` and `x.sum()` on a contiguous one-dimensional
+    array with no other argument, and only when the sum is finite; a matrix,
+    a strided array and every other spelling go to NumPy. On x86-64 no kernel
+    takes them.
+    """
+    spellings = (
+        Spelling("np.sum(x)", np.sum, any_shape=False, sweep_values=False),
+        Spelling("x.sum()", lambda x: x.sum(), any_shape=False, sweep_values=False),
+        *_SUM_LEFT_SPELLINGS,
+        Spelling("np.sum(x, out=o)", _sum_out, NEVER),
+    )
+    neighbours = tuple(dtype for dtype in ("f32", "f64") if dtype not in SUM_FLOAT_KERNELS)
+    for case in unary_cases("sum", SUM_FLOAT_KERNELS, neighbours, spellings):
+        # NumPy sums an array whose elements are not aligned to their size in
+        # blocks of its buffer size, another order, so the binding leaves it
+        # to NumPy.
+        if f"layout={_MISALIGNED.name}" in case.label:
+            case = replace(case, expect=None)
+        yield case
+    for dtype, kernel in SUM_FLOAT_KERNELS.items():
+        for spelling in spellings[:2]:
+            # Every value class: those whose sum is not finite go to NumPy.
+            for n, cls, label, maker in value_arrays(dtype):
+                yield Case("sum", f"{spelling.text} {dtype} {label}", partial(_made, maker), spelling.call,
+                           _sum_expect(kernel, maker))
+            for n in SUM_TREE_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=random",
+                           partial(_made, partial(values, dtype, n)), spelling.call, kernel)
+            for n in SUM_NEGATIVE_ZERO_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=all negative zeros",
+                           partial(_made, partial(_negative_zeros, dtype, n)), spelling.call, kernel)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_BUFFERED_N} layout=misaligned",
+                       partial(_built, dtype, SUM_BUFFERED_N, _MISALIGNED), spelling.call, None)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_OVERFLOW_N} x=overflows",
+                       partial(_made, partial(_sum_overflowing, dtype)), spelling.call, None)
+            for n in FEW_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=signalling and negative NaNs",
+                           partial(_made, partial(unusual_nans, dtype, n)), spelling.call, None)
+                # NumPy clears the four flags it reports and leaves the
+                # inexact flag as its additions leave it: set for random
+                # values, as it was before the call for equal ones.
+                for cls in (judge_cases.RANDOM, "equal"):
+                    yield Case("sum", f"{spelling.text} {dtype} n={n} x={cls} flags after",
+                               partial(_made, partial(values, dtype, n, cls)),
+                               partial(_float_flags_after, spelling.call), kernel)
+
+
 def sum_cases() -> Iterator[Case]:
-    """Yield the cases of `sum` on uint8 and on booleans, which the same kernel serves."""
+    """Yield the cases of `sum`: on uint8 and on booleans, which one kernel serves, and on floats."""
     spellings = (
         Spelling("np.sum(x)", np.sum),
         Spelling("x.sum()", lambda x: x.sum()),
-        Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
-        Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
-        Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
-        Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
-        Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
-        Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
-        Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+        *_SUM_LEFT_SPELLINGS,
     )
-    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16", "f64"), spellings)
+    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16"), spellings)
+    yield from _float_sum_cases()
     # A mask holding a byte other than 0 or 1 counts once per element in NumPy.
     for n, byte, spelling in itertools.product(LAYOUT_SIZES, BAD_MASK_BYTES, spellings[:2]):
         yield Case("sum", f"{spelling.text} bool n={n} mask bytes are {byte}",
@@ -3664,6 +3948,34 @@ def _invalid_flag_after(call: Callable[..., object], *arguments: object) -> tupl
     _LIBM.feclearexcept(_FE_INVALID)
     result = call(*arguments)
     return result, bool(_LIBM.fetestexcept(_FE_INVALID))
+
+
+# The inexact flag of fenv.h, and all of its flags: their values differ
+# between ARM64 macOS and x86-64 Linux.
+_FE_INEXACT = 0x10 if ON_ARM64 else 0x20
+_FE_ALL_EXCEPT = 0x9F if ON_ARM64 else 0x3D
+
+
+def _float_flags_after(call: Callable[..., object], *arguments: object) -> tuple:
+    """Make a call with the invalid and inexact flags raised, and return the flags it left.
+
+    NumPy's float sum clears the flags it reports (invalid, divide by zero,
+    overflow, underflow) and leaves the inexact flag, which its additions
+    set when one of them rounds. A kernel must leave the same flags.
+
+    Args:
+        call: Makes the call on the arguments.
+        arguments: The call's arguments.
+
+    Returns:
+        (the call's result, every flag of fenv.h set afterwards).
+    """
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    _LIBM.feraiseexcept(_FE_INVALID | _FE_INEXACT)
+    result = call(*arguments)
+    flags = _LIBM.fetestexcept(_FE_ALL_EXCEPT)
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    return result, flags
 
 
 # ---------------------------------------------------------------- reduceat

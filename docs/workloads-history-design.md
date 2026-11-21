@@ -194,7 +194,7 @@ No release note: nothing under `hotkernels/` changes.
 
 ## What changed in the building
 
-Steps 2 and 4 are built; the page came before the week of nightly runs, from runs recorded by hand. Step 3, `nightly.yml`, is not built yet.
+Steps 2, 3 and 4 are built. The page came before the week of nightly runs, from a run recorded by hand.
 
 - **`--size` takes a list**, `--size M,L`, instead of a new `--sizes`.
 - **Each row records `requires`**, the libraries the workload needs, so a break is decided per workload without importing the workloads.
@@ -203,3 +203,7 @@ Steps 2 and 4 are built; the page came before the week of nightly runs, from run
 - **Where the site reads the runs:** `origin/perf-history`, else a local `perf-history` branch, else no runs and a warning. `pages.yml` warns instead of failing while the branch does not exist.
 - **The night's table sorts by its own column buttons.** No table on the site sorted before, so there was nothing to follow.
 - **The site's footer** said every figure came from one Apple M1 Pro. It now says each figure names its machine.
+- **`nightly.yml` builds before it waits.** `uv sync` builds hotkernels and the libraries first, so the build's own load is over before the wait for a quiet minute starts.
+- **A run whose results differ is kept.** The workflow pushes its file and then fails, and the site is rebuilt either way.
+- **A push that races a manual run merges and retries**, up to three times. Runs never share a file, so the merge cannot conflict.
+- **`docs/release-design.md` is not changed.** Its "What runs on GitHub" describes `release.yml` alone; `nightly.yml` is described here and in its own comments.

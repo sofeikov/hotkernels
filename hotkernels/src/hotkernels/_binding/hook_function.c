@@ -387,10 +387,63 @@ static HK_NOINLINE PyObject *try_sum_bool(PyArrayObject *mask) {
     return result;
 }
 
+#if defined(__aarch64__)
+// The sum of a contiguous, aligned, one-dimensional float32 array, as the
+// np.float32 NumPy returns: the sum_f32 kernel, which makes NumPy's additions in
+// NumPy's order (its pairwise summation) and so gives its bits. An empty
+// array sums to +0.0, as in NumPy. A sum that is not finite is NumPy's to
+// give, with its warning and the bits of its NaN, and the call is passed on.
+// The flags are left as NumPy leaves them (hk_clear_reported_float_flags).
+// ARM64 only: on x86-64 the call stays with NumPy until the kernel is
+// measured there (docs/coverage-gaps-arm64.md).
+static HK_NOINLINE PyObject *try_sum_f32(PyArrayObject *a) {
+    const npy_intp n = PyArray_SIZE(a);
+    float total;
+    {
+        HK_BEGIN_NOGIL(n)
+        total = sum_f32(PyArray_DATA(a), (size_t)n);
+        HK_END_NOGIL
+    }
+    hk_clear_reported_float_flags();
+    if (!isfinite(total)) return NULL;
+    PyObject *result = hk_scalar(NPY_FLOAT, &total);
+    if (result != NULL) hk_take(HK_SUM_F32);
+    return result;
+}
+
+// The same for float64, as the np.float64 NumPy returns: the sum_f64 kernel.
+static HK_NOINLINE PyObject *try_sum_f64(PyArrayObject *a) {
+    const npy_intp n = PyArray_SIZE(a);
+    double total;
+    {
+        HK_BEGIN_NOGIL(n)
+        total = sum_f64(PyArray_DATA(a), (size_t)n);
+        HK_END_NOGIL
+    }
+    hk_clear_reported_float_flags();
+    if (!isfinite(total)) return NULL;
+    PyObject *result = hk_scalar(NPY_DOUBLE, &total);
+    if (result != NULL) hk_take(HK_SUM_F64);
+    return result;
+}
+#endif
+
 // The sum of a contiguous uint8 array, as the np.uint64 NumPy returns, or of
-// a contiguous boolean array, as the np.intp it returns for that.
+// a contiguous boolean array, as the np.intp it returns for that, and on
+// ARM64 of a contiguous, aligned, one-dimensional float32 or float64 array.
 PyObject *hk_try_sum(PyObject *array) {
     if (hk_is_flat(array, NPY_BOOL)) return try_sum_bool((PyArrayObject *)array);
+#if defined(__aarch64__)
+    // An array whose elements are not aligned to their size is copied by
+    // NumPy in blocks of its buffer size, 8,192 elements, whose sums it adds
+    // one after another: another order. It stays with NumPy.
+    if (hk_is_flat_1d(array, NPY_DOUBLE) && PyArray_ISALIGNED((PyArrayObject *)array)) {
+        return try_sum_f64((PyArrayObject *)array);
+    }
+    if (hk_is_flat_1d(array, NPY_FLOAT) && PyArray_ISALIGNED((PyArrayObject *)array)) {
+        return try_sum_f32((PyArrayObject *)array);
+    }
+#endif
     if (!hk_is_flat(array, NPY_UINT8)) return NULL;
     PyArrayObject *a = (PyArrayObject *)array;
     const npy_intp n = PyArray_SIZE(a);
@@ -1329,11 +1382,12 @@ static void prepare_clip(PyObject *object) {
 //
 // np.where has two operations behind one name. With the condition alone it
 // gives the positions that are True, as np.nonzero does: the nonzero_bool
-// kernel, counted under nonzero. With `x` and `y` it selects, element by
-// element, from `x` where the condition is True and from `y` where it is
-// not: the where_f64 kernel, counted under where. NumPy accepts no keywords
-// for either, and a call with keywords or another number of arguments is
-// passed on without being counted.
+// kernel, and on ARM64 for a matrix the nonzero_2d_bool kernel, counted under
+// nonzero. With `x` and `y` it selects, element by element, from `x` where
+// the condition is True and from `y` where it is not: the where_f64 kernel,
+// counted under where. NumPy accepts no keywords for either, and a call with
+// keywords or another number of arguments is passed on without being
+// counted.
 //
 // The selection is taken only when it needs no broadcasting and no type
 // conversion: the condition and the arrays have one shape, and the arrays
@@ -1432,8 +1486,8 @@ static HK_NOINLINE PyObject *try_where(PyObject *condition, PyObject *x, PyObjec
 }
 
 // np.where(condition, x, y), and np.where(condition) with nothing but a
-// one-dimensional contiguous boolean array: the positions that are True, as
-// np.nonzero gives them. np.where calls NumPy's C code for nonzero directly,
+// contiguous boolean array of one dimension (or, on ARM64, two): the
+// positions that are True, as np.nonzero gives them. np.where calls NumPy's C code for nonzero directly,
 // so the method hook does not see that call.
 static PyObject *call_where(HK_VECTORCALL_PARAMETERS) {
     const Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
