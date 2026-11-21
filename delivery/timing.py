@@ -544,9 +544,6 @@ INPLACE_MIN_N = 131072
 # The float64 sum kernel takes its calls on ARM64 only, until it is written
 # for x86-64 (docs/coverage-gaps-arm64.md).
 SUM_F64 = "sum_f64" if ON_ARM64 else None
-# The kernel of np.nonzero on a boolean matrix, which is installed on ARM64
-# only; elsewhere those statements are timed as calls left to NumPy.
-NONZERO_2D = "nonzero_2d_bool" if ON_ARM64 else None
 SUBTRACT_IN_PLACE = "subtract_inplace_f64" if ON_ARM64 else None
 ADD_IN_PLACE = "add_inplace_f64" if ON_ARM64 else None
 
@@ -599,15 +596,15 @@ TAKEN: tuple[Timed, ...] = (
     Timed("nonzero", "np.nonzero(mask)", "bool, few selected", partial(_mask, FEW), np.nonzero, "nonzero_bool"),
     Timed("nonzero", "np.where(mask)", "bool, half selected", partial(_mask, HALF), np.where, "nonzero_bool"),
     *(Timed("nonzero", "np.nonzero(m)", f"bool, {ANY_COLUMNS} columns, {name}", partial(_matrix, share), np.nonzero,
-            NONZERO_2D, sizes=sizes)
+            "nonzero_2d_bool", sizes=sizes)
       for sizes in ((NONZERO_ROWS * ANY_COLUMNS,), None)
       for name, share in (("few True", FEW), ("half True", HALF))),
     Timed("nonzero", "m.nonzero()", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW),
-          lambda m: m.nonzero(), NONZERO_2D),
+          lambda m: m.nonzero(), "nonzero_2d_bool"),
     Timed("nonzero", "np.where(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.where,
-          NONZERO_2D),
+          "nonzero_2d_bool"),
     Timed("nonzero", "np.argwhere(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.argwhere,
-          NONZERO_2D),
+          "nonzero_2d_bool"),
     Timed("where", "np.where(mask, a, b)", "float64, half true", partial(_selected, np.float64, HALF), np.where, "where_f64"),
     Timed("where", "np.where(mask, a, np.nan)", "float64, mostly true", partial(_selected, np.float64, MOSTLY),
           lambda m, a, b: np.where(m, a, np.nan), "where_f64"),

@@ -28,9 +28,9 @@ const HOOKS = {
 
 const OTHER = { label: "another type", kernel: null };
 
-// The layout nonzero takes (hook_method.c hk_try_nonzero): one dimension, or on
-// ARM64 a C-ordered matrix, which goes to nonzero_2d_bool.
-const NONZERO_LAYOUT = "mask is contiguous and one-dimensional, or on Apple Silicon a C-ordered matrix (served by nonzero_2d_bool)";
+// The layout nonzero takes (hook_method.c hk_try_nonzero): one dimension, or a
+// C-ordered matrix, which goes to nonzero_2d_bool.
+const NONZERO_LAYOUT = "mask is contiguous and one-dimensional, or a C-ordered matrix (served by nonzero_2d_bool)";
 
 // One entry per statement.
 //   code      the statement as the reader writes it

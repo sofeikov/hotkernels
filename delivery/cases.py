@@ -1964,9 +1964,8 @@ def maskfill_cases() -> Iterator[Case]:
                    partial(function, 1.5), None)
 
 
-# The kernel that takes np.nonzero on a C-ordered boolean matrix: on ARM64
-# only, and elsewhere such a call stays with NumPy.
-NONZERO_2D = "nonzero_2d_bool" if ON_ARM64 else None
+# The kernel that takes np.nonzero on a C-ordered boolean matrix.
+NONZERO_2D = "nonzero_2d_bool"
 # Shapes of the boolean matrices of the nonzero cases: no rows or no
 # columns, one of either, either side of the 8 and 16 bytes the kernel reads
 # at a time, the workload's matrices of 30 to 50 rows of 22 columns, and

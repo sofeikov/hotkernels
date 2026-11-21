@@ -1036,7 +1036,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.copyto", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _copyto)),)),
     Hook("function.where", FUNCTION, (
         Probe("nonzero_bool", partial(_nonzero, np.where)),
-        *((Probe("nonzero_2d_bool", partial(_nonzero_2d, np.where)),) if ON_ARM64 else ()),
+        Probe("nonzero_2d_bool", partial(_nonzero_2d, np.where)),
         Probe("where_f64", _where),
     )),
     Hook("function.clip", FUNCTION, (
@@ -1060,7 +1060,7 @@ HOOKS: tuple[Hook, ...] = (
     )),
     Hook("method.nonzero", METHOD, (
         Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),
-        *((Probe("nonzero_2d_bool", partial(_nonzero_2d, _nonzero_method)),) if ON_ARM64 else ()),
+        Probe("nonzero_2d_bool", partial(_nonzero_2d, _nonzero_method)),
     )),
     Hook("method.cumsum", METHOD, (
         Probe("cumsum_i64", partial(_cumsum, np.int64)),
@@ -1152,9 +1152,8 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("compress_f64", "x[mask]", "float64", "compress", COMPRESS_HOOKS),
     KernelInfo("maskfill_f64", "x[mask] = v", "float64", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("nonzero_bool", "np.nonzero", "bool", "nonzero", ("method.nonzero", "function.where")),
-    # The same call on a C-ordered matrix, on ARM64.
-    KernelInfo("nonzero_2d_bool", "np.nonzero, matrix", "bool", "nonzero", ("method.nonzero", "function.where"),
-               unbound_reason=None if ON_ARM64 else COVERAGE_GAPS_ARM64_ONLY),
+    # The same call on a C-ordered matrix.
+    KernelInfo("nonzero_2d_bool", "np.nonzero, matrix", "bool", "nonzero", ("method.nonzero", "function.where")),
     KernelInfo("cumsum_i64", "np.cumsum", "int64", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f32", "np.cumsum", "float32", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f64", "np.cumsum", "float64", "cumsum", ("method.cumsum",)),

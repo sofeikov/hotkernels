@@ -175,8 +175,6 @@ static HK_NOINLINE PyObject *try_nonzero_1d(PyArrayObject *mask) {
     return result;
 }
 
-#if defined(__aarch64__)
-
 // The dimensions of a boolean matrix whose nonzero the binding builds: a row
 // index and a column index per True element.
 #define NONZERO_2D_DIMENSIONS 2
@@ -227,8 +225,7 @@ static PyObject *pair_views(PyObject *pairs) {
 // pairs and shrinking it with realloc took 0.91 ms, since macOS moves a
 // block that large. Running it straight into an array of the final size,
 // counted first, would need the kernel to promise how far past the reported
-// pairs it writes, and its spec gives it the whole 2n. ARM64 only: on other architectures the call stays with NumPy
-// until the kernel is measured there.
+// pairs it writes, and its spec gives it the whole 2n.
 static HK_NOINLINE PyObject *try_nonzero_2d(PyArrayObject *mask) {
     const npy_intp n = PyArray_SIZE(mask);
     const size_t bytes = (size_t)n * NONZERO_2D_DIMENSIONS * sizeof(int64_t);
@@ -264,18 +261,13 @@ static HK_NOINLINE PyObject *try_nonzero_2d(PyArrayObject *mask) {
     return result;
 }
 
-#endif
-
-// mask.nonzero() for a contiguous boolean array of one dimension and, on
-// ARM64, of two. Shared with the function hook for np.where(mask). Any other
+// mask.nonzero() for a contiguous boolean array of one dimension or two. Shared with the function hook for np.where(mask). Any other
 // array is left to NumPy.
 HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
     if (!hk_is_flat(self, NPY_BOOL)) return NULL;
     PyArrayObject *mask = (PyArrayObject *)self;
     if (PyArray_NDIM(mask) == 1) return try_nonzero_1d(mask);
-#if defined(__aarch64__)
     if (PyArray_NDIM(mask) == NONZERO_2D_DIMENSIONS) return try_nonzero_2d(mask);
-#endif
     return NULL;
 }
 
