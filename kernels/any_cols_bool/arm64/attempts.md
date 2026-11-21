@@ -374,3 +374,5 @@ load average 3.3 and 2.2; ratios at 930 / 4,096 / 1,048,576 elements): 1, 2, 3, 
 / 15.4x; 129 2.72x / 3.01x / 2.15x against 2.46x / 2.83x / 1.96x; 200 2.86x / 3.67x / 2.42x against
 2.60x / 3.23x / 2.02x. The property that any non-zero byte is True, which this spec's judge does not
 feed, was checked after every attempt against a plain loop on arbitrary bytes: 1,848 cases pass.
+
+<!-- CI trial: Markdown alone. Not to be merged. -->
