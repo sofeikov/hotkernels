@@ -107,3 +107,5 @@ The queue's capacity is the number of runners: four on the maintainer's Mac, an 
 - **The script on real changes.** `ci-scope.sh` was run on the file lists of the last 120 pull requests. The 18 it calls documentation were read: each changes only design documents, READMEs, `AGENTS.md`, attempts logs, release notes or the site. The 26 that run tests but not `numpy-range` were read too: none adds or changes an ARM64 kernel, a hook or a delivery case.
 - **A long list.** 200,000 paths give the right answer, so the script holds no limit of its own below the API's.
 - **On GitHub.** The pull request that brings this design runs every job, because it changes `ci.yml`. A pull request that changes only a Markdown file, opened on top of it and then closed, shows the three test jobs skipped. A second push to the pull request while its run is going shows the first run cancelled.
+
+<!-- CI trial: a change to documentation alone. Not to be merged. -->
