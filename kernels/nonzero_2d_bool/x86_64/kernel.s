@@ -302,7 +302,9 @@
 .Lwide_cross\j:
     mov     rdx, r10
     sub     rdx, r8
-    dec     edx                         # d - 1, 0 to 6
+    dec     edx                         # d - 1, -1 to 6: d = 0 when the
+                                        # group before ended at the row's
+                                        # end, and every position is past it
     vmovd   xmm4, edx
     vpbroadcastb ymm4, xmm4
     vpcmpgtb ymm4, ymm2, ymm4           # 0xff where the position is >= d
