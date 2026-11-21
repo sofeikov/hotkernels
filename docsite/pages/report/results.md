@@ -126,7 +126,7 @@ The pattern is consistent: the judge verifies what its generated inputs exercise
 
 - **`np.digitize` with decreasing bins.** It searches the bins reversed, as a view no kernel takes.
 - **`np.interp` with `left`, `right` or `period`**, and with more than 64 sample points per query, where reading the sample points for NaN would cost more than the kernel saves.
-- **One or two element types per operation.** `np.argmax` on int32, `x[mask]` on int32, `np.sum` on float64: all go to NumPy. (NumPy is already fast on several of those.)
+- **One or two element types per operation.** `np.argmax` on int32, `x[mask]` on int32, `np.sum` on int64: all go to NumPy. (NumPy is already fast on several of those.)
 - **Plain arrays only.** Subclasses reaching the function, method and indexing hooks go to NumPy.
 - **`np.compress` with `axis` or `out`.** The compress kernels write past the elements they keep, so they never run on a buffer the caller owns.
 - **In-place `clip`.** `np.clip(x, 0, 1, out=x)` goes to NumPy.

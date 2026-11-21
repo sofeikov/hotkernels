@@ -193,7 +193,7 @@ These kernels were first written with one length for the sorted array and the ne
 :::
 
 ::: note A float sum in NumPy's order
-`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It has assembly for both architectures, written separately. On an Intel Core i5-14600KF it is 5.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million.
+`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It has assembly for both architectures, written separately. On an Intel Core i5-14600KF it is 5.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million. `sum_f64` does the same for float64, a block's eight running sums in two registers: on the same machine 3.8x over its C at 4,096 elements, and `x.sum()` from Python 5.7x faster than NumPy there and 1.6x at a million.
 :::
 
 ::: note `nonzero` on a matrix

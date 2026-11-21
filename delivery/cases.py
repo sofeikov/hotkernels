@@ -2234,9 +2234,8 @@ _SUM_LEFT_SPELLINGS = (
     Spelling("x.sum(0)", lambda x: x.sum(0), NEVER),
     Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
 )
-# The float sum kernels, by element type: float64's on ARM64 only, until it
-# is written for x86-64 (docs/coverage-gaps-arm64.md).
-SUM_FLOAT_KERNELS = {"f32": "sum_f32", **({"f64": "sum_f64"} if ON_ARM64 else {})}
+# The float sum kernels, by element type.
+SUM_FLOAT_KERNELS = {"f32": "sum_f32", "f64": "sum_f64"}
 # Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
 # do not give it: leaves of different lengths, a node of 33 or 65 to 67
 # vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a
