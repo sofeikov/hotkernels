@@ -46,57 +46,8 @@
 .set BLOCK, 32
 .set SMALL_BLOCK, 8
 
-.section .rodata
-.p2align 5
-.Lorder:
-    .long 0, 4, 1, 5, 2, 6, 3, 7
-
-.text
-.globl isin_i32
-.type isin_i32, @function
-.p2align 4
-isin_i32:
-    cmp     rcx, BLOCK
-    jb      .Lsmall
-    xor     r9d, r9d
-    lea     r10, [rcx - BLOCK]
-    vmovdqa ymm7, [rip + .Lorder]
-    # Smallest and largest test value, in every lane of xmm1 and xmm2.
-    vmovdqu ymm0, [rsi]
-    vextracti128 xmm3, ymm0, 1
-    vpminsd xmm1, xmm0, xmm3
-    vpmaxsd xmm2, xmm0, xmm3
-    vpshufd xmm3, xmm1, 0x4e
-    vpminsd xmm1, xmm1, xmm3
-    vpshufd xmm3, xmm1, 0xb1
-    vpminsd xmm1, xmm1, xmm3
-    vpshufd xmm3, xmm2, 0x4e
-    vpmaxsd xmm2, xmm2, xmm3
-    vpshufd xmm3, xmm2, 0xb1
-    vpmaxsd xmm2, xmm2, xmm3
-    vmovd   eax, xmm1
-    vmovd   r8d, xmm2
-    movsxd  rax, eax
-    movsxd  r8, r8d
-    sub     r8, rax                     # spread, at most 2^32 - 1
-    cmp     r8, NARROW_SPREAD
-    ja      .Lwidesetup
-    add     eax, NARROW_TOP             # c, wrapping at 32 bits
-    vmovd   xmm6, eax
-    vpbroadcastd ymm6, xmm6
-    vpsubd  ymm0, ymm6, ymm0            # test keys, -32,767 .. 32,766
-    vmovdqu [rsp - 32], ymm0            # red zone, to broadcast each key
-    vpbroadcastw ymm8, word ptr [rsp - 32]
-    vpbroadcastw ymm9, word ptr [rsp - 28]
-    vpbroadcastw ymm10, word ptr [rsp - 24]
-    vpbroadcastw ymm11, word ptr [rsp - 20]
-    vpbroadcastw ymm12, word ptr [rsp - 16]
-    vpbroadcastw ymm13, word ptr [rsp - 12]
-    vpbroadcastw ymm14, word ptr [rsp - 8]
-    vpbroadcastw ymm15, word ptr [rsp - 4]
-
-.p2align 6
-.Lnarrow:
+# One block of 32 elements from r9 on, narrow keys.
+.macro narrow_block
     vpsubd  ymm0, ymm6, [rdi + r9 * 4]
     vpsubd  ymm1, ymm6, [rdi + r9 * 4 + 32]
     vpsubd  ymm2, ymm6, [rdi + r9 * 4 + 64]
@@ -137,29 +88,10 @@ isin_i32:
     vpermd  ymm1, ymm7, ymm1            # element order
     vpabsb  ymm1, ymm1                  # 0xff to 1
     vmovdqu [rdx + r9], ymm1
-    cmp     r9, r10
-    jae     .Ldone
-    add     r9, BLOCK
-    cmp     r9, r10
-    cmova   r9, r10                     # the last block ends with the last element
-    jmp     .Lnarrow
+.endm
 
-.Ldone:
-    vzeroupper
-    ret
-
-    # ---- A wide call.
-.Lwidesetup:
-    vpbroadcastd ymm8, dword ptr [rsi + 0]
-    vpbroadcastd ymm9, dword ptr [rsi + 4]
-    vpbroadcastd ymm10, dword ptr [rsi + 8]
-    vpbroadcastd ymm11, dword ptr [rsi + 12]
-    vpbroadcastd ymm12, dword ptr [rsi + 16]
-    vpbroadcastd ymm13, dword ptr [rsi + 20]
-    vpbroadcastd ymm14, dword ptr [rsi + 24]
-    vpbroadcastd ymm15, dword ptr [rsi + 28]
-.p2align 6
-.Lwide:
+# One block of 32 elements from r9 on, 32-bit compares.
+.macro wide_block
     vmovdqu ymm4, [rdi + r9 * 4]
     vpcmpeqd ymm0, ymm4, ymm8
     vpcmpeqd ymm6, ymm4, ymm9
@@ -230,12 +162,95 @@ isin_i32:
     vpermd  ymm0, ymm7, ymm0            # element order
     vpabsb  ymm0, ymm0                  # 0xff to 1
     vmovdqu [rdx + r9], ymm0
-    cmp     r9, r10
-    jae     .Ldone
+.endm
+
+.section .rodata
+.p2align 5
+.Lorder:
+    .long 0, 4, 1, 5, 2, 6, 3, 7
+
+.text
+.globl isin_i32
+.type isin_i32, @function
+.p2align 4
+isin_i32:
+    cmp     rcx, BLOCK
+    jb      .Lsmall
+    xor     r9d, r9d
+    lea     r10, [rcx - BLOCK]
+    vmovdqa ymm7, [rip + .Lorder]
+    # Smallest and largest test value, in every lane of xmm1 and xmm2.
+    vmovdqu ymm0, [rsi]
+    vextracti128 xmm3, ymm0, 1
+    vpminsd xmm1, xmm0, xmm3
+    vpmaxsd xmm2, xmm0, xmm3
+    vpshufd xmm3, xmm1, 0x4e
+    vpminsd xmm1, xmm1, xmm3
+    vpshufd xmm3, xmm1, 0xb1
+    vpminsd xmm1, xmm1, xmm3
+    vpshufd xmm3, xmm2, 0x4e
+    vpmaxsd xmm2, xmm2, xmm3
+    vpshufd xmm3, xmm2, 0xb1
+    vpmaxsd xmm2, xmm2, xmm3
+    vmovd   eax, xmm1
+    vmovd   r8d, xmm2
+    movsxd  rax, eax
+    movsxd  r8, r8d
+    sub     r8, rax                     # spread, at most 2^32 - 1
+    cmp     r8, NARROW_SPREAD
+    ja      .Lwidesetup
+    add     eax, NARROW_TOP             # c, wrapping at 32 bits
+    vmovd   xmm6, eax
+    vpbroadcastd ymm6, xmm6
+    vpsubd  ymm0, ymm6, ymm0            # test keys, -32,767 .. 32,766
+    vmovdqu [rsp - 32], ymm0            # red zone, to broadcast each key
+    vpbroadcastw ymm8, word ptr [rsp - 32]
+    vpbroadcastw ymm9, word ptr [rsp - 28]
+    vpbroadcastw ymm10, word ptr [rsp - 24]
+    vpbroadcastw ymm11, word ptr [rsp - 20]
+    vpbroadcastw ymm12, word ptr [rsp - 16]
+    vpbroadcastw ymm13, word ptr [rsp - 12]
+    vpbroadcastw ymm14, word ptr [rsp - 8]
+    vpbroadcastw ymm15, word ptr [rsp - 4]
+
+.p2align 6
+.Lnarrow:
+    narrow_block
     add     r9, BLOCK
     cmp     r9, r10
-    cmova   r9, r10                     # the last block ends with the last element
-    jmp     .Lwide
+    jbe     .Lnarrow
+    sub     r9, BLOCK
+    cmp     r9, r10
+    je      .Ldone                      # the blocks ended with the last element
+    mov     r9, r10                     # one more block, ending with the last element
+    narrow_block
+
+.Ldone:
+    vzeroupper
+    ret
+
+    # ---- A wide call.
+.Lwidesetup:
+    vpbroadcastd ymm8, dword ptr [rsi + 0]
+    vpbroadcastd ymm9, dword ptr [rsi + 4]
+    vpbroadcastd ymm10, dword ptr [rsi + 8]
+    vpbroadcastd ymm11, dword ptr [rsi + 12]
+    vpbroadcastd ymm12, dword ptr [rsi + 16]
+    vpbroadcastd ymm13, dword ptr [rsi + 20]
+    vpbroadcastd ymm14, dword ptr [rsi + 24]
+    vpbroadcastd ymm15, dword ptr [rsi + 28]
+.p2align 6
+.Lwide:
+    wide_block
+    add     r9, BLOCK
+    cmp     r9, r10
+    jbe     .Lwide
+    sub     r9, BLOCK
+    cmp     r9, r10
+    je      .Ldone                      # the blocks ended with the last element
+    mov     r9, r10                     # one more block, ending with the last element
+    wide_block
+    jmp     .Ldone
 
     # ---- Fewer than 32 elements.
 .Lsmall:
