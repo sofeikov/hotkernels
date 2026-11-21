@@ -65,13 +65,13 @@ def test_one_graph_per_computation_with_what_triggered_it():
         x = lazy.arange(6.0)
         y = x * 2 + 1
         y.gather()
-        top = numpy.argmax(y - 3)
+        top = numpy.argsort(y - 3)
         z = lazy.asarray(numpy.zeros(6))
         late = y / 4
         z[0] = 1.0
         left = z + late
     assert [(each.trigger, each.call) for each in recording.graphs] == [
-        (graph.GATHER, "gather"), (graph.AT_ONCE, "np.argmax"), (graph.WRITE, "x[index] = v"),
+        (graph.GATHER, "gather"), (graph.AT_ONCE, "np.argsort"), (graph.WRITE, "x[index] = v"),
         (graph.PENDING, "still pending when the block ended")]
     assert [each.index for each in recording.graphs] == [0, 1, 2, 3]
     lines = [first + offset for offset in (2, 3, 6)]
@@ -120,7 +120,7 @@ def test_a_node_is_plain_data_and_says_where_it_came_from():
     with record_graphs() as recording:
         x = lazy.ones((2, 3), dtype=numpy.float32)
         total = (x * 2.0 @ weights).sum(axis=0)
-        index = numpy.argmax(total)
+        index = numpy.argsort(total)
         picked = total + index
         picked.gather()
     made, later = recording.graphs[0], recording.graphs[1]
@@ -137,7 +137,7 @@ def test_a_node_is_plain_data_and_says_where_it_came_from():
     assert made.outputs == (total_node.id,) and all(node.state == record.COMPUTED for node in made.nodes)
     read = {node.name: node for node in later.nodes if node.kind != OPERATION}
     assert (read["sum"].kind, read["sum"].graph, read["sum"].operands) == (EARLIER, 0, ())
-    assert (read["np.argmax"].kind, read["np.argmax"].category) == (INPUT, graph.AT_ONCE)
+    assert (read["np.argsort"].kind, read["np.argsort"].category) == (INPUT, graph.AT_ONCE)
     json.dumps(recording.to_dict())
 
 
@@ -301,14 +301,14 @@ def test_a_recording_keeps_what_was_computed_unasked_by_line():
     with record_graphs() as recording:
         x = lazy.asarray(numpy.arange(4.0))
         for _ in range(2):
-            numpy.argmax(x + 1)
+            numpy.argsort(x + 1)
         x[0] = float(x.sum())
     found = recording.report()
-    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 2)]
+    assert [(row.call, row.count) for row in found.eager] == [("np.argsort", 2)]
     assert [row.call for row in found.writes] == ["x[index] = v"] and [row.call for row in found.needed] == ["float()"]
     events = recording.to_dict()["events"]
-    assert events[0] == {"kind": graph.AT_ONCE, "call": "np.argmax", "where": events[0]["where"],
-                         "code": "numpy.argmax(x + 1)", "count": 2}
+    assert events[0] == {"kind": graph.AT_ONCE, "call": "np.argsort", "where": events[0]["where"],
+                         "code": "numpy.argsort(x + 1)", "count": 2}
     assert events[0]["where"].startswith("test_lazy_graphs.py:")
 
 
@@ -329,7 +329,7 @@ def test_a_page_carries_as_much_code_as_it_is_told_to():
     with record_graphs() as recording:
         x = lazy.arange(3.0)
         y = x * 2 + 1   # a line that is unmistakably this one
-        numpy.argmax(y)
+        numpy.argsort(y)
     marker = "a line that is unmistakably this one"
     whole = page_data(recording.page())
     mine = next(source for source in whole["sources"] if source["file"] == "test_lazy_graphs.py")
@@ -338,7 +338,7 @@ def test_a_page_carries_as_much_code_as_it_is_told_to():
     mine = next(source for source in lines["sources"] if source["file"] == "test_lazy_graphs.py")
     assert len(mine["text"]) == 3 and sum(marker in line for line in mine["text"].values()) == 1
     bare = recording.page(source=record.NO_SOURCE)
-    assert marker not in bare and "numpy.argmax(y)" not in bare and page_data(bare)["sources"] == []
+    assert marker not in bare and "numpy.argsort(y)" not in bare and page_data(bare)["sources"] == []
     assert page_data(bare)["graphs"][0]["nodes"][1]["where"].startswith("test_lazy_graphs.py:")
     assert record_graphs(source=record.NO_SOURCE).source == record.NO_SOURCE
 

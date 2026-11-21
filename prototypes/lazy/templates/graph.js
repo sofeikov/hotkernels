@@ -112,8 +112,13 @@
     return Math.min(high, Math.max(low, value));
   }
 
+  // A length is null when it was not known as the operation was written:
+  // how many elements a mask selects.
+  const UNKNOWN_LENGTH = '?';
+
   function shapeText(shape) {
-    return `(${shape.join(', ')}${shape.length === 1 ? ',' : ''})`;
+    const lengths = shape.map(length => (length === null ? UNKNOWN_LENGTH : length));
+    return `(${lengths.join(', ')}${shape.length === 1 ? ',' : ''})`;
   }
 
   function bytesText(bytes) {
@@ -986,7 +991,8 @@
     const model = state.model;
     panel.append(chip(node), html('h2', '', titleOf(node)));
     const elements = node.shape.reduce((total, length) => total * length, 1);
-    const pairs = [['type', node.dtype], ['shape', shapeText(node.shape)], ['size', `${plural(elements, 'element')}, ${bytesText(node.nbytes)}`], ['state', node.state]];
+    const size = node.shape.includes(null) ? 'known once the mask is computed' : `${plural(elements, 'element')}, ${bytesText(node.nbytes)}`;
+    const pairs = [['type', node.dtype], ['shape', shapeText(node.shape)], ['size', size], ['state', node.state]];
     if (node.where) pairs.push([node.kind === 'operation' ? 'written at' : 'entered at', node.where]);
     if (model.outputs.has(node.id)) pairs.push(['asked for', `by ${model.graph.call}`]);
     panel.append(facts(pairs));

@@ -217,15 +217,15 @@ def test_eager_calls_and_cuts_are_logged_apart_and_once_per_line(caplog):
     x = lazy.asarray(numpy.arange(4.0))
     for _ in range(3):
         float((x * 2).sum())
-    numpy.argmax(x)
+    numpy.argsort(x)
     x[0] = 9.0
     lines = [(entry.name, entry.levelname, entry.getMessage()) for entry in caplog.records if entry.name.startswith("prototypes.lazy")]
     assert [(name, level) for name, level, _ in lines] == [
         ("prototypes.lazy.cut", "DEBUG"), ("prototypes.lazy.eager", "INFO"), ("prototypes.lazy.cut", "DEBUG")]
     assert lines[0][2].startswith("needed: float() at test_lazy_prototype.py:")
-    assert lines[1][2].startswith("eager: np.argmax at test_lazy_prototype.py:")
+    assert lines[1][2].startswith("eager: np.argsort at test_lazy_prototype.py:")
     assert lines[2][2].startswith("write: x[index] = v at test_lazy_prototype.py:")
-    assert graph.COUNTS.needed == {"float()": 3} and graph.COUNTS.at_once == {"np.argmax": 1, "x[index] = v": 1}
+    assert graph.COUNTS.needed == {"float()": 3} and graph.COUNTS.at_once == {"np.argsort": 1, "x[index] = v": 1}
 
 
 def test_at_info_only_eager_calls_are_logged(caplog):
@@ -233,10 +233,10 @@ def test_at_info_only_eager_calls_are_logged(caplog):
     caplog.set_level(logging.INFO, logger="prototypes.lazy")
     x = lazy.asarray(numpy.arange(4.0))
     float((x * 2).sum())
-    numpy.argmin(x)
+    numpy.sort(x)
     x[1] = 9.0
     lines = [entry.getMessage() for entry in caplog.records if entry.name.startswith("prototypes.lazy")]
-    assert len(lines) == 1 and lines[0].startswith("eager: np.argmin at ")
+    assert len(lines) == 1 and lines[0].startswith("eager: np.sort at ")
 
 
 def test_the_report_ranks_what_was_computed_unasked():
@@ -244,17 +244,17 @@ def test_the_report_ranks_what_was_computed_unasked():
     lazy_report(reset=True)
     x = lazy.asarray(numpy.arange(4.0))
     for _ in range(3):
-        numpy.argmax(x * 2)
+        numpy.argsort(x * 2)
     numpy.cumsum(x)
     x[0] = float((x + 1).sum())
     found = lazy_report()
-    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 3), ("np.cumsum", 1)]
+    assert [(row.call, row.count) for row in found.eager] == [("np.argsort", 3), ("np.cumsum", 1)]
     assert found.eager[0].places[0][1] == 3 and found.eager[0].places[0][0].startswith("test_lazy_prototype.py:")
     assert [(row.call, row.count) for row in found.writes] == [("x[index] = v", 1)]
     assert [(row.call, row.count) for row in found.needed] == [("float()", 1)]
     text = str(found).splitlines()
     assert text[0] == "Made at once by NumPy: not in the deferred set"
-    assert text[1].split()[:2] == ["3", "np.argmax"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.cumsum"]
+    assert text[1].split()[:2] == ["3", "np.argsort"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.cumsum"]
     assert "A graph computed early: a write into a lazy array" in text and "none" not in str(found)
     assert lazy_report(reset=True).eager and not lazy_report().eager and "none" in str(lazy_report())
 
@@ -492,10 +492,11 @@ def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     data = numpy.random.default_rng(SEED).standard_normal(50)
     x = lazy.asarray(data)
     cases = {
-        "mask": (x[x > 0], data[data > 0]),
+        "part of what a mask selects": (x[x > 0][:3], data[data > 0][:3]),
         "norm": (numpy.linalg.norm(x * 2), numpy.linalg.norm(data * 2)),
         "cumsum": (x.cumsum(), data.cumsum()),
-        "argmax": (numpy.argmax(-x), numpy.argmax(-data)),
+        "argsort": (numpy.argsort(-x), numpy.argsort(-data)),
+        "ravel in another order": ((x * 2).reshape(5, 10).ravel(order="F"), (data * 2).reshape(5, 10).ravel(order="F")),
         "concatenate": (numpy.concatenate([x, data]), numpy.concatenate([data, data])),
         "dot of three dimensions": (numpy.dot(x.reshape(2, 5, 5), x.reshape(2, 5, 5)), numpy.dot(data.reshape(2, 5, 5), data.reshape(2, 5, 5))),
         "sort": (numpy.sort(x), numpy.sort(data)),
@@ -541,7 +542,7 @@ def test_an_array_like_another_needs_no_value():
 
 
 def test_indexing_by_integer_arrays_is_deferred():
-    """x[rows], x[[0, 2]], x[rows, columns] have a shape that needs no value; a mask or a pending index does not."""
+    """x[rows], x[[0, 2]], x[rows, columns] are deferred, and so are an index still pending and a mask that has its values."""
     data = numpy.random.default_rng(SEED).standard_normal((6, 5))
     x = lazy.asarray(data) + 0
     plain = data + 0
@@ -557,10 +558,133 @@ def test_indexing_by_integer_arrays_is_deferred():
         assert same(expected, got.gather()), name
     assert graph.COUNTS.at_once == {}
     assert str(raised(lambda: x[numpy.array([0, 6])])) == str(raised(lambda: plain[numpy.array([0, 6])]))
-    assert not x[x > 0]._node.pending and not x[lazy.arange(3) * 2]._node.pending
-    row = x[numpy.argmax(lazy.arange(5.0))]
-    assert row._node.pending and row._node.kind == "view" and same(plain[4], row.gather())
-    assert same(plain[numpy.arange(3) * 2], x[lazy.arange(3) * 2].gather())
+    keep = numpy.array([True, False, True, True, False, False])
+    late = {"a pending index": (x[lazy.arange(3) * 2], plain[numpy.arange(3) * 2]),
+            "a pending index beside an array": (x[lazy.arange(3) + 1, columns], plain[numpy.arange(3) + 1, columns]),
+            "a mask that has its values": (x[keep], plain[keep]), "a list of booleans": (x[list(keep)], plain[keep])}
+    for name, (got, expected) in late.items():
+        assert got._node.pending and got.shape == expected.shape and same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {}
+    beyond = x[lazy.arange(3) * 5]
+    assert beyond._node.pending and str(raised(beyond.gather)) == str(raised(lambda: plain[numpy.arange(3) * 5]))
+
+
+def test_a_pending_mask_selects_a_length_that_is_not_known():
+    """x[mask] is a node; what is computed from it is deferred where the shape does not depend on how many it selects."""
+    data = numpy.random.default_rng(SEED).standard_normal((40, 3))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    mask, plain_mask = x[:, 0] > 0, plain[:, 0] > 0
+    graph.COUNTS.reset()
+    chosen = x[mask]
+    assert chosen._node.pending and repr(chosen) == "LazyArray(float64, shape=(?, 3), pending)" and chosen.ndim == 2
+    cases = {
+        "a reduction along the mask": (chosen.mean(axis=0), plain[plain_mask].mean(axis=0)),
+        "a reduction of all": (chosen.sum(), plain[plain_mask].sum()),
+        "arithmetic with the same mask's selection": (chosen * 2 - x[mask, :1], plain[plain_mask] * 2 - plain[plain_mask, :1]),
+        "a new axis": ((1 / x[mask, 0])[:, None] * chosen, (1 / plain[plain_mask, 0])[:, None] * plain[plain_mask]),
+        "a product": (chosen @ numpy.ones(3), plain[plain_mask] @ numpy.ones(3)),
+        "a position": (chosen.argmax(axis=0), plain[plain_mask].argmax(axis=0)),
+        "a transpose": (chosen.T, plain[plain_mask].T),
+        "nothing selected": (x[x[:, 0] > 99].sum(axis=0), plain[plain[:, 0] > 99].sum(axis=0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: x[mask[:5]])) == str(raised(lambda: plain[plain_mask[:5]]))
+
+
+def test_a_length_that_is_not_known_is_computed_when_it_is_asked_for():
+    """The shape of x[mask] is a value: asking computes it and the log says so; a strict array refuses."""
+    data = numpy.random.default_rng(SEED).standard_normal(30)
+    x = lazy.asarray(data) + 0
+    graph.COUNTS.reset()
+    chosen = x[x > 0]
+    assert chosen.shape == data[data > 0].shape and len(x[x > 0]) == (data > 0).sum() and (x[x < 0] * 2).size == (data < 0).sum()
+    assert graph.COUNTS.needed == {"The shape of what a mask selects": 3} and graph.COUNTS.at_once == {}
+    assert repr(chosen) == f"LazyArray(float64, shape=({(data > 0).sum()},), computed)"
+    hard = strict.asarray(data) + 0
+    assert isinstance(raised(lambda: hard[hard > 0].shape), NotGathered)
+    assert same(data[data > 0], hard[hard > 0].gather())
+
+
+def test_what_depends_on_the_length_is_left_to_numpy():
+    """Where NumPy's answer depends on how many a mask selects, the call is made at once and is NumPy's."""
+    data = numpy.random.default_rng(SEED).standard_normal(30)
+    x = lazy.asarray(data) + 0
+    cases = {
+        "part of the selection": (x[x > 0][:4], data[data > 0][:4]),
+        "one element of it": (x[x > 0][0], data[data > 0][0]),
+        "a new shape": (x[x > 0].reshape(-1, 1), data[data > 0].reshape(-1, 1)),
+        "its elements in one dimension": (x[x > 0].ravel(), data[data > 0].ravel()),
+        "all of it against an array": (x[x > -99] + numpy.arange(30.0), data + numpy.arange(30.0)),
+        "an array made like it": (numpy.zeros_like(x[x > 0]), numpy.zeros_like(data[data > 0])),
+    }
+    for name, (got, expected) in cases.items():
+        assert not got._node.pending and same(expected, got.gather()), name
+    assert str(raised(lambda: x[x > 0] + x[x < 0])) == str(raised(lambda: data[data > 0] + data[data < 0]))
+
+
+def test_an_assignment_through_a_pending_mask_is_a_node():
+    """x[mask] *= f(y[mask]) computes nothing; an array of another length through a mask is NumPy's to check."""
+    def program(np, data):
+        """Cap the speed of the rows that are too fast, then mark and replace some elements."""
+        p = np.array(data)
+        speed = np.hypot(p[:, 2], p[:, 3])
+        fast = speed > 1.0
+        p[fast, 2:] *= (1.0 / speed[fast])[:, None]
+        p[fast, 0] = p[fast, 1] * 3
+        rows = np.argmax(p, axis=0)
+        p[rows, np.arange(4)] -= 1.0
+        p[np.argmin(speed)] = 0.0
+        never = speed > 99.0
+        p[never, 2:] /= speed[never][:, None]
+        return p
+
+    data = numpy.random.default_rng(SEED).standard_normal((50, 4))
+    graph.COUNTS.reset()
+    got = program(lazy, data)
+    assert got._node.pending and graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    assert same(program(numpy, data), got.gather())
+    x, plain = lazy.array(data[:, 0]), data[:, 0].copy()
+    x[x > 0] = numpy.arange((plain > 0).sum(), dtype=float)
+    plain[plain > 0] = numpy.arange((plain > 0).sum(), dtype=float)
+    assert graph.COUNTS.at_once == {"x[index] = v": 1} and same(plain, x.gather())
+
+
+def test_positions_and_ravel_are_deferred():
+    """np.argmax, np.argmin and ravel join the graph; a row named by a pending position stays NumPy's view."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "argmax": (numpy.argmax(x), numpy.argmax(plain)), "argmin along an axis": (numpy.argmin(x, axis=1), numpy.argmin(plain, axis=1)),
+        "methods": (x.argmax(axis=0) + x.argmin(0), plain.argmax(axis=0) + plain.argmin(0)),
+        "keepdims": (numpy.argmax(x, axis=1, keepdims=True), numpy.argmax(plain, axis=1, keepdims=True)),
+        "ravel": (x.ravel() * 2, plain.ravel() * 2), "np.ravel": (numpy.ravel(x.T), numpy.ravel(plain.T)),
+        "a row by a pending position": (x[numpy.argmax(x[:, 0])], plain[numpy.argmax(plain[:, 0])]),
+        "an element by pending positions": (x[x[:, 0].argmax(), x[0].argmin()], plain[plain[:, 0].argmax(), plain[0].argmin()]),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == expected.shape and got.dtype == expected.dtype, name
+        assert same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {}
+    assert str(raised(lambda: numpy.argmax(x, axis=(0, 1)))) == str(raised(lambda: numpy.argmax(plain, axis=(0, 1))))
+
+    def program(np, start):
+        """Take the row a position names and the flat elements, then write into the array they may be views of."""
+        base = np.array(start)
+        row, flat = base[np.argmax(base[:, 0])], base.ravel()
+        base += 1.0
+        row[0] = -5.0
+        flat[1] = 7.0
+        return base, row, flat
+
+    for name, expected, got in zip(("base", "row", "flat"), program(numpy, data), program(lazy, data), strict=True):
+        assert same(expected, got.gather()), name
 
 
 def test_the_stand_in_answers_like_the_module():

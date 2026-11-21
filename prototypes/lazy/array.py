@@ -405,25 +405,6 @@ def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, 
     operation(*_valued(args), **_valued(kwargs))
 
 
-def _settled_index(index: Any) -> Any:
-    """Put the values of computed lazy arrays into an index.
-
-    Args:
-        index: What was written between the brackets.
-
-    Returns:
-        The index, with each lazy array that already has its values replaced
-        by them, so that an index of integer arrays can be deferred. One that
-        holds a lazy array still pending is returned as it is, and the
-        indexing is then made at once.
-    """
-    items = index if isinstance(index, tuple) else (index,)
-    if not any(isinstance(item, LazyArray) for item in items) or any(isinstance(item, LazyArray) and item._node.pending for item in items):
-        return index
-    settled = tuple(item._node.value if isinstance(item, LazyArray) else item for item in items)
-    return settled if isinstance(index, tuple) else settled[0]
-
-
 def _method(name: str) -> Callable[..., Any]:
     """Build a function that calls a method by name on its first argument.
 
@@ -598,7 +579,9 @@ def _shape_of(operand: Any) -> tuple[int, ...] | None:
     Returns:
         The shape; () for a number; None for a list or another object.
     """
-    if isinstance(operand, (LazyArray, np.ndarray, np.generic)):
+    if isinstance(operand, LazyArray):
+        return operand._node.shape  # Not `.shape`, which computes when a length is not known.
+    if isinstance(operand, (np.ndarray, np.generic)):
         return tuple(operand.shape)
     return () if isinstance(operand, rules.PYTHON_NUMBERS) else None
 
@@ -628,7 +611,7 @@ def _types_fit(call: Callable[..., Any], target: "LazyArray", operands: tuple) -
     """
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        call(np.zeros((1,) * len(target.shape), target.dtype), *(_probe_of(operand) for operand in operands))
+        call(rules.probe(target._node), *(_probe_of(operand) for operand in operands))
 
 
 def _fits_elementwise(call: Callable[..., Any], target: "LazyArray", operands: tuple) -> bool:
@@ -652,7 +635,7 @@ def _fits_elementwise(call: Callable[..., Any], target: "LazyArray", operands: t
     if any(shape is None for shape in shapes):
         return False
     try:
-        if np.broadcast_shapes(target.shape, *shapes) != target.shape:
+        if np.broadcast_shapes(target._node.shape, *shapes) != target._node.shape:
             return False
     except ValueError:
         return False
@@ -664,15 +647,16 @@ def _index_parts(index: Any) -> tuple[Callable[[tuple], Any], list["LazyArray"],
     """Take an index apart into what is known now and the lazy arrays whose values come later.
 
     Args:
-        index: What was written between the brackets of an assignment.
+        index: What was written between the brackets.
 
     Returns:
         (a function that puts values in and gives the index back, the lazy
         arrays still pending, the index's items with a `_Slot` for each of
-        them). A lazy array that has its values is replaced by them. None
-        when the index holds a pending lazy array that is not a mask, whose
-        values the bounds would have to be checked against, or a lazy array
-        inside a list.
+        them). A lazy array that has its values is replaced by them. A
+        pending one may be a mask or an array of integers; what the integers
+        are is checked against the bounds when the graph is computed. None
+        when the index holds a pending lazy array of another type, or a lazy
+        array inside a list.
     """
     items = index if isinstance(index, tuple) else (index,)
     pending: list[LazyArray] = []
@@ -684,14 +668,14 @@ def _index_parts(index: Any) -> tuple[Callable[[tuple], Any], list["LazyArray"],
             template.append(item)
         elif not item._node.pending:
             template.append(item._node.value)
-        elif item.dtype.kind != "b":
+        elif item.dtype.kind not in "biu" or not graph.is_known(item._node.shape):
             return None
         else:
             template.append(_Slot(len(pending)))
             pending.append(item)
 
     def fill(found: tuple) -> Any:
-        """Put the masks' values in their places."""
+        """Put the pending arrays' values, or what stands in for them, in their places."""
         parts = tuple(found[part.place] if isinstance(part, _Slot) else part for part in template)
         return parts if isinstance(index, tuple) else parts[0]
     return fill, pending, template
@@ -702,7 +686,9 @@ def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
 
     The assignment is tried on arrays of an element type of no size, which
     take no memory: NumPy checks the index against the bounds and the value
-    against the shape selected, and raises its own message on the line.
+    against the shape selected, and raises its own message on the line. A
+    pending array in the index is stood in for as `rules.index_stand_in`
+    says: zeros for integers, which are in bounds, and a mask that selects nothing.
 
     Args:
         target: The array assigned into.
@@ -710,23 +696,71 @@ def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
         value: What is assigned.
 
     Returns:
-        False for a value the layer does not know the shape of, and for an
-        array assigned through a mask that is still pending: how many
-        elements the mask selects is not known yet.
+        False for a value the layer does not know the shape of. Through a
+        mask that is still pending, True for a number, and for an array made
+        from a selection by the same mask (`x[mask] = f(y[mask])`), which has
+        as many elements as the mask selects whatever that number is; False
+        for any other array, which fits or not depending on the mask's values.
 
     Raises:
         Exception: NumPy's, for an index out of bounds or a value that does not fit.
     """
     fill, pending, _ = parts
     shape = _shape_of(value)
-    if shape is None or (pending and shape != ()):
+    if shape is None or not graph.is_known(target._cell.node.shape):
+        return False
+    if not graph.is_known(shape):
+        if len(pending) != 1 or graph.unknown_length(pending[0]._node) not in shape:
+            return False
+        # The mask is stood in for by one that selects nothing; so is the value's length along it.
+        shape = tuple(length if graph.is_known((length,)) else 0 for length in shape)
+    elif shape != () and any(lazy._node.dtype.kind == "b" for lazy in pending):
         return False
     ghost = np.empty(target._cell.node.shape, rules.NO_SIZE)
     for step in target._steps:
         ghost = step.of(ghost)
-    masks = tuple(np.broadcast_to(np.zeros((), np.bool_), mask.shape) for mask in pending)
+    masks = tuple(rules.index_stand_in(lazy._node) for lazy in pending)
     ghost[fill(masks)] = np.broadcast_to(np.zeros((), rules.NO_SIZE), shape)
     return True
+
+
+def _select(target: "LazyArray", parts: tuple) -> "LazyArray | None":
+    """Defer `x[index]` for an index that holds lazy arrays still pending.
+
+    Args:
+        target: The array indexed.
+        parts: What `_index_parts` returned for the index; at least one lazy array is pending.
+
+    Returns:
+        A pending lazy array whose node reads the array and the index's
+        arrays, or None when the rules decline and the indexing has to be
+        made at once. Selected by a pending mask, it has a length that is
+        not known.
+
+    Raises:
+        IndexError: NumPy's, for a mask of the wrong shape or index arrays that do not broadcast.
+    """
+    fill, pending, _ = parts
+    nodes = tuple(lazy._node for lazy in pending)
+    index = fill(nodes)
+    signature = rules.plan(operator.getitem, (target._node, index), {})
+    if signature is None:
+        return None
+
+    def run(base: Any, *found: Any) -> Any:
+        """Index the computed array with the computed index."""
+        return base[fill(found)]
+
+    if graph.pending_count() >= graph.PENDING_LIMIT:
+        evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
+    node = graph.deferred(run, "getitem", (target._node,) + nodes, {}, signature.shape, signature.dtype, signature.kind,
+                          _strict(target, pending))
+    made = LazyArray(node)
+    if signature.shape != () and rules.is_doubtful_view(index):
+        # `x[np.argmax(w)]`: a view of a row if the index is a number when computed. Not known yet.
+        made._cell.doubted = True
+        target._cell.doubtful.append(weakref.ref(made))
+    return made
 
 
 def _same_index(first: Any, second: Any) -> bool:
@@ -837,9 +871,9 @@ def _reduction(function: Callable[..., Any], name: str) -> Callable[..., Any]:
 class LazyArray:
     """An array whose values may not have been computed yet.
 
-    Its shape and element type are known from the start. It is not an
-    `ndarray`: an `ndarray` owns memory that anything may read at any time,
-    and a pending array has none.
+    Its shape and element type are known from the start, but for one length
+    of what a pending mask selects. It is not an `ndarray`: an `ndarray` owns
+    memory that anything may read at any time, and a pending array has none.
     """
 
     __slots__ = ("_cell", "_steps", "_seen", "__weakref__")
@@ -887,10 +921,27 @@ class LazyArray:
 
     # ---- Known without computing.
 
+    def _settled_shape(self) -> tuple[int, ...]:
+        """Return the shape with every length known.
+
+        Returns:
+            The node's shape. When one of its lengths is how many elements a
+            pending mask selects, the array is computed first, and the log
+            says so: the length is a value.
+
+        Raises:
+            NotGathered: For such a shape, on a strict array.
+        """
+        node = self._node
+        if not graph.is_known(node.shape):
+            what = "The shape of what a mask selects"
+            _hand_out(what, node.strict, False, [node], f"{what} needs the mask's values: call .gather() first")
+        return node.shape
+
     @property
     def shape(self) -> tuple[int, ...]:
         """The shape NumPy would give the array."""
-        return self._node.shape
+        return self._settled_shape()
 
     @property
     def dtype(self) -> np.dtype:
@@ -905,7 +956,7 @@ class LazyArray:
     @property
     def size(self) -> int:
         """The number of elements."""
-        return int(np.prod(self._node.shape, dtype=np.intp))
+        return int(np.prod(self._settled_shape(), dtype=np.intp))
 
     @property
     def itemsize(self) -> int:
@@ -926,11 +977,11 @@ class LazyArray:
         """Return the length of the first dimension, as for an `ndarray`."""
         if not self._node.shape:
             raise TypeError("len() of unsized object")
-        return self._node.shape[0]
+        return self._settled_shape()[0]
 
     def __repr__(self) -> str:
         """Describe the array without computing it and without showing values."""
-        return f"LazyArray({self.dtype}, shape={self.shape}, {self._node.state})"
+        return f"LazyArray({self.dtype}, shape={graph.shape_text(self._node.shape)}, {self._node.state})"
 
     def explain(self) -> str:
         """Return the pending graph of this array as text. Computes nothing."""
@@ -986,7 +1037,7 @@ class LazyArray:
         """
         if not self._node.shape:
             raise TypeError("iteration over a 0-d array")
-        return (self[position] for position in range(self._node.shape[0]))
+        return (self[position] for position in range(self._settled_shape()[0]))
 
     def __format__(self, spec: str) -> str:
         """Format the description, or with a specification the value.
@@ -1102,7 +1153,8 @@ class LazyArray:
             return target
         if func in WRITING_FUNCTIONS:
             return _write(func, call, args, kwargs, args[:1])
-        if func in SHAPED_LIKE and isinstance(args[0], LazyArray) and not _lazies_in((args[1:], kwargs)):
+        if (func in SHAPED_LIKE and isinstance(args[0], LazyArray) and graph.is_known(args[0]._node.shape)
+                and not _lazies_in((args[1:], kwargs))):
             # Only the shape and element type of the argument are used, and
             # those are known: the new array is made without computing it.
             like = rules.ghost(args[0]._node)
@@ -1120,13 +1172,19 @@ class LazyArray:
 
         Returns:
             A deferred view for integers, slices, `None` and `...`, and a
-            deferred selection for arrays or lists of integers. An index
-            holding a mask is made at once: the shape of `x[mask]` depends on
-            values, and a lazy array's shape is always known. So is one
-            holding a lazy array still pending: the bounds are checked against
-            an index's values on the line that writes it.
+            deferred selection for arrays of integers and for masks. A lazy
+            array in the index that has its values is replaced by them. One
+            still pending becomes an operand of the node: an array of
+            integers is checked against the bounds when the graph is
+            computed, and a mask gives a result whose length along the
+            mask is not known until then.
         """
-        return _defer_or_call(operator.getitem, "getitem", "x[index]", (self, _settled_index(index)))
+        parts = _index_parts(index)
+        if parts is None or not parts[1]:
+            settled = index if parts is None else parts[0](())
+            return _defer_or_call(operator.getitem, "getitem", "x[index]", (self, settled))
+        selected = _select(self, parts)
+        return selected if selected is not None else _at_once(operator.getitem, "x[index]", (self, index), {})
 
     def __setitem__(self, index: Any, value: Any) -> None:
         """Assign into the array: a write, with NumPy's meaning.
@@ -1143,9 +1201,9 @@ class LazyArray:
             if parts is not None and _assignment_fits(self, parts, value):
                 fill = parts[0]
 
-                def assign(view: np.ndarray, assigned: Any, *masks: Any) -> None:
-                    """Assign into the part of the copy the target is a view of."""
-                    view[fill(masks)] = assigned
+                def assign(view: np.ndarray, assigned: Any, *found: Any) -> None:
+                    """Assign into the part of the copy the target is a view of, through the computed index."""
+                    view[fill(found)] = assigned
 
                 _defer_write(self, "setitem", assign, (value, *parts[1]))
                 return
@@ -1177,6 +1235,21 @@ class LazyArray:
     prod = _reduction(np.prod, "prod")
     var = _reduction(np.var, "var")
     std = _reduction(np.std, "std")
+    argmax = _reduction(np.argmax, "argmax")
+    argmin = _reduction(np.argmin, "argmin")
+
+    def ravel(self, *args: Any, **kwargs: Any) -> "LazyArray":
+        """Give the elements in one dimension, deferred.
+
+        Args:
+            *args: `order`, when given by position.
+            **kwargs: `order`, when given by keyword.
+
+        Returns:
+            A pending lazy array in NumPy's default order. With an `order`,
+            the call is made at once.
+        """
+        return np.ravel(self, *args, **kwargs)
 
     def reshape(self, *shape: Any) -> "LazyArray":
         """Give the array a new shape, deferred.

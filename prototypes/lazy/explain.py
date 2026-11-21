@@ -7,6 +7,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from . import graph
 from .graph import Node
 
 # Where this package keeps its templates.
@@ -86,4 +87,4 @@ def _row(node: Node, depth: int, repeated: bool) -> Row:
     """
     where = "" if node.origin is None else f"{os.path.basename(node.origin.filename)}:{node.origin.lineno}"
     return Row(depth, node.name if node.failure is None else f"{node.name} (failed)", str(node.dtype),
-               str(node.shape), where, repeated)
+               graph.shape_text(node.shape), where, repeated)
