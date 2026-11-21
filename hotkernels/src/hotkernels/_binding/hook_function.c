@@ -1537,15 +1537,20 @@ static PyObject *call_any(HK_VECTORCALL_PARAMETERS) {
 
 // np.round(a, decimals, out) and np.around, which in NumPy 2 is a second
 // function object with the same parameters and the same body: a contiguous
-// float64 array, `decimals` absent or a Python int from 0 to 15, `out`
+// float64 array, zero-dimensional included, or an np.float64 (not a subclass,
+// not a Python float), `decimals` absent or a Python int from 0 to 15, `out`
 // absent or None, by position or by keyword. The work is the method hook's
-// (hk_try_round).
+// (hk_try_round, hk_try_round_number).
 static HK_NOINLINE PyObject *try_round_function(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames) {
     enum { A, DECIMALS, OUT, PARAMETERS };
     static const char *const names[PARAMETERS] = {"a", "decimals", "out"};
     PyObject *bound[PARAMETERS];
     if (!hk_bind_arguments(args, nargs, kwnames, names, PARAMETERS, PARAMETERS, bound)) return NULL;
-    if (bound[A] == NULL || !hk_is_flat(bound[A], NPY_DOUBLE) || !hk_is_absent(bound[OUT])) return NULL;
+    if (bound[A] == NULL || !hk_is_absent(bound[OUT])) return NULL;
+    if (Py_IS_TYPE(bound[A], &PyDoubleArrType_Type)) {
+        return hk_try_round_number(PyArrayScalar_VAL(bound[A], Double), bound[DECIMALS]);
+    }
+    if (!hk_is_flat_or_0d(bound[A], NPY_DOUBLE)) return NULL;
     return hk_try_round(bound[A], bound[DECIMALS]);
 }
 

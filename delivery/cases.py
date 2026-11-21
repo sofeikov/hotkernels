@@ -1039,6 +1039,169 @@ def _round_errstate(setting: str, decimals: int, x):
         return np.round(x, decimals)
 
 
+# How one number reaches np.round: (name in a case, builds it from a Python
+# float, whether the binding takes it). A zero-dimensional float64 array and an
+# np.float64 are taken. NumPy converts a Python float, and an np.float64 of a
+# subclass, to a plain zero-dimensional float64 array and calls its method,
+# which takes it. The rest are NumPy's.
+ROUND_NUMBER_KINDS = (
+    ("0-d float64", np.array, True),
+    ("np.float64", np.float64, True),
+    ("float", float, True),
+    ("0-d '>f8'", lambda v: np.array(v, dtype=">f8"), False),
+    ("0-d float32", lambda v: np.array(v, dtype=np.float32), False),
+    ("np.float32", np.float32, False),
+    ("np.longdouble", np.longdouble, False),
+    ("np.float64 subclass", lambda v: _Float64Subclass(v), True),
+    ("0-d float64 subclass", lambda v: np.array(v).view(_ArraySubclass), False),
+)
+# Values one number is rounded from: the signs and ties of the arrays, and
+# every class of value: infinities, a quiet and a negative NaN, the largest
+# finite value, the smallest subnormal and a subnormal rounding flags with.
+ROUND_NUMBERS = (*ROUND_SIGNS, math.inf, -math.inf, math.nan, -math.nan, 1.7976931348623157e308, 5e-324,
+                 ROUND_SUBNORMAL, 123.456, -98765.4321)
+# The ways one number is rounded: (name in a case, the call from (x, decimals)).
+# Python's round() on an np.float64 calls its round method; on a Python float
+# it is Python's, which no hook sees, and is not tried.
+ROUND_NUMBER_CALLS = (
+    ("np.round(x, d)", lambda x, d: np.round(x, d)),
+    ("np.around(x, d)", lambda x, d: np.around(x, d)),
+    ("np.round(x, decimals=d)", lambda x, d: np.round(x, decimals=d)),
+)
+# Methods, for the kinds that have one: x.round(d) and round(x, d). Python's
+# round() on a zero-dimensional array does not call its round method, and is
+# NumPy's.
+ROUND_NUMBER_METHODS = (
+    ("x.round(d)", lambda x, d: x.round(d)),
+    ("round(x, d)", lambda x, d: round(x, d)),
+)
+
+
+class _Float64Subclass(np.float64):
+    """A subclass of np.float64, which the round hooks leave to NumPy."""
+
+
+class _ArraySubclass(np.ndarray):
+    """A subclass of ndarray, which the round hooks leave to NumPy."""
+
+
+def _one_number(build: Callable, value: float) -> tuple:
+    """Build the one argument of a round case: one number of a given kind.
+
+    Args:
+        build: Makes the number from a Python float.
+        value: Its value.
+
+    Returns:
+        (the number,).
+    """
+    return (build(value),)
+
+
+def _round_bits(bits: int) -> tuple:
+    """Build the one argument of a round case: a zero-dimensional float64 array of the given bits.
+
+    Args:
+        bits: The 64 bits of the element, such as those of a signalling NaN.
+
+    Returns:
+        (a zero-dimensional float64 array,).
+    """
+    return (np.array(bits, dtype=np.uint64).view(np.float64),)
+
+
+def _round_number_errstate(setting: str, decimals: int, x):
+    """Call `np.around(x, decimals)` on one number with every floating-point error set to `setting`.
+
+    Args:
+        setting: A value np.errstate takes, such as "raise" or "warn".
+        decimals: The number of decimals.
+        x: The number.
+
+    Returns:
+        The rounded number.
+    """
+    with np.errstate(all=setting):
+        return np.around(x, decimals)
+
+
+def _number_label(value: float) -> str:
+    """Name a float in a case: its repr, with the sign of a NaN, which repr drops.
+
+    Args:
+        value: The float.
+
+    Returns:
+        Its repr, or "-nan" for a NaN whose sign bit is set.
+    """
+    if math.isnan(value) and math.copysign(1.0, value) < 0:
+        return "-nan"
+    return repr(value)
+
+
+def round_number_cases() -> Iterator[Case]:
+    """Yield the cases of `np.round` and `np.around` on one number.
+
+    A zero-dimensional float64 array, an np.float64 and, through NumPy's
+    conversion, a Python float are rounded by the binding's loop and give an
+    np.float64, as NumPy does, under the guards of the arrays: decimals a
+    Python int from 0 to 15, no `out`, no flag NumPy reports. Other kinds of
+    number, and subclasses, are NumPy's.
+    """
+    for (kind, build, taken), value, decimals in itertools.product(ROUND_NUMBER_KINDS, ROUND_NUMBERS, ROUND_DECIMALS):
+        expect = "round_f64" if taken else None
+        # Only a float64 number with an overflowing multiply raises a flag here.
+        if taken and decimals and abs(value) * 10.0**decimals == math.inf and math.isfinite(value):
+            expect = None
+        calls = ROUND_NUMBER_CALLS + (ROUND_NUMBER_METHODS if kind != "float" else ())
+        for text, call in calls:
+            reached = None if text == "round(x, d)" and kind.startswith("0-d") else expect
+            yield Case("round", f"{text} d={decimals} x={kind} {_number_label(value)}", partial(_one_number, build, value),
+                       partial(lambda call, decimals, x: call(x, decimals), call, decimals), reached)
+    for kind, build, taken in ROUND_NUMBER_KINDS[:2]:
+        yield Case("round", f"np.round(x) x={kind}", partial(_one_number, build, 2.5), np.round, "round_f64")
+        for text, arguments, expect in ROUND_NUMBER_SPELLINGS:
+            yield Case("round", f"{text} x={kind}", partial(_one_number, build, 2.345), partial(_spelled_round, arguments),
+                       expect)
+        # The guards: overflow in the multiply, and a signalling NaN.
+        for setting in ("raise", "warn", "ignore"):
+            yield Case("round", f"np.errstate(all={setting!r}) np.around(x, 2) x={kind} {ROUND_OVERFLOWS!r}",
+                       partial(_one_number, build, ROUND_OVERFLOWS), partial(_round_number_errstate, setting, 2), None)
+            yield Case("round", f"np.errstate(all={setting!r}) np.around(x, 2) x={kind} {ROUND_SUBNORMAL!r}",
+                       partial(_one_number, build, ROUND_SUBNORMAL), partial(_round_number_errstate, setting, 2), "round_f64")
+    for bits in ROUND_SIGNALLING_NAN_BITS:
+        for decimals in (0, 2):
+            yield Case("round", f"np.round(x, {decimals}) x=0-d float64 signalling NaN {bits:#x}", partial(_round_bits, bits),
+                       partial(_round_call, decimals), None)
+
+
+# Bits of float64 signalling NaNs, positive and negative.
+ROUND_SIGNALLING_NAN_BITS = (0x7FF0000000000001, 0xFFF0000000000001, 0x7FF7FFFFFFFFFFFF)
+# Arguments besides the number that decide whether the call is taken: (name,
+# keyword arguments of np.round, the kernel or None).
+ROUND_NUMBER_SPELLINGS = (
+    ("np.round(x, 2, None)", {"decimals": 2, "out": None}, "round_f64"),
+    ("np.round(x, 16)", {"decimals": 16}, None),
+    ("np.round(x, -1)", {"decimals": -1}, None),
+    ("np.round(x, np.int64(2))", {"decimals": np.int64(2)}, None),
+    ("np.round(x, 2.0)", {"decimals": 2.0}, None),
+    ("np.round(x, True)", {"decimals": True}, None),
+)
+
+
+def _spelled_round(arguments: dict, x):
+    """Call `np.round(x, **arguments)`.
+
+    Args:
+        arguments: Keyword arguments of np.round.
+        x: The number.
+
+    Returns:
+        What NumPy, or the binding in its place, returns or raises.
+    """
+    return np.round(x, **arguments)
+
+
 def _filled(value: float, n: int) -> tuple:
     """Build the one argument of a unary case: random float64 values with `value` at every third element."""
     x = values("f64", n)
@@ -1051,7 +1214,8 @@ def round_cases() -> Iterator[Case]:
 
     The function hooks of np.round and np.around and the method hook of
     x.round run the binding's own loop for a plain contiguous float64 array
-    of 1 to ROUND_F64_MAX_N elements, decimals absent or a Python int from
+    of 1 to ROUND_F64_MAX_N elements, or one number (see round_number_cases),
+    decimals absent or a Python int from
     0 to 15, and no `out`. A call whose arithmetic raises a flag NumPy
     reports, overflow or underflow in the multiply or a signalling NaN, goes
     to NumPy, which warns or raises. Every other call is NumPy's.
@@ -1135,8 +1299,12 @@ def round_cases() -> Iterator[Case]:
                 # built from. A list has no method of its own.
                 if variant.name == "list" and spelling.text.startswith("np.") and spelling.kind == TAKES:
                     expect = ANY if dtype != "f64" else _round_expect(n)
+                # A zero-dimensional float64 array holds one element, whatever n.
+                if variant.name == "zero_d" and kernel is not None and spelling.kind == TAKES:
+                    expect = kernel
                 yield Case("round", f"{spelling.text} {dtype} n={n} layout={variant.name}",
                            partial(_built, dtype, n, variant), spelling.call, expect)
+    yield from round_number_cases()
 
 
 # ----------------------------------------------------------------- median

@@ -105,6 +105,9 @@ ROUND_F64_MAX_N = 4096
 # Decimals of the timed np.round: the commonest in the program the second
 # shortlist came from.
 DECIMALS = 2
+# The element count a statement on one number is timed at: it takes one
+# number whatever the count, and is shown at 1.
+ONE_NUMBER = (1,)
 # Most rows of the timed matrices accumulated along their first axis: about a
 # year of trading days, as in empyrical's rolling windows. A matrix of n
 # elements has min(ROWS_WINDOW, isqrt(n)) rows: 4 x 4, 64 x 64 and 256 x 4,096.
@@ -197,6 +200,19 @@ def _rng(n: int) -> np.random.Generator:
 def _floats(dtype: type, n: int) -> tuple:
     """Build normally distributed floats."""
     return (_rng(n).standard_normal(n).astype(dtype),)
+
+
+def _one_float(build: Callable[[float], object], n: int) -> tuple:
+    """Build one float64 number, as np.round on a single value receives it.
+
+    Args:
+        build: Makes the number from a Python float: np.float64 or np.array.
+        n: Ignored; the statement takes one number. Timed at ONE_NUMBER only.
+
+    Returns:
+        (the number,).
+    """
+    return (build(_rng(ONE_NUMBER[0]).standard_normal()),)
 
 
 def _ints(dtype: type, n: int) -> tuple:
@@ -601,6 +617,10 @@ TAKEN: tuple[Timed, ...] = (
           max_n=ROUND_F64_MAX_N),
     Timed("round", "np.round(x)", "float64", partial(_floats, np.float64), np.round, "round_f64",
           max_n=ROUND_F64_MAX_N),
+    Timed("round", "np.around(x, 1)", "one np.float64", partial(_one_float, np.float64), lambda x: np.around(x, 1),
+          "round_f64", sizes=ONE_NUMBER),
+    Timed("round", "np.around(x, 1)", "zero-dimensional float64", partial(_one_float, np.array), lambda x: np.around(x, 1),
+          "round_f64", sizes=ONE_NUMBER),
     Timed("inplace", "w -= b", "float64", _two_floats, _subtract_in_place, SUBTRACT_IN_PLACE,
           min_n=INPLACE_MIN_N),
     Timed("inplace", "w += b", "float64", _two_floats, _add_in_place, ADD_IN_PLACE, min_n=INPLACE_MIN_N),
