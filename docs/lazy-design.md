@@ -14,7 +14,7 @@ The document covers the smallest build that is worth having: NumPy code whose op
 - **A lazy array is a type of its own, `hotkernels.LazyArray`, not an `ndarray`.** Element types do not change: `x.dtype` is NumPy's. [Types](#types-what-changes-for-the-user) says where the new type shows in a program and what a user has to change: nothing to run, one thing if their code asks `isinstance(x, np.ndarray)`.
 - **NumPy itself delivers the calls.** It hands every call that meets such a type to it, through two protocols it provides for the purpose. That reaches operators, ufuncs, functions, methods of ufuncs and `out=`, also in another file that imports the real `numpy` module.
 - **A narrow set of operations is deferred; all the rest of NumPy still works.** Anything outside the set is computed at once by NumPy, on gathered operands, and its result is a lazy array that already has its values. The log says so.
-- **A program runs without being rewritten.** `gather()` is the way to ask for values, and nothing else is refused: `float(x)`, `if x > 0:`, `np.asarray(x)` and a library that wants an `ndarray` each get what NumPy would give, computed on the spot. Every such place is logged, once per line of code, and recorded with its line, so it can be found; none of them stops the program. See [When a value is needed](#when-a-value-is-needed) and [Why it computes instead of raising](#why-it-computes-instead-of-raising).
+- **A program runs without being rewritten.** `gather()` is the way to ask for values, and nothing else is refused: `float(x)`, `if x > 0:`, `np.asarray(x)` and a library that wants an `ndarray` each get what NumPy would give, computed on the spot. Every such place can be found afterwards, in the log, in a ranked summary and on the page of the program's code; none of them stops the program. See [When a value is needed](#when-a-value-is-needed) and [Why it computes instead of raising](#why-it-computes-instead-of-raising).
 - **Strict is a switch.** `hotkernels.get_lazy(strict=True)` gives arrays that raise `NotGathered` in those places instead. It is for a hot path that must not compute by accident, and for the layer's own tests ([Strict arrays](#strict-arrays)).
 - **The contract is one sentence:** what a program gets from `gather()` is what the same lines give with `import numpy as np`, in type, element type, shape and bits. It is checked by running programs both ways.
 - **Shape and type errors are raised on the line that caused them,** with NumPy's own message, because shapes and types are worked out when the line runs. Only the values wait.
@@ -78,10 +78,10 @@ for step in range(200):
 weights = w.gather()                       # a numpy.ndarray
 ```
 
-With the logger `hotkernels.lazy` at `DEBUG`, the run says where it computed without being asked. The line runs ten times and is reported once:
+With the logger `hotkernels.lazy` at `DEBUG`, the run says where a graph was computed early. The line runs ten times and is reported once:
 
 ```text
-Formatting with '.4f' needed values without gather(): computed here (regression.py:18)
+needed: Formatting with '.4f' at regression.py:18
 ```
 
 ### Code in another file, unchanged
@@ -142,23 +142,23 @@ array([ 1.,  3.,  5.,  7.,  9., 11.])
 array([ 2.,  4.,  6.,  8., 10., 12.])
 ```
 
-Each of those lines made the layer compute without being asked. It says so in the log, at `DEBUG`, once per line of code:
+Each of those lines made the layer compute a graph early. With the logger `hotkernels.lazy` at `DEBUG` it says so, once per line of code:
 
 ```text
-float() needed values without gather(): computed here (session.py:10)
-A truth test (if, while, and, or, not) needed values without gather(): computed here (session.py:11)
-Formatting with '.1f' needed values without gather(): computed here (session.py:13)
-Conversion to an ndarray needed values without gather(): computed here (session.py:14)
-np.add needed values without gather(): computed here (session.py:16)
+needed: float() at session.py:10
+needed: A truth test (if, while, and, or, not) at session.py:11
+needed: Formatting with '.1f' at session.py:13
+needed: Conversion to an ndarray at session.py:14
+needed: np.add at session.py:16
 ```
 
-and a call outside the deferred set says, in the same log:
+A call outside the deferred set, which NumPy had to make at once, is a line of another kind, and it is the only kind at `INFO`:
 
 ```text
-np.argmin is not deferred: NumPy made the call at once, and the result is still lazy (session.py:18)
+eager: np.argmin at session.py:18
 ```
 
-The two messages are different on purpose. After the second, the program is still lazy. After the first, what the program holds is a number or an `ndarray`, and whatever is computed from it is plain NumPy.
+The two are apart on purpose. `eager` lines say what the deferred set does not cover yet, and are what one usually opens a log for. The others say where the program's graph was cut. `hotkernels.lazy_report()` has every occurrence of both, ranked; [What the layer says](#what-the-layer-says) has the whole of it.
 
 A strict stand-in gives arrays that refuse instead:
 
@@ -220,10 +220,11 @@ Text is enough for a dozen operations. For more, and for a graph that has alread
 | `hotkernels.gather(a, b, ...)` | The same for several arrays, as a tuple. With no argument it computes everything pending |
 | `x.explain()` | The pending graph of `x` as text. Computes nothing |
 | `x.graph()` | The pending graph of `x` as an object that can be written as JSON or shown in the browser. Computes nothing |
-| `hotkernels.record_graphs()` | For a `with` block: keeps the graphs the block's code produced, the computed ones included |
+| `hotkernels.record_graphs()` | For a `with` block: keeps the graphs the block's code produced, the computed ones included, and what was computed without being asked. Its page opens on the program's code |
 | `hotkernels.LazyArray` | The type of every lazy array, for `isinstance` and for annotations |
 | `hotkernels.NotGathered` | Raised by a strict array when something needs its values and `gather()` was not called. A `TypeError` |
-| The logger `hotkernels.lazy` | At `DEBUG`: every line of the program where the layer computed without being asked, once per line |
+| The loggers `hotkernels.lazy.eager` and `hotkernels.lazy.cut` | The lines of the program where NumPy had to make a call at once (`INFO`), and where a graph was computed early (`DEBUG`). Each line once |
+| `hotkernels.lazy_report()` | Every occurrence of both, ranked: which call, how often, on which lines. Printing it gives a table |
 
 The names `graph` and `record_graphs` are provisional.
 
@@ -396,7 +397,8 @@ The first build makes nothing faster. What it produces is the graph, so the grap
 |---|---|---|
 | `x.explain()` | The pending graph of one array as text | [Looking at the graph](#looking-at-the-graph) |
 | `x.graph()`, `hotkernels.record_graphs()` | The graph as plain data, and a mode that keeps every graph a block of code produced, the computed ones included | [lazy-recording-design.md](lazy-recording-design.md) |
-| `recording.show()` | The recorded graphs as one page in the browser: folded where they are large, with search, selection and the line of code behind every operation | [lazy-graph-page-design.md](lazy-graph-page-design.md) |
+| `recording.show()` | One page in the browser. It opens on the program's code, with what each line wrote and what it made the layer compute, and has each graph one click away: folded where it is large, with search and selection | [lazy-graph-page-design.md](lazy-graph-page-design.md) |
+| The log, `hotkernels.lazy_report()` | What NumPy had to compute at once and where graphs were computed early: as it happens, and ranked | [What the layer says](#what-the-layer-says) |
 
 What the main design needs to know of them:
 
@@ -429,7 +431,7 @@ Not reached, because no lazy array is among the arguments: `np.zeros(3)`, a rand
 
 ### The prototype
 
-Eight modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 28 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 13 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
+Nine modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 30 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 15 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
 
 | Program | Deferred | Made at once | Result against eager NumPy |
 |---|---|---|---|
@@ -445,7 +447,8 @@ What the tests hold, each matching a rule of this document:
 - **Warnings.** `a / zeros` gathered later issues NumPy's two warnings, word for word, with the file and line of the division. Written under `np.errstate(divide="ignore")` and gathered outside it: none. Under `errstate(over="raise")`: `FloatingPointError` at the gather, with the note, and the same exception again at the next gather.
 - **A value needed without `gather()`:** thirteen ways to a number, a truth value, a string or a plain Python value each give what the same line gives with NumPy. So do `np.asarray`, `np.array` and a random generator's `permutation`, and four ways of writing lazy values into an `ndarray`.
 - **Everything pending first.** An `ndarray` that a pending expression has read is written from a lazy array: the pending expression has the values from before the write, as eager NumPy has. A `float()` computes what it needs and leaves other pending work pending.
-- **The log.** A line that needs a value three times in a loop is logged once and counted three times. A call made at once and a write into a lazy array are logged in their own words.
+- **The log.** A line that needs a value three times in a loop is logged once and counted three times. A call made at once is an `INFO` line of one logger; a write into a lazy array and a value needed are `DEBUG` lines of another; with the package's logger at `INFO` only the first is seen.
+- **The summary.** `lazy_report()` has every occurrence by call and by line, the most frequent first, in three parts, and starts again from nothing when asked.
 - **Strict arrays.** Nineteen ways to a value each raise `NotGathered`, an `ndarray` that a refused write named is unchanged, and strictness follows an array through the real module and beside lenient and plain arrays. Neither kind of array has `__array_interface__` or `__array_struct__`.
 - **Iteration** gives lazy views of the first dimension and computes nothing, for a strict array too.
 - **Writes into lazy arrays.** `x[1:3]` assigned through, as a view, changes `x`, and an expression written before it has the old values. `w -= step` keeps the object, so another name for it sees the change. `s += 1` on the result of a `sum` gives a new scalar, as NumPy does. `int_array += 0.5` raises NumPy's casting error.
@@ -508,7 +511,8 @@ A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of
 | `namespace.py` | The stand-in for the `numpy` module | [namespace.py](../prototypes/lazy/namespace.py) |
 | `explain.py`, `templates/explain.txt.j2` | The text of a pending graph | [explain.py](../prototypes/lazy/explain.py) |
 | `record.py` | The graph as an object, and the recording mode | [record.py](../prototypes/lazy/record.py) |
-| `view.py`, `templates/graph.html.j2`, `graph.js`, `graph.css` | The graph as a page | [view.py](../prototypes/lazy/view.py), [templates/](../prototypes/lazy/templates) |
+| `report.py`, `templates/report.txt.j2` | What was computed without being asked, ranked | [report.py](../prototypes/lazy/report.py) |
+| `view.py`, `templates/graph.html.j2`, `graph.js`, `graph.css` | The program's code and its graphs as a page | [view.py](../prototypes/lazy/view.py), [templates/](../prototypes/lazy/templates) |
 
 `graph` knows nothing of the others; `rules` and `evaluate` work on nodes and never see a `LazyArray`; `array` is the only module the user's calls enter. `record` hears of nodes and computations through one hook that `graph` offers, and `view` sees only what `record` wrote down. Whatever computes a graph differently later replaces one function of `evaluate`.
 
@@ -560,8 +564,44 @@ Every road by which a value can leave a lazy array without `gather()` goes throu
 - **For a strict array it raises `NotGathered`** and computes nothing.
 - **Otherwise it counts and logs,** then computes: everything pending first if an array is handed out or an `ndarray` is about to be written, and then the nodes asked for. The computation is told what triggered it, so a recording has it as a graph of kind `needed`.
 - **The roads are:** the conversions Python asks an object for (`__float__`, `__int__`, `__complex__`, `__bool__`, `__index__`, `__contains__`, and `__format__` with a specification); `__array__`, which is how NumPy and every library built on it ask; a ufunc or a function whose `out` or target is a plain `ndarray`; an attribute of `ndarray` that is not a method; and a call made at once whose answer is a plain Python value.
-- **The log is one line per line of the user's code.** The layer keeps the set of (what, file, line) it has reported and reports each once. Counters keep every occurrence. The logger is `hotkernels.lazy`, the level `DEBUG`, and when that level is off nothing is looked up or formatted. Calls made at once and writes into lazy arrays are logged the same way, in their own words.
+- **It is told to the log, to the summary and to a recording** ([What the layer says](#what-the-layer-says)).
 - **Iteration is not one of the roads.** `for row in x:` gives `x[0]`, `x[1]`, and so on, each a deferred view: the length is the shape's, and no value is needed.
+
+### What the layer says
+
+Three things happen without being asked, and they are not the same to a reader:
+
+| Word | What happened | Logger | Level |
+|---|---|---|---|
+| `eager` | A call outside the deferred set: NumPy made it at once, and the result is still lazy | `hotkernels.lazy.eager` | `INFO` |
+| `write` | A write into a lazy array computed everything pending first | `hotkernels.lazy.cut` | `DEBUG` |
+| `needed` | A value was needed without `gather()` and was computed | `hotkernels.lazy.cut` | `DEBUG` |
+
+- **Which is seen is ordinary logging configuration.** `logging.getLogger("hotkernels.lazy").setLevel(logging.INFO)` shows the eager calls and nothing else, which is the list of what the deferred set should cover next. `DEBUG` adds the places where a graph was cut. Either logger can be set by itself. Nothing is shown until one of them is turned on.
+- **A line is short and each line of code gets one:** the word, the call, the file and the line. The layer keeps the set of what it has reported.
+- **Every occurrence is counted by line,** whether or not anything is logged, and `hotkernels.lazy_report()` ranks the counts: the call a program makes six hundred times at once is at the top. A recording keeps the same counts for its block (`recording.report()`). For three iterations of Karpathy's `min-char-rnn.py`:
+
+  ```text
+  Made at once by NumPy: not in the deferred set
+       660  np.dot                      min-char-rnn.py:40 × 150, :41 × 75, :51 × 75, :53 × 75, and 5 more lines
+        78  np.copy                     min-char-rnn.py:49 × 75, :34 × 3
+        23  np.zeros_like               min-char-rnn.py:45 × 9, :46 × 6, :82 × 3, :47 × 3, and 1 more line
+        20  ndarray.ravel               min-char-rnn.py:75 × 20
+
+  A graph computed early: a write into a lazy array
+       477  x += y                      min-char-rnn.py:51 × 75, :52 × 75, :55 × 75, :56 × 75, and 4 more lines
+       171  x[index] = v                min-char-rnn.py:39 × 75, :50 × 75, :77 × 20, :69
+        75  x -= y                      min-char-rnn.py:50 × 75
+        15  np.clip                     min-char-rnn.py:60 × 15
+
+  A graph computed early: a value needed without gather()
+        20  Conversion to an ndarray    min-char-rnn.py:75 × 20
+         1  float()                     min-char-rnn.py:100
+  ```
+
+- **More can go under the same name.** How long a graph took or how much memory it held would be further loggers of `hotkernels.lazy`, chosen the same way. None is designed.
+
+All of this is for a person reading a run, and each part has its lever: which logger and which level; the summary instead of the stream; how much of the program's code a page carries ([lazy-recording-design.md](lazy-recording-design.md#how-much-code-a-page-carries)); what a page shows folded.
 
 ### The stand-in for the module
 
@@ -696,9 +736,9 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 
 **How much to say when the layer computes without being asked.**
 
-- *Once per line of code, at `DEBUG`* (the prototype): quiet unless asked, and readable when asked.
+- *Two loggers and two levels, each line of code once, and a summary on request* (the prototype; [What the layer says](#what-the-layer-says)): quiet unless asked, and readable when asked.
 - *A warning the first time, as Python's `warnings` would give:* seen without setting up logging, and noise for a program that means what it does.
-- A summary on request, the counts by line, is not designed. A recording has every occurrence already.
+- What further loggers should exist under the same name, for time or memory, is not designed.
 
 **The graph tools** have their open questions in their own documents: [recording](lazy-recording-design.md#open-questions) and [the page](lazy-graph-page-design.md#open-questions).
 

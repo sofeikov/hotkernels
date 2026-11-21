@@ -279,6 +279,53 @@ def test_the_pending_graph_of_one_array():
     assert [(node.kind, node.state) for node in done.nodes] == [(INPUT, record.COMPUTED)] and done.groups.operations == 0
 
 
+def test_a_recording_keeps_what_was_computed_unasked_by_line():
+    """A recording has its own count of eager calls, writes and values needed, and reports them."""
+    with record_graphs() as recording:
+        x = lazy.arange(4.0)
+        for _ in range(2):
+            numpy.argmax(x + 1)
+        x[0] = float(x.sum())
+    found = recording.report()
+    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 2)]
+    assert [row.call for row in found.writes] == ["x[index] = v"] and [row.call for row in found.needed] == ["float()"]
+    events = recording.to_dict()["events"]
+    assert events[0] == {"kind": graph.AT_ONCE, "call": "np.argmax", "where": events[0]["where"],
+                         "code": "numpy.argmax(x + 1)", "count": 2}
+    assert events[0]["where"].startswith("test_lazy_graphs.py:")
+
+
+def page_data(text: str) -> dict:
+    """Read the data a page carries.
+
+    Args:
+        text: The page's HTML.
+
+    Returns:
+        The JSON of its data element.
+    """
+    return json.loads(text.split('<script id="data" type="application/json">')[1].split("</script>")[0])
+
+
+def test_a_page_carries_as_much_code_as_it_is_told_to():
+    """Whole files by default; only the lines that did something; or no code at all."""
+    with record_graphs() as recording:
+        x = lazy.arange(3.0)
+        y = x * 2 + 1   # a line that is unmistakably this one
+        numpy.argmax(y)
+    marker = "a line that is unmistakably this one"
+    whole = page_data(recording.page())
+    mine = next(source for source in whole["sources"] if source["file"] == "test_lazy_graphs.py")
+    assert len(mine["text"]) > 200 and mine["text"]["1"].startswith('"""Tests of the prototype')
+    lines = page_data(recording.page(source=record.WRITTEN_LINES))
+    mine = next(source for source in lines["sources"] if source["file"] == "test_lazy_graphs.py")
+    assert len(mine["text"]) == 3 and sum(marker in line for line in mine["text"].values()) == 1
+    bare = recording.page(source=record.NO_SOURCE)
+    assert marker not in bare and "numpy.argmax(y)" not in bare and page_data(bare)["sources"] == []
+    assert page_data(bare)["graphs"][0]["nodes"][1]["where"].startswith("test_lazy_graphs.py:")
+    assert record_graphs(source=record.NO_SOURCE).source == record.NO_SOURCE
+
+
 def test_the_page_holds_the_graphs_and_survives_code_that_ends_a_script(tmp_path):
     """The page is one file: the graphs as JSON, the layout library by URL, and no way for a line of code to break out."""
     target = tmp_path / "graphs.html"
@@ -290,7 +337,7 @@ def test_the_page_holds_the_graphs_and_survives_code_that_ends_a_script(tmp_path
     assert text == recording.page() and text.count("</script>") == 3 and view.LAYOUT_LIBRARY_URL in text
     embedded = text.split('<script id="data" type="application/json">')[1].split("</script>")[0]
     data = json.loads(embedded)
-    assert data["fold_above"] == record.FOLD_ABOVE and len(data["graphs"]) == 1
+    assert data["fold_above"] == record.FOLD_ABOVE and len(data["graphs"]) == 1 and data["events"] == []
     assert data["graphs"][0]["nodes"][1]["code"] == "y = x * 2  # </script><b>"
     assert data["graphs"][0]["groups"]["children"] == [data["graphs"][0]["nodes"][1]["id"]]
     assert recording._repr_html_().startswith("<iframe srcdoc=") and "<b>" not in recording._repr_html_().split("srcdoc=")[1][:200]

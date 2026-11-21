@@ -12,6 +12,8 @@ A prototype is in [`prototypes/lazy/record.py`](../prototypes/lazy/record.py), w
 - **A graph is plain data.** It holds no array and no live node, so keeping one keeps no memory alive.
 - **Each graph carries its operations as a tree of groups:** the operations one line wrote, the calls of a function, and the steps of a loop. The page folds by this tree; a reader of the JSON can use it too.
 - **Graphs that are alike carry the same signature,** so a loop that gathers at every step shows as one graph, fifty times.
+- **A recording also keeps what was computed without being asked,** by line: the calls NumPy made at once, the writes, the values needed. `recording.report()` ranks them.
+- **A page carries as much of the program's code as it is told to:** whole files, only the lines that did something, or none.
 - **Recording changes no result.** The prototype's tests hold a recorded program to the bits of the unrecorded one.
 
 ## What the user writes
@@ -45,11 +47,12 @@ loss.graph().show()
 
 | Name | What it is |
 |---|---|
-| `hotkernels.record_graphs(path=None)` | A `with` block. While it runs, the graphs it produces are kept in `recording.graphs` |
+| `hotkernels.record_graphs(path=None, source="files")` | A `with` block. While it runs, the graphs it produces are kept in `recording.graphs`. `source` says how much code its pages carry |
 | `recording.graphs` | The graphs, one per computation, in order; and a last one for what is still pending when the block ends |
 | `recording.dropped` | How many operations the block wrote and then dropped without their ever being computed |
-| `recording.to_dict()`, `to_json()` | Everything as built-in types, and as JSON text |
-| `recording.show()`, `save(path)`, `page()` | The page of [lazy-graph-page-design.md](lazy-graph-page-design.md): opened in the browser, written to a file, or returned as HTML |
+| `recording.report()` | What the layer computed without being asked during the block, ranked: calls made at once, writes, values needed, each with its lines. Printing it gives the table of `hotkernels.lazy_report()` |
+| `recording.to_dict()`, `to_json()` | Everything as built-in types, and as JSON text, the counts of the report included as `events` |
+| `recording.show()`, `save(path)`, `page()` | The page of [lazy-graph-page-design.md](lazy-graph-page-design.md): opened in the browser, written to a file, or returned as HTML. Each takes `source=` to carry more or less code than the recording was made with |
 | `x.graph()` | The pending graph of one array. It has the same methods |
 
 The names are provisional. One recording runs at a time; entering a second raises.
@@ -89,6 +92,18 @@ The prototype's three example programs, run in one recorded block by `uv run pyt
 | A regression that gathers its loss every fifth step and ends with `np.argmax` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.argmax` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
 
 15 graphs and 1,336 operations in all. A further 78 operations were written and dropped: the losses of the steps that were not reported.
+
+## How much code a page carries
+
+The page opens on the program's code, so it has to carry it. How much is a choice, since a page may be kept, shown or sent on:
+
+| `source=` | The page carries | For |
+|---|---|---|
+| `"files"`, the default | Every file that wrote an operation or made the layer compute, in full | Reading one's own program with its graphs beside it |
+| `"lines"` | Only the lines that wrote an operation or made the layer compute | A page of a program that should not travel whole |
+| `"none"` | No code: file names and line numbers only. A group that would be called by its line is called by its place | A page for a demonstration, or one passed on |
+
+A file is named by its name alone at every level, never by its path. `x.graph()` on its own has no recording behind it and carries the lines of its nodes.
 
 ## What a node is
 
@@ -175,13 +190,16 @@ The tree is best effort, and it cannot lose anything: the nodes are all in `node
 - **No value is held.** A record keeps a weak reference to its node, to tell at the end whether pending work is still pending or was dropped, and nothing else that could keep an array alive. What a recording costs is per operation and does not depend on the size of an array.
 - **The frames of the last node are held until the next one,** for the comparison above. A finished function's local variables can therefore outlive it by one operation while a block is recorded. They are let go when the block ends.
 - **A node made before the block and computed inside it is written down when it is computed.** No call is known for it, only the line it remembers.
+- **A fourth thing is told through the same hook:** that the layer computed without being asked, with the call and the line. The recording counts it by line and remembers the file, so that a page can show the file.
 - **Everything is done under the layer's lock.**
 
 ## What was verified
 
-On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 13 tests:
+On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 15 tests:
 
 - **One graph per computation:** a gather, a call made at once, a write and what is left pending give four graphs in order, each with its trigger, its line and the text of the line.
+- **What was computed unasked:** a recording's own counts by call and line, its report, and the same as `events` in its data.
+- **How much code:** a page with whole files has every line of the file that was recorded; with lines only, the three that did something; with none, no text of any line anywhere in the page.
 - **A value needed without `gather()`:** a `float()` is a graph of the two operations it needed; an array handed to `np.asarray` is a graph of everything that was pending.
 - **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray` and the result of a call made at once; and `earlier` with the graph's index.
 - **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a call of twenty lines as three stretches; a generator expression as a line of its function.
@@ -212,6 +230,7 @@ Not measured: what recording costs in time. No speed is claimed anywhere in this
 
 ## Not examined
 
+- **Two files of one name.** A file is known to a page by its name without its directory, so `a/model.py` and `b/model.py` would be shown as one. Not handled.
 - **Threads.** A node made on a thread other than the block's is recorded with its innermost line only. Not tried.
 - **Generators and coroutines** that make operations across several resumptions. Their frames are reused, and what the grouping does with that was not looked at.
 - **The cost of finding repeats in a very long group.** The search is bounded per member, not tested beyond a thousand operations.

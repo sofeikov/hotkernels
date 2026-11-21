@@ -13,15 +13,42 @@ That runs the prototype's three example programs in one recorded block and opens
 ## Summary
 
 - **One HTML file.** `recording.show()` writes it and opens it in the browser; `recording.save(path)` writes it where asked. The graphs are in the file as JSON, with the script and the styles that draw them.
+- **It opens on the program's code.** Every line says how many operations it wrote, which graphs they went into, and what it made the layer compute. The drawing of a graph is one click from the line, and the line one click from the drawing.
 - **It is drawn in the page, not by Graphviz.** A layout library places the boxes, and the page draws SVG and answers the pointer: it folds, zooms, searches and shows what a click asks about.
 - **A large graph opens folded.** A group of more than five operations is one stacked box that says what it holds, and a click unfolds it one level. The 954 operations of a 50-step loop open as four operations, three inputs and one box for the loop.
 - **Nothing is hidden for good.** What a folded group reads from outside stays in sight beside it, search finds operations inside folded groups and unfolds what hides them, and the JSON holds every node.
 - **The graphs of a recording are a list down the side,** each with what made the layer compute it and on which line. Graphs that are alike share one entry.
 - **The prototype loads its layout library, ELK, from a CDN,** so its page needs a network connection when opened. The page of the package is to carry the library inside it. Which library ships is an [open question](#open-questions).
 
+## The code first
+
+A drawing of a graph says what was computed together, and not where in the program that is. So the page opens on the program, as a listing, and the graphs hang off its lines.
+
+![The program's code, the lines of one graph marked, and on each line what it wrote and what it made the layer compute](images/lazy-graph-page-code.png)
+
+Graph 5 of a loop that gathers its loss every fifth step is selected in the list. In the listing:
+
+| On a line | Meaning |
+|---|---|
+| A number beside the line number | How many operations the line wrote, over all its runs: `200` for a line of four operations that ran fifty times |
+| A marked background | The line wrote operations of the graph that is selected. A graph is found in the code by selecting it |
+| A rule under the line | The selected graph was computed because of this line |
+| `in graph 3`, `in 11 graphs` | Where the line's operations went. A click opens that graph with the line's operations selected |
+| `gather → 10 graphs` | The line asked for values, and these graphs were computed for it |
+| `needed float() → graph 4`, `write x += y → 75 graphs` | The line made the layer compute a graph early, without `gather()` |
+| `eager np.argmax → graph 13`, `eager np.dot × 150` | The line made a call the layer cannot defer: NumPy made it at once, this many times. With an arrow, operations that were pending had to be computed for it |
+
+- **One tab per file** that wrote an operation or made the layer compute, the file with the most operations first. Selecting a graph brings up the file that holds most of it.
+- **`Code` and `Graph` switch the middle** between the listing and the drawing of the selected graph. The list of graphs and the panel stay.
+- **The panel says which lines a graph was written on:** `monitor.py:38-40`.
+- **From a node of the drawing, `Show monitor.py:40 in the code`** goes back to the listing at that line.
+- **How much code is there is the recording's choice:** whole files, only the lines that did something, with gaps between them, or line numbers alone ([lazy-recording-design.md](lazy-recording-design.md#how-much-code-a-page-carries)).
+
+The listing is also the log in another form: the `eager`, `write` and `needed` marks are what the layer's loggers say ([lazy-design.md](lazy-design.md#what-the-layer-says)), put on the lines they are about.
+
 ## What it looks like
 
-The regression's graph as it opens. The four operations that standardise the features are drawn; the loop is one box, `× 50`.
+The regression's graph, drawn. The four operations that standardise the features are there; the loop is one box, `× 50`.
 
 ![The regression's graph: one line drawn in full, the loop of 50 steps as one stacked box](images/lazy-graph-page-loop.png)
 
@@ -30,8 +57,8 @@ Three areas:
 | Area | What is in it |
 |---|---|
 | Left | The graphs of the recording, in order: what triggered each, the line, the number of operations. `× 8 alike` marks graphs that are the same in every operation, shape, type and line. `no gather` marks a graph that was computed because something needed a value and `gather()` was not called |
-| Middle | The selected graph. Above it, what made the layer compute it, the line, and the text of that line |
-| Right | The selected node; or, with nothing selected, the graph: counts, and its operations by name |
+| Middle | The program's code, or the drawing of the selected graph. Above it, the two tabs, what made the layer compute the graph, the line, and the text of that line |
+| Right | The selected node; or, with nothing selected, the graph: counts, the lines it was written on, and its operations by name |
 
 The transformer block after typing `matmul` in the search box and pressing Enter twice. Six operations match and have an orange border. The second match is selected: the panel has its type, shape, size, line, arguments and readers, and the drawing lights up what leads to it and what follows from it.
 
@@ -53,6 +80,10 @@ What is drawn:
 
 | Do | And |
 |---|---|
+| Click `Code` or `Graph` | The middle shows the program's lines, or the drawing of the selected graph |
+| Click a graph in the list while the code is shown | Its lines are marked, and the file that holds most of them comes up |
+| Click a mark on a line: `in graph 3`, `gather → 10 graphs`, `eager np.argmax → graph 13` | The drawing of that graph, with the first operation of that line selected and whatever hid it unfolded |
+| Select a node and click `Show monitor.py:40 in the code` | The listing, at that line |
 | Click a folded group | It unfolds one level, and stays where it was on the screen |
 | Click the title of an open group | It folds |
 | Click a node | It is selected. The panel shows its type, shape, size, state, line and the text of the line, its arguments as written and what reads it. On the drawing, everything it depends on and everything that depends on it stays lit and the rest is dimmed |
@@ -91,14 +122,16 @@ For the regression this gives ten things at first: two frames, three inputs, the
 
 ## How it is drawn
 
-- **The page is a Jinja template** with three things put into it: the graphs as JSON, a stylesheet and a script. `jinja2` is a dependency of the package already, so the page adds no Python dependency.
+- **The page is a Jinja template** with three things put into it: the data as JSON, a stylesheet and a script. The data is the graphs, the counts of what was computed without being asked by line, and the text of the program's lines as the recording was told to carry it. `jinja2` is a dependency of the package already, so the page adds no Python dependency.
 - **The JSON sits in a script element of its own** and is read once. Every `</` in it is written `<\/`, so a line of the user's code that contains `</script>` cannot end the element. Text from the data reaches the page as text, never as markup.
 - **The script keeps a set of folded groups per graph.** From it, it works out what is visible: one element per visible node, folded group and open group, and one edge per pair of elements that data passes between.
 - **A layout library is asked where everything goes.** The prototype uses ELK's layered layout, with groups as nested boxes and edges routed at right angles. Operations are given to it in the order the program wrote them, and it is asked to respect that order, so the drawing reads top to bottom as the code does.
 - **The page draws the SVG itself:** boxes, text, edges with rounded corners. Pan and zoom are a transform on one group. Folding and unfolding run the layout again on what is visible, which is small, since most of a large graph is folded.
 - **Light and dark** follow the reader's system setting.
 
-About 1,000 lines of JavaScript, 250 of CSS and 100 of Python.
+- **The listing is built from the same data:** each operation names its line, each graph the line that triggered it, each count of an eager call its line. No second pass over the program is made.
+
+About 1,200 lines of JavaScript, 290 of CSS and 100 of Python.
 
 ## The layout library
 
@@ -131,6 +164,8 @@ In one browser, the pane built into the Claude desktop app, on the page of the t
 - The dark colours, on one graph.
 - The `no gather` mark, on a page of seven graphs computed by `float()` in a loop and by `np.asarray`.
 - A graph of 366 operations from one function of a hundred lines, opening as three stretches of lines, and one of them unfolding into eight.
+- The code view on the three example programs: the lines of a selected graph marked and its file brought up; a mark on a line opening the drawing with that line's operation selected; `Show … in the code` going back to the line; one mark, not two, for an eager call that also computed a graph.
+- The code view on Karpathy's `min-char-rnn.py`, 112 lines and 749 graphs, with 17 marks of eager calls.
 - Four of the pages of the ten programs of [lazy-design.md](lazy-design.md#ten-programs-with-one-changed-line), of 1, 4, 83 and 749 graphs, loading without an error in the console. The other six were written and not opened.
 
 One test in [`tests/test_lazy_graphs.py`](../tests/test_lazy_graphs.py) holds the file itself: that it contains the graphs as JSON that reads back, the library's URL, and exactly three script elements when a line of the recorded code contains `</script>`.
@@ -153,7 +188,8 @@ Two things were found by looking and changed:
 ## Open questions
 
 - **The library that ships.** ELK is what the prototype uses. To be checked: its licence, its size in the wheel, and dagre as a smaller alternative.
-- **Whether the page opens on the list of graphs or on the first graph.** It opens on the first.
+- **What the listing does with a line that ran in many graphs.** It says `in 11 graphs` and opens one of them. Stepping through them from the line is not there.
+- **Whether a file of thousands of lines should be shown whole.** It is.
 - **The fold constant, and the four inputs above which a folded group's inputs are one pill.** Chosen by looking at three programs.
 - **A second direction.** The layout runs downwards, as code reads. A wide screen has more room across; left to right is one option of the library and was not tried.
 - **Whether a notebook should get the page in a frame under the cell.** The prototype's objects have the method a notebook looks for; it was not tried in one.
@@ -161,6 +197,7 @@ Two things were found by looking and changed:
 ## Not examined
 
 - **Other browsers.** One was used.
+- **The code view with only the lines that did something, and with no code.** Both are held by a test of the page's data; neither was looked at in a browser.
 - **A notebook.**
 - **A very large graph.** The largest drawn was 954 operations, of which 86 elements were on screen at most; the page with the most graphs had 749 and a file of 1.7 MB. How long the layout takes on thousands of visible elements was not measured.
 - **The page without a network connection.** It says the library could not be loaded; that message was not looked at in a browser.

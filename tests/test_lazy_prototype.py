@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph
+from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -210,21 +210,53 @@ def test_handing_out_an_array_computes_everything_pending_first():
     assert float((lazy.arange(3.0) + 1).sum()) == 6.0 and untouched._node.pending
 
 
-def test_fallbacks_are_logged_once_per_line(caplog):
-    """Each line that makes the layer compute unasked is logged once, however often it runs, and every time is counted."""
-    caplog.set_level(logging.DEBUG, logger=graph.log.name)
+def test_eager_calls_and_cuts_are_logged_apart_and_once_per_line(caplog):
+    """A call made at once is an INFO line of one logger; a write or a value needed is a DEBUG line of another."""
+    caplog.set_level(logging.DEBUG, logger="prototypes.lazy")
     graph.COUNTS.reset()
     x = lazy.arange(4.0)
     for _ in range(3):
         float((x * 2).sum())
     numpy.argmax(x)
     x[0] = 9.0
-    messages = [entry.getMessage() for entry in caplog.records if entry.name == graph.log.name]
-    assert len(messages) == 3
-    assert messages[0].startswith("float() needed values without gather(): computed here (test_lazy_prototype.py:")
-    assert messages[1].startswith("np.argmax is not deferred: NumPy made the call at once, and the result is still lazy (")
-    assert messages[2].startswith("x[index] = v writes into a lazy array: everything pending was computed first (")
+    lines = [(entry.name, entry.levelname, entry.getMessage()) for entry in caplog.records if entry.name.startswith("prototypes.lazy")]
+    assert [(name, level) for name, level, _ in lines] == [
+        ("prototypes.lazy.cut", "DEBUG"), ("prototypes.lazy.eager", "INFO"), ("prototypes.lazy.cut", "DEBUG")]
+    assert lines[0][2].startswith("needed: float() at test_lazy_prototype.py:")
+    assert lines[1][2].startswith("eager: np.argmax at test_lazy_prototype.py:")
+    assert lines[2][2].startswith("write: x[index] = v at test_lazy_prototype.py:")
     assert graph.COUNTS.needed == {"float()": 3} and graph.COUNTS.at_once == {"np.argmax": 1, "x[index] = v": 1}
+
+
+def test_at_info_only_eager_calls_are_logged(caplog):
+    """With the package's logger at INFO, a line says what NumPy had to compute at once and nothing else."""
+    caplog.set_level(logging.INFO, logger="prototypes.lazy")
+    x = lazy.arange(4.0)
+    float((x * 2).sum())
+    numpy.argmin(x)
+    x[1] = 9.0
+    lines = [entry.getMessage() for entry in caplog.records if entry.name.startswith("prototypes.lazy")]
+    assert len(lines) == 1 and lines[0].startswith("eager: np.argmin at ")
+
+
+def test_the_report_ranks_what_was_computed_unasked():
+    """lazy_report() has every occurrence by call and by line, the most frequent first, in three parts."""
+    lazy_report(reset=True)
+    x = lazy.arange(4.0)
+    for _ in range(3):
+        numpy.argmax(x * 2)
+    numpy.dot(x, x)
+    x[0] = float((x + 1).sum())
+    found = lazy_report()
+    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 3), ("np.dot", 1)]
+    assert found.eager[0].places[0][1] == 3 and found.eager[0].places[0][0].startswith("test_lazy_prototype.py:")
+    assert [(row.call, row.count) for row in found.writes] == [("x[index] = v", 1)]
+    assert [(row.call, row.count) for row in found.needed] == [("float()", 1)]
+    text = str(found).splitlines()
+    assert text[0] == "Made at once by NumPy: not in the deferred set"
+    assert text[1].split()[:2] == ["3", "np.argmax"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.dot"]
+    assert "A graph computed early: a write into a lazy array" in text and "none" not in str(found)
+    assert lazy_report(reset=True).eager and not lazy_report().eager and "none" in str(lazy_report())
 
 
 def test_iterating_needs_no_value():
