@@ -9,19 +9,31 @@ results.
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import numpy as np
 
 from . import graph
-from .graph import Node
+from .graph import Node, Trigger
 
 
-def compute(roots: Iterable[Node]) -> None:
+@dataclass
+class _Progress:
+    """What one computation has done so far, for an observer. Numbers only: it must not keep a node alive."""
+
+    # Numbers of the nodes taken so far, in the order they were taken.
+    numbers: list[int] = field(default_factory=list)
+    # The numbers among them that failed.
+    failed: set[int] = field(default_factory=set)
+
+
+def compute(roots: Iterable[Node], trigger: Trigger) -> None:
     """Compute some nodes and whatever they need.
 
     Args:
         roots: The nodes whose values are wanted.
+        trigger: What asked for them, for an observer.
 
     Raises:
         Exception: What computing a needed node raised, now or at an earlier attempt.
@@ -29,16 +41,20 @@ def compute(roots: Iterable[Node]) -> None:
     roots = list(roots)
     with graph.LOCK:
         todo = _needed(roots)
-        while todo:
-            # pop() drops the list's reference, so an intermediate is freed as
-            # soon as its last consumer has been computed.
-            _compute_one(todo.pop())
+        progress = _begin(todo)
+        try:
+            while todo:
+                # pop() drops the list's reference, so an intermediate is freed as
+                # soon as its last consumer has been computed.
+                _step(todo.pop(), progress)
+        finally:
+            _end(progress, roots, trigger)
         for root in roots:
             if root.failure is not None:
                 raise root.failure
 
 
-def compute_pending() -> None:
+def compute_pending(trigger: Trigger) -> None:
     """Compute everything that is pending, in the order it was written.
 
     This is what a write does first: afterwards the program is in the state
@@ -46,20 +62,73 @@ def compute_pending() -> None:
     raises here. A node that depends on an earlier failure is marked failed
     without raising: it raises when it is gathered.
 
+    Args:
+        trigger: What made the layer compute, for an observer.
+
     Raises:
         Exception: What computing a node raised.
     """
     with graph.LOCK:
         todo = graph.pending_nodes()
-        while todo:
-            node = todo.pop()
-            if not node.pending:
-                continue
-            inherited = _inherited_failure(node)
-            if inherited is None:
-                _compute_one(node)
-            else:
-                _fail(node, inherited)
+        progress = _begin(todo)
+        try:
+            while todo:
+                node = todo.pop()
+                if not node.pending:
+                    continue
+                inherited = _inherited_failure(node)
+                if inherited is None:
+                    _step(node, progress)
+                else:
+                    _fail(node, inherited)
+                    progress.numbers.append(node.number)
+                    progress.failed.add(node.number)
+        finally:
+            _end(progress, [], trigger)
+
+
+def _begin(todo: list[Node]) -> _Progress:
+    """Start one computation, telling the observer what it will take.
+
+    Args:
+        todo: The pending nodes about to be computed.
+
+    Returns:
+        An empty record of progress.
+    """
+    if graph.observer is not None and todo:
+        graph.observer.computing(todo)
+    return _Progress()
+
+
+def _step(node: Node, progress: _Progress) -> None:
+    """Compute one node of a computation and note it.
+
+    Args:
+        node: A pending node whose operands are computed or failed.
+        progress: The computation's record, which gains the node's number.
+
+    Raises:
+        Exception: What computing the node raised, or the failure of an operand.
+    """
+    progress.numbers.append(node.number)
+    try:
+        _compute_one(node)
+    except Exception:
+        progress.failed.add(node.number)
+        raise
+
+
+def _end(progress: _Progress, roots: list[Node], trigger: Trigger) -> None:
+    """Finish one computation, telling the observer what it took.
+
+    Args:
+        progress: The computation's record.
+        roots: The nodes whose values were asked for.
+        trigger: What made the layer compute.
+    """
+    if graph.observer is not None and progress.numbers:
+        graph.observer.computed(progress.numbers, progress.failed, [root.number for root in roots], trigger)
 
 
 def _needed(roots: Iterable[Node]) -> list[Node]:

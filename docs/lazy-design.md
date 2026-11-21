@@ -1,6 +1,6 @@
 # A lazy NumPy layer: `hotkernels.get_lazy()`
 
-This is a proposal for review. Nothing here is in the package. A prototype that follows this document is in [`prototypes/lazy/`](../prototypes/lazy), with tests in [`tests/test_lazy_prototype.py`](../tests/test_lazy_prototype.py); it is there to be read and argued with, and [What was verified](#what-was-verified) says what it showed. The tools under [Debugging tools](#debugging-tools) are designed here and are not in the prototype.
+This is a proposal for review. Nothing here is in the package. A prototype that follows this document is in [`prototypes/lazy/`](../prototypes/lazy), with tests in [`tests/test_lazy_prototype.py`](../tests/test_lazy_prototype.py); it is there to be read and argued with, and [What was verified](#what-was-verified) says what it showed. Getting the graph out and drawing it have documents of their own: [lazy-recording-design.md](lazy-recording-design.md) and [lazy-graph-page-design.md](lazy-graph-page-design.md).
 
 The document covers the smallest build that is worth having: NumPy code whose operations are written down as a graph instead of being computed, and computed when the user asks. **It makes nothing faster and is not meant to.** Speed is out of scope here. The graph is what fusion needs, and fusion is what a kernel for a whole expression needs; [What the graph is for](#what-the-graph-is-for) says how the three connect, without planning the second and third.
 
@@ -332,79 +332,21 @@ Measured on the prototype: [With `install()` in effect](#with-install-in-effect)
 
 ## Debugging tools
 
-The first build makes nothing faster. What it produces is the graph, so the graph has to be easy to look at, first of all for the people building the layer. Three tools, of which the prototype has the first only.
+The first build makes nothing faster. What it produces is the graph, so the graph has to be easy to look at, first of all for the people building the layer. Each of the two tools beyond `explain()` has a document of its own and a prototype.
 
-| Tool | What it gives |
-|---|---|
-| `x.explain()` | The pending graph of one array as text. [Looking at the graph](#looking-at-the-graph) |
-| `x.graph()` | The same graph as an object: plain data that can be inspected, written as JSON, or shown |
-| `hotkernels.record_graphs()` | A mode for a block of code that keeps every graph the block produced, the computed ones included, and shows them as one page in the browser |
+| Tool | What it gives | Designed in |
+|---|---|---|
+| `x.explain()` | The pending graph of one array as text | [Looking at the graph](#looking-at-the-graph) |
+| `x.graph()`, `hotkernels.record_graphs()` | The graph as plain data, and a mode that keeps every graph a block of code produced, the computed ones included | [lazy-recording-design.md](lazy-recording-design.md) |
+| `recording.show()` | The recorded graphs as one page in the browser: folded where they are large, with search, selection and the line of code behind every operation | [lazy-graph-page-design.md](lazy-graph-page-design.md) |
 
-### The graph as an object
+What the main design needs to know of them:
 
-`x.graph()` returns what is pending under `x` as plain data. It holds no array and no live node, so keeping it keeps no memory alive, and nothing done to it changes the program.
+- **One graph per computation.** Each time the layer computes, the nodes computed together are one recorded graph, with what made it compute and on which line. That is the unit anything computing a graph differently will be handed, and every one of them is a place where the program's graph was cut.
+- **A mode, because a node forgets.** A node drops its operation and operands once computed, which is what frees intermediates. So graphs are recorded only inside a `with` block, as plain data without values, and the layer is told what to record through one hook.
+- **A large graph is folded.** The record carries the operations as a tree: the lines that wrote them, the calls of functions, the steps of loops. The page draws a group of more than five operations as one box and unfolds it on a click.
 
-| Field of a graph | Meaning |
-|---|---|
-| `trigger` | What made the layer compute it: `gather`, a call made at once (`np.argmax`), a write (`x[i] = v`), the limit of pending nodes. `pending` for a graph that has not been computed |
-| `where` | File and line of the trigger |
-| `nodes` | The nodes, each as below |
-| `outputs` | The nodes that were asked for |
-
-| Field of a node | Meaning |
-|---|---|
-| `id` | The node's number |
-| `kind` | `operation`; `input` for an `ndarray` that came from outside the layer; `earlier` for a node an earlier graph computed |
-| `name`, `dtype`, `shape` | The operation's name, and the element type and shape of its result |
-| `where` | File and line of the user's code that wrote it |
-| `operands` | The ids of the nodes it reads, and its other arguments as written: `2.0`, `axis=0` |
-
-`graph.to_dict()` and `graph.to_json()` give the same as built-in types and as text. `explain()` is the text form of this object.
-
-### Recording what a block of code produced
-
-A node drops its operation and its operands once it is computed, which is what frees intermediates. So after a `gather()` there is no graph left to look at, and `x.graph()` on a computed array is one node. The recording mode is for that.
-
-```python
-with hotkernels.record_graphs() as recording:
-    weights, losses = fit(np, features, targets)
-    hotkernels.gather(weights, *losses)
-
-recording.graphs        # a list of graphs, in the order they were computed
-recording.to_json()     # all of them as text
-recording.show()        # one page in the browser
-```
-
-- **While the block runs, each node made leaves a record:** the fields of the table above and nothing else. No values are held, so the cost is per operation and does not depend on the size of an array.
-- **One graph per computation.** Each time the layer computes (a `gather()`, a call made at once, a write, the limit of pending nodes), the nodes computed together are one graph, with what triggered it and on which line. What is still pending when the block ends is a last graph marked `pending`. This is the unit that matters: whatever computes a graph differently later is handed exactly these nodes at once, and every trigger is a place where the program's graph was cut.
-- **The graphs are disjoint, and say how they connect.** A node that one graph computed and a later one reads appears in the later one as an input of kind `earlier`, naming the graph it came from.
-- **A block, because debugging starts on blocks of code.** A dozen lines under the `with` give graphs small enough to read whole.
-- **Outside a block nothing is recorded** and the mode costs nothing.
-
-### The graph as a page
-
-`graph.show()` and `recording.show()` write one HTML page and open it in the browser. In a notebook the page is shown under the cell.
-
-- **It is drawn in the page by a JavaScript graph library, not by Graphviz:** operations laid out in layers from inputs to outputs, pan and zoom, details of a node on hover (name, type, shape, line, arguments), a click to light up what a node reads and what reads it.
-- **The page stands alone.** The graph is in it as JSON and the library is in it too, shipped inside the package, so it opens without a network and can be sent to someone. The package gains no Python dependency: the page is a Jinja template, and `jinja2` is one already.
-- **Which library is an [open question](#open-questions).** The candidate is Cytoscape.js with a layered layout.
-
-### Folding
-
-A graph of a loop is too large to read as it is: the regression's 50 steps are 954 operations. The page folds it, best effort.
-
-- **Groups come from what each node recorded.** The operations one run of one line wrote are a group, named by the line. Consecutive runs of the same lines, the steps of a loop, are a group of those groups.
-- **A group of more than five members is drawn folded,** as one node that says what it holds: `regression.py:32-36 × 50, 950 operations`. A click unfolds it one level. Five is a constant to be tuned by looking.
-- **Graphs that are alike are shown once with a count.** A loop that gathers at every step gives one graph per step, the same in every operation, shape, type and line: `× 50`.
-- **Where no grouping is found, depth is the fallback:** what lies more than five operations below an output is one node, `940 more operations`.
-- **Folding never loses anything.** A wrong grouping costs a click. The object and the JSON always hold every node.
-
-### Inputs and outputs
-
-Shown as well as the layer knows them, which is not always well.
-
-- **An input** has its element type and shape, and the line where it entered when that is known: the stand-in's call that made it or took it in, or the operation in which a plain `ndarray` first met a lazy array. How the `ndarray` was made before that is outside the layer and is not shown.
-- **An output** is a node the trigger asked for. A node that was computed and that the program still holds, or that a later graph reads, is marked as kept.
+![The regression's graph on the page: one line drawn in full, the loop of 50 steps as one box](images/lazy-graph-page-loop.png)
 
 ## What was verified
 
@@ -429,7 +371,7 @@ Not reached, because no lazy array is among the arguments: `np.zeros(3)`, a rand
 
 ### The prototype
 
-Six modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, values only through `gather()`, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 22 tests, one or more per rule stated here, each comparing with the real `numpy` module.
+Eight modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, values only through `gather()`, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 22 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 11 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
 
 | Program | Deferred | Made at once | Result against eager NumPy |
 |---|---|---|---|
@@ -470,7 +412,7 @@ One test runs the regression both ways under `hotkernels.enabled()` and holds th
 
 ### Where it lives
 
-A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of [the whole interface](#the-whole-interface) exported from the package. The prototype has the first six modules:
+A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of [the whole interface](#the-whole-interface) exported from the package. The prototype has the same modules:
 
 | Module | Holds | In the prototype |
 |---|---|---|
@@ -480,10 +422,10 @@ A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of
 | `array.py` | The lazy array: operators, the two protocols, the refusals, `gather()` | [array.py](../prototypes/lazy/array.py) |
 | `namespace.py` | The stand-in for the `numpy` module | [namespace.py](../prototypes/lazy/namespace.py) |
 | `explain.py`, `templates/explain.txt.j2` | The text of a pending graph | [explain.py](../prototypes/lazy/explain.py) |
-| `record.py` | The graph as an object, and the recording mode | Not yet |
-| `view.py`, `templates/graph.html.j2`, the JavaScript library | The graph as a page | Not yet |
+| `record.py` | The graph as an object, and the recording mode | [record.py](../prototypes/lazy/record.py) |
+| `view.py`, `templates/graph.html.j2`, `graph.js`, `graph.css` | The graph as a page | [view.py](../prototypes/lazy/view.py), [templates/](../prototypes/lazy/templates) |
 
-`graph` knows nothing of the others; `rules` and `evaluate` work on nodes and never see a `LazyArray`; `array` is the only module the user's calls enter. Whatever computes a graph differently later replaces one function of `evaluate`.
+`graph` knows nothing of the others; `rules` and `evaluate` work on nodes and never see a `LazyArray`; `array` is the only module the user's calls enter. `record` hears of nodes and computations through one hook that `graph` offers, and `view` sees only what `record` wrote down. Whatever computes a graph differently later replaces one function of `evaluate`.
 
 The prototype stays outside the package on purpose. Inside `hotkernels/` it would be shipped to users and would read as the implementation; in `prototypes/` it is a study object that the implementation is free to depart from.
 
@@ -495,6 +437,7 @@ The prototype stays outside the package on purpose. Inside `hotkernels/` it woul
 | Operation | The callable the user wrote: a ufunc, a function such as `np.sum`, a method such as `x.sum`, or indexing. Empty once the node is computed |
 | Operands | Other nodes, `ndarray`s held by reference, and every other argument exactly as written: which were given, by position or by keyword, and Python numbers as Python numbers. NumPy's rule for a Python `2.0` (it does not widen a `float32` array) is then applied by NumPy, and a call reaches the code that serves that spelling ([With `hotkernels.install()`](#with-hotkernelsinstall)) |
 | Shape, element type | Worked out when the node is made |
+| Kind | Element by element, matrix product, reduction or view: which rule deferred it. What a fusible group is read from, and what the page colours by |
 | Written at | File and line of the user's code, and that module's record of warnings already shown |
 | Error state | The `np.errstate` in effect when it was written |
 | Value | Empty until computed. Then the operands are dropped |
@@ -605,8 +548,6 @@ The function's `ndarray` arguments enter lazy, and what it returns is gathered b
 | Compute silently wherever a value is needed | Not the first build: [issue 262](https://github.com/sofeikov/hotkernels/issues/262) and [Why values leave only through `gather()`](#why-values-leave-only-through-gather) |
 | Refuse calls outside the deferred set as well | Nearly every real program would stop at its first such call until the set grew. They compute without letting a value out, so they are made at once and counted |
 | Defer operations whose shape depends on values (`x[mask]`, `np.unique`) | Every lazy array would lose its shape, and shape errors their line. Making these at once keeps the rule that shape is always known |
-| Keep every node's operation and operands after it is computed, so that a graph can always be looked at | Operands are what keep intermediates alive. The recording mode keeps a record without values instead, when it is asked for |
-| Graphviz for drawing the graph | A static picture and a program to install. A page with a JavaScript library folds, zooms and answers a click, and ships inside the package |
 | Dask, JAX or numexpr | Each has semantics of its own: chunked and parallel arrays, another array library with its own type rules, expressions as strings. The contract here is NumPy's results bit for bit, so that kernels judged against NumPy can compute the graph |
 | The array API standard (`__array_namespace__`) as the way in | It serves libraries written for it. Existing NumPy code calls `np.exp(x)`, which the two protocols above serve. It can be added beside them |
 
@@ -617,14 +558,14 @@ The function's `ndarray` arguments enter lazy, and what it returns is gathered b
 3. **Shape and type errors are NumPy's and are raised on the line,** and value-dependent warnings name the line that wrote the operation, for every deferred kind.
 4. **Every way to a value other than `gather()` raises `NotGathered`,** and no road hands NumPy the memory unnoticed.
 5. **`get_lazy()` works with and without `install()`.** With it, results are the eager program's under the same installation and every kernel the eager program reaches is reached. `delivery check` and NumPy's test suite are unaffected by `get_lazy()`, since it changes nothing in NumPy.
-6. **The graphs of a block of code can be recorded, written as JSON and opened as a page,** and the regression's 50 steps open folded on one screen.
+6. **The graphs of a block of code can be recorded, written as JSON and opened as a page,** and the regression's 50 steps open folded on one screen ([lazy-recording-design.md](lazy-recording-design.md), [lazy-graph-page-design.md](lazy-graph-page-design.md)).
 7. **The user-facing pages say what a user must know:** `docsite/pages/start.md` and `hotkernels/README.md` carry the examples, the table of types and the six differences.
 
 No criterion is about speed.
 
 ## Open questions
 
-Each of the first four has a behaviour in the prototype, so that the prototype is defined.
+Each of the four has a behaviour in the prototype, so that the prototype is defined.
 
 **An `ndarray` read by a pending expression: held by reference, or copied?**
 
@@ -654,13 +595,7 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 - *The table under [The deferred set](#the-deferred-set)* (the prototype): four kinds, enough that the regression and the transformer block run without one call made at once. Since each node is computed by the call as written, a wider set costs shape rules only.
 - *Narrower, element by element and matrix product only:* less to get right first, but reductions, transposes and slices would each cut the graph, and the two programs would be made of many small graphs instead of a few whole ones.
 
-**The debugging tools.** Their direction is in [Debugging tools](#debugging-tools); these parts of it are proposals:
-
-- *What one recorded graph is.* Proposed: one per computation, with its trigger. The other reading is the connected pieces of everything the block wrote, whenever each part was computed; it shows the program's structure and hides where it was cut.
-- *How recording is switched on.* Proposed: a `with` block. An environment variable that records a whole script and writes the page when it ends would need no edit to the script, and can be added beside it.
-- *What makes a group for folding.* Proposed: a line, then repeated runs of the same lines, with depth as the fallback. Depth alone would be simpler to build and would fold a loop in the wrong places.
-- *The JavaScript library.* The candidate is Cytoscape.js for drawing, with dagre for the layered layout; ELK is the other layout to try. What has to be checked before one goes into the package: its licence, what it adds to the size of the wheel, and how it draws nested groups that fold.
-- *The names* `x.graph()` and `hotkernels.record_graphs()`.
+**The graph tools** have their open questions in their own documents: [recording](lazy-recording-design.md#open-questions) and [the page](lazy-graph-page-design.md#open-questions).
 
 ## Not examined
 
@@ -670,7 +605,6 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 - **Pickling and copying a lazy array.** Not tried.
 - **`install(inexact=True)` and the bottleneck hooks with the layer.** Only the default `install()` was run.
 - **The other architecture.** Everything here was run on ARM64 macOS. The layer is pure Python; which kernel takes which call differs by platform, and the test of the kernels makes no assumption about it.
-- **The debugging tools.** Nothing of the object, the recording mode or the page has been built, and no JavaScript library has been tried on a graph of this kind.
 - **A stub file for the stand-in.** Whether one makes `np.` complete in an editor was not tried.
 - **NumPy releases other than 2.5.5.** Both protocols are years old and documented, and the supported range starts at 2.3; the check runs on each.
 - **A program of real size.** The two programs are a few dozen lines each. The applications in `delivery/apps/` are the next test and are part of the check.

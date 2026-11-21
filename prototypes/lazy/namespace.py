@@ -58,11 +58,13 @@ def _lifted(arg: Any) -> Any:
     return arg
 
 
-def _made_lazy(result: Any) -> Any:
+def _made_lazy(result: Any, source: str) -> Any:
     """Make the arrays a function returned lazy.
 
     Args:
         result: What the NumPy function returned.
+        source: The function as a reader would name it, such as "np.zeros",
+            so a recording can say where an array entered.
 
     Returns:
         A lazy array for an exact `ndarray`; a tuple or list with its
@@ -70,9 +72,9 @@ def _made_lazy(result: Any) -> Any:
         included: `np.sqrt(2.0)` stays an `np.float64`.
     """
     if type(result) is np.ndarray:
-        return wrap(result)
+        return wrap(result, source)
     if type(result) in (list, tuple) and any(type(item) is np.ndarray for item in result):
-        return type(result)(_made_lazy(item) for item in result)
+        return type(result)(_made_lazy(item, source) for item in result)
     return result
 
 
@@ -105,7 +107,7 @@ class LazyCallable:
             The result, with any `ndarray` in it made lazy.
         """
         result = self._function(*(_lifted(arg) for arg in args), **{key: _lifted(arg) for key, arg in kwargs.items()})
-        return _made_lazy(result)
+        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}")
 
     def __repr__(self) -> str:
         """Say which function this wraps."""
@@ -185,5 +187,5 @@ class LazyNumPy:
                 return args[0]
             if args and isinstance(args[0], LazyArray):
                 return _at_once(function, f"np.{name}", args, kwargs)
-            return _made_lazy(function(*args, **kwargs))
+            return _made_lazy(function(*args, **kwargs), f"np.{name}")
         return convert

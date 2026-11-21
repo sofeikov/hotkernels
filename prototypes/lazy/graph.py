@@ -14,7 +14,7 @@ import sys
 import threading
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import numpy as np
 
@@ -34,6 +34,9 @@ LOCK = threading.RLock()
 
 # Hands out node numbers. Operands are always numbered below their consumer.
 _numbers = itertools.count()
+
+# What can make the layer compute: the kinds of `Trigger`.
+GATHER, AT_ONCE, WRITE, LIMIT, PENDING = "gather", "at once", "write", "limit", "pending"
 
 
 class NotGathered(TypeError):
@@ -57,6 +60,52 @@ class Origin:
     # That module's `__warningregistry__`, where Python remembers which
     # warnings it has already shown for a line.
     registry: dict = field(compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class Trigger:
+    """What made the layer compute."""
+
+    # One of GATHER, AT_ONCE (a call outside the deferred set), WRITE (a write
+    # into a lazy array), LIMIT (too many nodes pending) and PENDING (nothing
+    # did: the nodes are not computed).
+    kind: str
+    # The call as a reader would name it: "gather", "np.argmax", "x[index] = v".
+    call: str
+
+
+class Observer(Protocol):
+    """Something that is told what the layer does: the recording mode of `record.py`."""
+
+    def made(self, node: "Node", source: str) -> None:
+        """Hear that a node was made.
+
+        Args:
+            node: The node, pending or a leaf.
+            source: For a leaf, what made the array: "array", "np.zeros", "np.argmax".
+        """
+
+    def computing(self, nodes: list["Node"]) -> None:
+        """Hear which nodes are about to be computed, while they still have their operands.
+
+        Args:
+            nodes: The pending nodes one computation will compute.
+        """
+
+    def computed(self, numbers: list[int], failed: set[int], roots: list[int], trigger: Trigger) -> None:
+        """Hear that one computation is over.
+
+        Args:
+            numbers: Numbers of the nodes it computed or failed, in the order it took them.
+            failed: The numbers among them whose computation raised.
+            roots: Numbers of the nodes whose values were asked for.
+            trigger: What made the layer compute.
+        """
+
+
+# The observer in effect, or None. One at a time; `record.py` sets it for the
+# length of a `with` block.
+observer: Observer | None = None
 
 
 @dataclass(eq=False, slots=True, weakref_slot=True)
@@ -91,6 +140,10 @@ class Node:
     value: Any = None
     # The exception computing this node raised, or inherited from an operand.
     failure: BaseException | None = None
+    # For a deferred operation, its kind as `rules` names it: "elementwise",
+    # "matmul", "reduction" or "view". For a leaf, AT_ONCE when it is the
+    # result of a call made at once, and empty for an array from outside.
+    kind: str = ""
 
     @property
     def pending(self) -> bool:
@@ -128,21 +181,27 @@ COUNTS = Counts()
 _pending: weakref.WeakSet[Node] = weakref.WeakSet()
 
 
-def leaf(value: Any) -> Node:
+def leaf(value: Any, source: str = "array", kind: str = "") -> Node:
     """Make a node for an array or NumPy scalar that already exists.
 
     Args:
         value: An `ndarray` or a NumPy scalar. It is held by reference, not copied.
+        source: What made the array, for an observer: "array" for one that
+            came from outside, or the call's name, such as "np.zeros".
+        kind: AT_ONCE for the result of a call made at once; empty otherwise.
 
     Returns:
         A computed node with that value.
     """
-    return Node(number=next(_numbers), name="array", operation=None, args=(), kwargs={},
-                shape=value.shape, dtype=value.dtype, value=value)
+    node = Node(number=next(_numbers), name="array", operation=None, args=(), kwargs={},
+                shape=value.shape, dtype=value.dtype, value=value, kind=kind)
+    if observer is not None:
+        observer.made(node, source)
+    return node
 
 
 def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
-             shape: tuple[int, ...], dtype: np.dtype) -> Node:
+             shape: tuple[int, ...], dtype: np.dtype, kind: str) -> Node:
     """Make a pending node and add it to the pending list.
 
     Args:
@@ -152,15 +211,18 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
         kwargs: Its keyword arguments.
         shape: Shape of the result.
         dtype: Element type of the result.
+        kind: The kind of deferred operation, as `rules` names it.
 
     Returns:
         The node. It remembers the caller's line and the `np.errstate` in effect.
     """
     node = Node(number=next(_numbers), name=name, operation=operation, args=args, kwargs=kwargs,
-                shape=shape, dtype=dtype, origin=caller(), errstate=np.geterr())
+                shape=shape, dtype=dtype, origin=caller(), errstate=np.geterr(), kind=kind)
     with LOCK:
         _pending.add(node)
     COUNTS.deferred += 1
+    if observer is not None:
+        observer.made(node, name)
     return node
 
 
@@ -172,13 +234,13 @@ def caller() -> Origin:
         `np.sum(x)` reaches the layer through NumPy's own Python.
     """
     frame = sys._getframe(1)
-    while frame.f_back is not None and _is_internal(frame.f_code.co_filename):
+    while frame.f_back is not None and is_internal(frame.f_code.co_filename):
         frame = frame.f_back
     registry = frame.f_globals.setdefault("__warningregistry__", {})
     return Origin(frame.f_code.co_filename, frame.f_lineno, frame.f_globals.get("__name__", "<unknown>"), registry)
 
 
-def _is_internal(filename: str) -> bool:
+def is_internal(filename: str) -> bool:
     """Say whether a file is the layer's own code or NumPy's.
 
     Args:

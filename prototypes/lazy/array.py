@@ -20,8 +20,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from . import evaluate, explain, graph, rules
-from .graph import Node, NotGathered
+from . import evaluate, explain, graph, record, rules
+from .graph import Node, NotGathered, Trigger
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -33,13 +33,15 @@ WRITING_METHODS = frozenset({"sort", "fill", "put", "partition", "resize", "item
 WRITING_UFUNC_METHOD = "at"
 
 
-def wrap(value: Any) -> "LazyArray":
+def wrap(value: Any, source: str = "array") -> "LazyArray":
     """Make a lazy array of something that already has values.
 
     Args:
         value: A lazy array, which is returned as it is; or an `ndarray` or
             NumPy scalar, which is held by reference; or anything
             `np.asarray` accepts.
+        source: What made the array, for a recording: "array", or the name
+            of the stand-in's function, such as "np.zeros".
 
     Returns:
         A lazy array on a computed node.
@@ -48,7 +50,7 @@ def wrap(value: Any) -> "LazyArray":
         return value
     if not isinstance(value, (np.ndarray, np.generic)):
         value = np.asarray(value)
-    return LazyArray(graph.leaf(value))
+    return LazyArray(graph.leaf(value, source))
 
 
 def gather(*arrays: Any) -> tuple:
@@ -61,9 +63,10 @@ def gather(*arrays: Any) -> tuple:
     Returns:
         The value of each, in order: what NumPy would have returned for it.
     """
+    trigger = Trigger(graph.GATHER, "gather")
     if not arrays:
-        evaluate.compute_pending()
-    evaluate.compute([array._node for array in arrays if isinstance(array, LazyArray)])
+        evaluate.compute_pending(trigger)
+    evaluate.compute([array._node for array in arrays if isinstance(array, LazyArray)], trigger)
     return tuple(array._node.value if isinstance(array, LazyArray) else array for array in arrays)
 
 
@@ -142,8 +145,8 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
     if signature is None:
         return None
     if graph.pending_count() >= graph.PENDING_LIMIT:
-        evaluate.compute_pending()
-    return LazyArray(graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype))
+        evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
+    return LazyArray(graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype, signature.kind))
 
 
 def _defer_or_call(operation: Callable[..., Any], name: str, call: str, args: tuple) -> Any:
@@ -181,7 +184,7 @@ def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
             would be a value leaving without `gather()`.
     """
     graph.COUNTS.at_once[name] = graph.COUNTS.at_once.get(name, 0) + 1
-    evaluate.compute([lazy._node for lazy in _lazies_in((args, kwargs))])
+    evaluate.compute([lazy._node for lazy in _lazies_in((args, kwargs))], Trigger(graph.AT_ONCE, name))
     return _made_lazy(operation(*_valued(args), **_valued(kwargs)), name)
 
 
@@ -200,11 +203,11 @@ def _made_lazy(result: Any, name: str) -> Any:
         NotGathered: For anything else: a Python bool, float, list of numbers.
     """
     if isinstance(result, (np.ndarray, np.generic)):
-        return LazyArray(graph.leaf(result))
+        return LazyArray(graph.leaf(result, name, graph.AT_ONCE))
     if result is None:
         return None
     if isinstance(result, (list, tuple)) and all(isinstance(item, (np.ndarray, np.generic)) for item in result):
-        items = [LazyArray(graph.leaf(item)) for item in result]
+        items = [LazyArray(graph.leaf(item, name, graph.AT_ONCE)) for item in result]
         return type(result)(*items) if hasattr(result, "_fields") else type(result)(items)
     raise NotGathered(f"{name} gives a plain Python value ({type(result).__name__}) and its arguments are lazy: "
                       "call .gather() on them first")
@@ -229,7 +232,7 @@ def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, 
         raise NotGathered(f"{name} would write the values of a lazy array into an ndarray: "
                           "call .gather() on the lazy array first")
     graph.COUNTS.at_once[name] = graph.COUNTS.at_once.get(name, 0) + 1
-    evaluate.compute_pending()
+    evaluate.compute_pending(Trigger(graph.WRITE, name))
     operation(*_valued(args), **_valued(kwargs))
 
 
@@ -313,11 +316,12 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str) -> Callable[..., An
     def write(self, other):
         """Apply the in-place operator with NumPy's meaning."""
         graph.COUNTS.at_once[symbol] = graph.COUNTS.at_once.get(symbol, 0) + 1
-        evaluate.compute_pending()
-        evaluate.compute([self._node])
+        trigger = Trigger(graph.WRITE, symbol)
+        evaluate.compute_pending(trigger)
+        evaluate.compute([self._node], trigger)
         value = self._node.value
         result = apply(value, _valued(other))
-        return self if result is value else LazyArray(graph.leaf(result))
+        return self if result is value else LazyArray(graph.leaf(result, symbol, graph.AT_ONCE))
     return write
 
 
@@ -420,6 +424,15 @@ class LazyArray:
         """Return the pending graph of this array as text. Computes nothing."""
         return explain.render(self._node)
 
+    def graph(self) -> record.Graph:
+        """Return the pending graph of this array as an object. Computes nothing.
+
+        Returns:
+            Plain data: no array and no live node. It can be written as JSON
+            or opened as a page in the browser.
+        """
+        return record.graph_of(self._node)
+
     # ---- The one way out.
 
     def gather(self) -> Any:
@@ -434,7 +447,7 @@ class LazyArray:
             Exception: What computing it raised, with a note naming the line
                 that wrote the operation.
         """
-        evaluate.compute([self._node])
+        evaluate.compute([self._node], Trigger(graph.GATHER, "gather"))
         return self._node.value
 
     # ---- Everything else that would need the values refuses.
