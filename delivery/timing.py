@@ -348,9 +348,17 @@ def _window(n: int, center: float = 0.0, spread: float = 1.0) -> tuple:
     return (center + spread * _rng(n).standard_normal((rows, n // rows)),)
 
 
-def _narrow_ints(n: int) -> tuple:
-    """Build int64 values close together, where isin's test values match often."""
-    return (_rng(n).integers(0, ISIN_SPAN, n),)
+def _narrow_ints(n: int, dtype: type = np.int64) -> tuple:
+    """Build integers close together, where isin's test values match often.
+
+    Args:
+        n: Element count.
+        dtype: Element type, np.int64 or np.int32.
+
+    Returns:
+        (x,), `n` values of `dtype` from 0 to ISIN_SPAN - 1.
+    """
+    return (_rng(n).integers(0, ISIN_SPAN, n).astype(dtype),)
 
 
 def _search(table: int | None, n: int) -> tuple:
@@ -655,6 +663,8 @@ TAKEN: tuple[Timed, ...] = (
     *(Timed("unique", "np.unique(x)", f"int64, {classes} values", partial(_labels, classes), np.unique, "unique_i64")
       for classes in UNIQUE_LABELS),
     Timed("isin", "np.isin(x, eight_values)", "int64, values close together", _narrow_ints, lambda x: np.isin(x, ISIN_TEST), "isin_i64"),
+    Timed("isin", "np.isin(x, eight_values)", "int32, values close together", partial(_narrow_ints, dtype=np.int32),
+          lambda x: np.isin(x, ISIN_TEST), "isin_i32"),
     Timed("searchsorted", "np.searchsorted(a, v)", "float64, as many needles as elements", partial(_search, None), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, v)", "float64, 1,000 elements", partial(_search, SMALL_TABLE), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, v, side='right')", "float64, as many needles as elements", partial(_search, None), _search_right, "searchsorted_right_f64"),

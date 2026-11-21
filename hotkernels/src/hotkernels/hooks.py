@@ -855,9 +855,16 @@ def _unique() -> bool:
     return result.dtype == np.int64 and result.tolist() == [-3, 0, 7]
 
 
-def _isin() -> bool:
-    """Probe the function hook: `np.isin` with two test values."""
-    x = np.arange(PROBE_N, dtype=np.int64)
+def _isin(dtype: type = np.int64) -> bool:
+    """Probe the function hook: `np.isin` with two test values.
+
+    Args:
+        dtype: Element type of the array searched, np.int64 or np.int32.
+
+    Returns:
+        Whether exactly the two elements equal to the test values were found.
+    """
+    x = np.arange(PROBE_N, dtype=dtype)
     result = np.isin(x, [PROBE_INDEX, SMALL_PROBE_INDEX])
     return int(result.sum()) == 2 and bool(result[PROBE_INDEX]) and bool(result[SMALL_PROBE_INDEX])
 
@@ -1023,7 +1030,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("bincount_i16", partial(_bincount_codes, np.int16)),
         Probe("bincount_i64", partial(_bincount_codes, np.int64)),
     )),
-    Hook("function.isin", FUNCTION, (Probe("isin_i64", _isin),)),
+    Hook("function.isin", FUNCTION, (
+        Probe("isin_i64", _isin),
+        Probe("isin_i32", partial(_isin, np.int32)),
+    )),
     Hook("function.interp", FUNCTION, (Probe("interp_f64", _interp),)),
     Hook("function.compress", FUNCTION, (
         Probe("compress_f32", partial(_compress_function, np.float32, np.compress)),
@@ -1189,6 +1199,7 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("bincount_i16", "np.bincount", "int16", "bincount", ("function.bincount",)),
     KernelInfo("bincount_i64", "np.bincount", "int64", "bincount", ("function.bincount",)),
     KernelInfo("isin_i64", "np.isin", "int64", "isin", ("function.isin",)),
+    KernelInfo("isin_i32", "np.isin", "int32", "isin", ("function.isin",)),
     KernelInfo("searchsorted_f64", "np.searchsorted", "float64", "searchsorted", ("method.searchsorted",)),
     # Indented under the row above: the same call with one argument more, in a
     # column the report keeps to 19 characters.

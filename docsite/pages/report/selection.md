@@ -119,7 +119,7 @@ The speedup over naive C leaps from about 3.5x to 19x between 16,384 and 65,536 
 
 ## `isin`: membership as a table lookup
 
-`np.isin(x, test)` with a handful of test values is slow in NumPy for reasons that are mostly fixed cost (it is a Python-level function that sorts and searches). The kernel handles the case of up to eight test values over int64 data.
+`np.isin(x, test)` with a handful of test values is slow in NumPy for reasons that are mostly fixed cost (it is a Python-level function that sorts and searches). The kernel handles the case of up to eight test values over int64 data. A sibling for int32 data, `isin_i32`, was added later for x86-64, where it narrows with a saturating pack in the same spirit ([kernel-findings](https://github.com/sofeikov/hotkernels/blob/main/docs/kernel-findings.md#npisin-on-int32)); on ARM64 it is the compiled C.
 
 The straightforward vector method compares each element with all eight test values. At 64 bits there are two elements per vector, so that is eight compares per two elements. The compiler already emits exactly this, and it cannot be improved: there is no wider compare on this hardware.
 
