@@ -3116,6 +3116,7 @@ def _search_grid_cases(text: str, search: Callable, kernel: str) -> Iterator[Cas
 def searchsorted_cases() -> Iterator[Case]:
     """Yield the cases of `searchsorted`: float64 and then int64, for both sides."""
     yield from searchsorted_float_cases()
+    yield from searchsorted_f32_needle_cases()
     yield from searchsorted_int_cases()
 
 
@@ -3164,7 +3165,7 @@ def searchsorted_float_cases() -> Iterator[Case]:
         ("np.searchsorted(a, np.float64(0.25))", lambda a, v: np.searchsorted(a, np.float64(0.25)), None),
         ("np.searchsorted(a, np.array(0.25))", lambda a, v: np.searchsorted(a, np.array(0.25)), None),
         ("np.searchsorted(a, v.tolist())", lambda a, v: np.searchsorted(a, v.tolist()), None),
-        ("np.searchsorted(a, v.astype(np.float32))", lambda a, v: np.searchsorted(a, v.astype(np.float32)), None),
+        ("np.searchsorted(a, v.astype(np.float32))", lambda a, v: np.searchsorted(a, v.astype(np.float32)), kernel),
         ("np.searchsorted(a, v.astype(np.int64))", lambda a, v: np.searchsorted(a, v.astype(np.int64)), None),
         ("np.searchsorted(a.astype(np.float32), v)", lambda a, v: np.searchsorted(a.astype(np.float32), v), None),
         ("np.searchsorted(a.astype(np.int64), v)", lambda a, v: np.searchsorted(a.astype(np.int64), v), None),
@@ -3187,6 +3188,127 @@ def searchsorted_float_cases() -> Iterator[Case]:
             yield Case("searchsorted", f"{text} n={n} needles={size} v layout={variant.name}",
                        lambda size=size, variant=variant: (_table(n), variant.build(values("f64", size, arg="v"))),
                        search, expect)
+
+
+# Numbers of float32 needles: besides NEEDLE_COUNTS, either side of the 512
+# that the binding converts to float64 at a time, and of twice that.
+F32_NEEDLE_COUNTS = (*NEEDLE_COUNTS, 511, 512, 513, 1023, 1024, 1025)
+# Bits of float32 signalling NaNs, positive and negative: the quiet bit clear
+# and the lowest and the highest bit of the rest of the fraction set.
+F32_SIGNALLING_NANS = (0x7F800001, 0x7FBFFFFF, 0xFF800001, 0xFFBFFFFF)
+# Bits of float32 values next to the signalling NaNs that are not: the
+# infinities, the largest finite values and the first quiet NaNs.
+F32_NOT_SIGNALLING = (0x7F800000, 0x7F7FFFFF, 0x7FC00000, 0xFF800000, 0xFF7FFFFF, 0xFFC00000, 0x7FFFFFFF)
+# Position of the signalling NaN among the needles in the cases that place one:
+# in the first chunk the binding converts, and in a later one.
+F32_SIGNALLING_POSITIONS = (0, SPELLING_NEEDLES - 1, 700)
+
+
+def _f32_search_arguments(n: int, table_class: str, count: int, needle_class: str) -> tuple:
+    """Build a sorted float64 array and float32 needles for a searchsorted case.
+
+    The array's elements are float32 values held as float64, so that needles
+    taken from it ("hits") equal elements after NumPy converts them.
+
+    Args:
+        n: Length of the sorted array.
+        table_class: Value class of the sorted array.
+        count: Number of needles.
+        needle_class: Value class of the needles, or "hits" for needles taken
+            from the array itself.
+
+    Returns:
+        (sorted float64 array, float32 needles).
+    """
+    table = _table(n, table_class).astype(np.float32).astype(np.float64)
+    if needle_class == "hits":
+        return table, _hits(table, count).astype(np.float32)
+    return table, values("f32", count, needle_class, arg="v")
+
+
+def _f32_bits_arguments(bits: tuple, position: int, count: int) -> tuple:
+    """Build a sorted float64 array and float32 needles holding given bit patterns.
+
+    Args:
+        bits: Bit patterns of float32 values to place among random needles.
+        position: Index of the first of them; the rest follow it.
+        count: Number of needles.
+
+    Returns:
+        (sorted float64 array of ORDINARY_N elements, float32 needles).
+    """
+    needles = values("f32", count, arg="v")
+    patterns = np.array(bits, dtype=np.uint32).view(np.float32)
+    needles[position:position + len(patterns)] = patterns
+    return _table(ORDINARY_N), needles
+
+
+def searchsorted_f32_needle_cases() -> Iterator[Case]:
+    """Yield the cases of `searchsorted` on float64 with float32 needles, for both sides."""
+    for text, search, kernel in SEARCH_SIDES:
+        text = text.replace("v)", "v32)")
+        for n, count in itertools.product(TABLE_SIZES, F32_NEEDLE_COUNTS):
+            for needle_class in (*NEEDLE_CLASSES, "hits"):
+                yield Case("searchsorted", f"{text} a=random n={n} v32={needle_class} needles={count}",
+                           partial(_f32_search_arguments, n, "random", count, needle_class), search, kernel)
+            for table_class in TABLE_CLASSES[1:]:
+                yield Case("searchsorted", f"{text} a={table_class} n={n} v32=hits needles={count}",
+                           partial(_f32_search_arguments, n, table_class, count, "hits"), search, kernel)
+        for n in (LARGE_TABLE_N, BEYOND_LARGE_TABLE_N):
+            for count, (table_class, needle_class) in itertools.product(LARGE_TABLE_NEEDLES, LARGE_TABLE_PAIRS):
+                yield Case("searchsorted", f"{text} a={table_class} n={n} v32={needle_class} needles={count}",
+                           partial(_f32_search_arguments, n, table_class, count, needle_class), search, kernel)
+        # Values next to a signalling NaN are searched; a signalling NaN
+        # anywhere among the needles makes NumPy's cast warn, and is NumPy's.
+        yield Case("searchsorted", f"{text} v32=infinities, largest and quiet NaNs needles={SPELLING_NEEDLES}",
+                   partial(_f32_bits_arguments, F32_NOT_SIGNALLING, 1, SPELLING_NEEDLES), search, kernel)
+        for bits, position in itertools.product(F32_SIGNALLING_NANS, F32_SIGNALLING_POSITIONS):
+            count = max(SPELLING_NEEDLES, position + 1)
+            yield Case("searchsorted", f"{text} v32=signalling NaN {bits:#x} at {position} needles={count}",
+                       partial(_f32_bits_arguments, (bits,), position, count), search, None)
+        for size in (0, *LAYOUT_SIZES):
+            for variant in variants_for("f32", size):
+                expect = None if variant.name == "list" else _search_layout_expectation(kernel, variant, size, any_shape=True)
+                yield Case("searchsorted", f"{text} n={ORDINARY_N} needles={size} v32 layout={variant.name}",
+                           lambda size=size, variant=variant: (_table(ORDINARY_N), variant.build(values("f32", size, arg="v"))),
+                           search, expect)
+
+    n, count = ORDINARY_N, SPELLING_NEEDLES
+    arguments = partial(_f32_search_arguments, n, "random", count, "random")
+    kernel, right = "searchsorted_f64", "searchsorted_right_f64"
+    spellings = (
+        ("a.searchsorted(v32)", lambda a, v: a.searchsorted(v), kernel),
+        ("a.searchsorted(v32, 'right')", lambda a, v: a.searchsorted(v, "right"), right),
+        ("np.digitize(v32, a)", lambda a, v: np.digitize(v, a), right),
+        ("np.digitize(v32, a, right=True)", lambda a, v: np.digitize(v, a, right=True), kernel),
+        ("np.searchsorted(a, v32.reshape(4, -1))", lambda a, v: np.searchsorted(a, v.reshape(4, -1)), kernel),
+        ("np.searchsorted(a, v32, sorter=np.arange(len(a)))", lambda a, v: np.searchsorted(a, v, sorter=np.arange(len(a))), None),
+        ("np.searchsorted(a, v32[0])", lambda a, v: np.searchsorted(a, v[0]), None),
+        ("np.searchsorted(a, np.array(v32[0]))", lambda a, v: np.searchsorted(a, np.array(v[0])), None),
+        ("np.searchsorted(a, v32.astype(np.float16))", lambda a, v: np.searchsorted(a, v.astype(np.float16)), None),
+        ("np.searchsorted(a, v32.astype('>f4'))", lambda a, v: np.searchsorted(a, v.astype(">f4")), None),
+        ("np.searchsorted(a.astype(np.float32), v32)", lambda a, v: np.searchsorted(a.astype(np.float32), v), None),
+        ("np.searchsorted(a.astype(np.int64), v32)", lambda a, v: np.searchsorted(a.astype(np.int64), v), None),
+    )
+    for text, call, expect in spellings:
+        yield Case("searchsorted", f"{text} n={n} needles={count}", arguments, call, expect)
+    # A signalling NaN under np.errstate(invalid='raise'): NumPy raises.
+    yield Case("searchsorted", f"np.searchsorted(a, v32) v32=signalling NaN under errstate(invalid='raise') needles={count}",
+               partial(_f32_bits_arguments, F32_SIGNALLING_NANS[:1], 0, count), _search_raising_invalid, None)
+
+
+def _search_raising_invalid(a, v):
+    """Call `np.searchsorted(a, v)` under `np.errstate(invalid='raise')`.
+
+    Args:
+        a: The sorted array.
+        v: The needles.
+
+    Returns:
+        What NumPy, or the kernel in its place, returns or raises.
+    """
+    with np.errstate(invalid="raise"):
+        return np.searchsorted(a, v)
 
 
 # The two sides of a search on int64, as SEARCH_SIDES.
