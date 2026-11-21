@@ -36,6 +36,18 @@ maskfill_f32:
     vpxor   xmm1, xmm1, xmm1
     lea     r8, [rsi + rdx - 8]         # the last eight mask bytes
     lea     r9, [rdi + rdx * 4 - 32]    # the last eight elements
+    # The first eight elements, then x moves on to a 32-byte boundary, so
+    # that no store of the loops straddles two cache lines. The elements
+    # skipped are among the eight just done. An x that is not 4-byte aligned
+    # cannot reach the boundary and moves on by whole elements regardless.
+    FILL    0, 0, ymm2
+    mov     eax, edi
+    neg     eax
+    and     eax, 31
+    shr     eax, 2                      # elements to the boundary, 0..7
+    add     rsi, rax
+    lea     rdi, [rdi + rax * 4]
+    sub     rdx, rax
     mov     rcx, rdx
     shr     rcx, 5                      # blocks of 32
     jz      .Lgroups
