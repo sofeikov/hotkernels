@@ -813,8 +813,10 @@ def _index_item(item: Any) -> str:
     """
     if item is Ellipsis:
         return "..."
+    if isinstance(item, np.ndarray):
+        return f"<{item.size} {item.dtype}>" if item.size > 4 else repr(item.tolist())
     if not isinstance(item, slice):
-        return repr(item)
+        return _text(item)
     start, stop = ("" if bound is None else repr(bound) for bound in (item.start, item.stop))
     return f"{start}:{stop}" if item.step is None else f"{start}:{stop}:{item.step!r}"
 

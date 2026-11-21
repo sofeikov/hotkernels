@@ -27,6 +27,9 @@ from .graph import Node, NotGathered, Trigger
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
+# NumPy functions that make a new array from the shape and element type of
+# their first argument and from nothing else of it. They need no value.
+SHAPED_LIKE = frozenset({np.zeros_like, np.ones_like, np.empty_like, np.full_like})
 # NumPy functions that write into their first argument.
 WRITING_FUNCTIONS = frozenset({np.copyto, np.putmask, np.place, np.put, np.fill_diagonal})
 # Methods of `ndarray` that write into the array they are called on.
@@ -292,6 +295,25 @@ def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, 
     operation(*_valued(args), **_valued(kwargs))
 
 
+def _settled_index(index: Any) -> Any:
+    """Put the values of computed lazy arrays into an index.
+
+    Args:
+        index: What was written between the brackets.
+
+    Returns:
+        The index, with each lazy array that already has its values replaced
+        by them, so that an index of integer arrays can be deferred. One that
+        holds a lazy array still pending is returned as it is, and the
+        indexing is then made at once.
+    """
+    items = index if isinstance(index, tuple) else (index,)
+    if not any(isinstance(item, LazyArray) for item in items) or any(isinstance(item, LazyArray) and item._node.pending for item in items):
+        return index
+    settled = tuple(item._node.value if isinstance(item, LazyArray) else item for item in items)
+    return settled if isinstance(index, tuple) else settled[0]
+
+
 def _method(name: str) -> Callable[..., Any]:
     """Build a function that calls a method by name on its first argument.
 
@@ -407,7 +429,7 @@ def _reduction(function: Callable[..., Any], name: str) -> Callable[..., Any]:
 
     Args:
         function: The NumPy function whose rule gives the shape and element type, such as `np.sum`.
-        name: The method's name, such as "sum".
+        name: The method's name, such as "sum". `dot` and `copy` are built the same way.
 
     Returns:
         A method that defers the call as it was written: the node calls the
@@ -661,6 +683,11 @@ class LazyArray:
             return target
         if func in WRITING_FUNCTIONS:
             return _write(func, call, args, kwargs, args[:1])
+        if func in SHAPED_LIKE and isinstance(args[0], LazyArray) and not _lazies_in((args[1:], kwargs)):
+            # Only the shape and element type of the argument are used, and
+            # those are known: the new array is made without computing it.
+            like = rules.ghost(args[0]._node)
+            return LazyArray(graph.leaf(func(like, *args[1:], **kwargs), call, strict=args[0]._node.strict))
         deferred = _try_defer(func, func.__name__, args, kwargs)
         return deferred if deferred is not None else _at_once(func, call, args, kwargs)
 
@@ -673,11 +700,14 @@ class LazyArray:
             index: What was written between the brackets.
 
         Returns:
-            A deferred view for integers, slices, `None` and `...`. An index
-            holding an array or a mask is made at once: the shape of `x[mask]`
-            depends on values, and a lazy array's shape is always known.
+            A deferred view for integers, slices, `None` and `...`, and a
+            deferred selection for arrays or lists of integers. An index
+            holding a mask is made at once: the shape of `x[mask]` depends on
+            values, and a lazy array's shape is always known. So is one
+            holding a lazy array still pending: the bounds are checked against
+            an index's values on the line that writes it.
         """
-        return _defer_or_call(operator.getitem, "getitem", "x[index]", (self, index))
+        return _defer_or_call(operator.getitem, "getitem", "x[index]", (self, _settled_index(index)))
 
     def __setitem__(self, index: Any, value: Any) -> None:
         """Assign into the array: a write, with NumPy's meaning.
@@ -690,6 +720,8 @@ class LazyArray:
 
     # ---- Methods the graph knows. Any other method is `ndarray`'s, through `__getattr__`.
 
+    dot = _reduction(np.dot, "dot")
+    copy = _reduction(np.copy, "copy")
     sum = _reduction(np.sum, "sum")
     mean = _reduction(np.mean, "mean")
     max = _reduction(np.max, "max")

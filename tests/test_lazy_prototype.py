@@ -245,16 +245,16 @@ def test_the_report_ranks_what_was_computed_unasked():
     x = lazy.arange(4.0)
     for _ in range(3):
         numpy.argmax(x * 2)
-    numpy.dot(x, x)
+    numpy.cumsum(x)
     x[0] = float((x + 1).sum())
     found = lazy_report()
-    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 3), ("np.dot", 1)]
+    assert [(row.call, row.count) for row in found.eager] == [("np.argmax", 3), ("np.cumsum", 1)]
     assert found.eager[0].places[0][1] == 3 and found.eager[0].places[0][0].startswith("test_lazy_prototype.py:")
     assert [(row.call, row.count) for row in found.writes] == [("x[index] = v", 1)]
     assert [(row.call, row.count) for row in found.needed] == [("float()", 1)]
     text = str(found).splitlines()
     assert text[0] == "Made at once by NumPy: not in the deferred set"
-    assert text[1].split()[:2] == ["3", "np.argmax"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.dot"]
+    assert text[1].split()[:2] == ["3", "np.argmax"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.cumsum"]
     assert "A graph computed early: a write into a lazy array" in text and "none" not in str(found)
     assert lazy_report(reset=True).eager and not lazy_report().eager and "none" in str(lazy_report())
 
@@ -388,17 +388,72 @@ def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     x = lazy.asarray(data)
     cases = {
         "mask": (x[x > 0], data[data > 0]),
-        "fancy": (x[[0, 2, 4]], data[[0, 2, 4]]),
         "norm": (numpy.linalg.norm(x * 2), numpy.linalg.norm(data * 2)),
         "cumsum": (x.cumsum(), data.cumsum()),
         "argmax": (numpy.argmax(-x), numpy.argmax(-data)),
         "concatenate": (numpy.concatenate([x, data]), numpy.concatenate([data, data])),
-        "dot": (numpy.dot(x, x), numpy.dot(data, data)),
+        "dot of three dimensions": (numpy.dot(x.reshape(2, 5, 5), x.reshape(2, 5, 5)), numpy.dot(data.reshape(2, 5, 5), data.reshape(2, 5, 5))),
         "sort": (numpy.sort(x), numpy.sort(data)),
     }
     for name, (got, expected) in cases.items():
         assert type(got) is LazyArray and not got._node.pending, name
         assert same(expected, got.gather()), name
+
+
+def test_dot_and_copy_are_deferred():
+    """np.dot of vectors and matrices is deferred as the matrix product it is; so is a copy, which stays a copy."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6))
+    x = lazy.asarray(data)
+    cases = {
+        "matrix by matrix": (numpy.dot(x, x.T), numpy.dot(data, data.T)),
+        "matrix by vector": (numpy.dot(x, x[0]), numpy.dot(data, data[0])),
+        "vector by vector": (numpy.dot(x[0], x[1]), numpy.dot(data[0], data[1])),
+        "plain by lazy": (numpy.dot(data.T, x), numpy.dot(data.T, data)),
+        "method": (x.dot(x.T), data.dot(data.T)),
+        "copy": (numpy.copy(x), numpy.copy(data)),
+        "copy, method": (x.copy(), data.copy()),
+    }
+    graph.COUNTS.reset()
+    for name, (got, expected) in cases.items():
+        assert type(got) is LazyArray and got._node.pending and got.shape == numpy.shape(expected), name
+        assert same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {}
+    assert x.copy().gather() is not data and x.gather() is data
+    assert str(raised(lambda: numpy.dot(x, x))) == str(raised(lambda: numpy.dot(data, data)))
+
+
+def test_an_array_like_another_needs_no_value():
+    """zeros_like, ones_like and full_like use the shape and type of a lazy array and do not compute it."""
+    pending = lazy.arange(6.0).reshape(2, 3) * 2
+    graph.COUNTS.reset()
+    made = {"zeros": numpy.zeros_like(pending), "ones": lazy.ones_like(pending), "full": numpy.full_like(pending, 7.0),
+            "typed": numpy.zeros_like(pending, dtype=numpy.int32)}
+    assert pending._node.pending and graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    assert same(numpy.zeros((2, 3)), made["zeros"].gather()) and same(numpy.ones((2, 3)), made["ones"].gather())
+    assert same(numpy.full((2, 3), 7.0), made["full"].gather()) and same(numpy.zeros((2, 3), numpy.int32), made["typed"].gather())
+    made["zeros"][0, 0] = 1.0
+    assert made["zeros"].gather()[0, 0] == 1.0
+
+
+def test_indexing_by_integer_arrays_is_deferred():
+    """x[rows], x[[0, 2]], x[rows, columns] have a shape that needs no value; a mask or a pending index does not."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    rows, columns = numpy.array([4, 0, 2]), numpy.array([1, 1, 3])
+    cases = {
+        "an array": (x[rows], plain[rows]), "a list": (x[[0, 2, 4]], plain[[0, 2, 4]]),
+        "two arrays": (x[rows, columns], plain[rows, columns]), "a slice and an array": (x[1:, columns], plain[1:, columns]),
+        "a computed lazy array": (x[lazy.asarray(rows)], plain[rows]), "two dimensions": (x[rows.reshape(3, 1)], plain[rows.reshape(3, 1)]),
+    }
+    graph.COUNTS.reset()
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == expected.shape and got.dtype == expected.dtype, name
+        assert same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {}
+    assert str(raised(lambda: x[numpy.array([0, 6])])) == str(raised(lambda: plain[numpy.array([0, 6])]))
+    assert not x[x > 0]._node.pending and not x[lazy.arange(3) * 2]._node.pending
+    assert same(plain[numpy.arange(3) * 2], x[lazy.arange(3) * 2].gather())
 
 
 def test_the_stand_in_answers_like_the_module():

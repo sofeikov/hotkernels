@@ -140,7 +140,7 @@
   function categoryOf(node) {
     if (node.kind === 'earlier') return 'earlier';
     if (node.kind === 'input') return node.category === 'at once' ? 'atonce' : 'input';
-    return node.category || 'elementwise';
+    return node.category === 'indexing' ? 'view' : node.category || 'elementwise';   // A selection by arrays is drawn as a view is.
   }
 
   // ---- The model: the graph's JSON with the lookups the script needs.
