@@ -65,7 +65,7 @@ The names are provisional. One recording runs at a time; entering a second raise
 |---|---|---|
 | `gather` | `x.gather()` or `hotkernels.gather(...)` | `gather` |
 | `at once` | A call outside the deferred set needed its operands | `np.argmax` |
-| `write` | A write into a lazy array computed everything pending first | `x[index] = v`, `x += y` |
+| `write` | A write into a lazy array had to be made at once, in memory known outside the layer, and computed everything pending first. A deferred write triggers nothing: it is a node | `x[index] = v`, `x += y` |
 | `needed` | Something needed values and `gather()` was not called | `float()`, `Conversion to an ndarray`, `np.add` |
 | `limit` | Too many nodes were pending | `the limit of pending nodes` |
 | `pending` | Nothing did: the nodes were not computed. The last graph of a recording, and every `x.graph()` | `still pending when the block ended` |
@@ -112,7 +112,7 @@ A file is named by its name alone at every level, never by its path. `x.graph()`
 | `id` | The node's number. Negative for an `ndarray` that is not a node of the layer |
 | `kind` | `operation`; `input` for an array from outside this graph that was never an operation of the recording; `earlier` for an operation an earlier graph computed |
 | `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it |
-| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view` or `indexing`. For an input, `array`, or `at once` when it is the result of a call made at once |
+| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
 | `dtype`, `shape`, `nbytes` | The element type, shape and size of its result |
 | `where`, `code` | File name and line of the user's code that wrote it, and the text of that line |
 | `operands` | The ids of the nodes it reads |
@@ -195,7 +195,7 @@ The tree is best effort, and it cannot lose anything: the nodes are all in `node
 
 ## What was verified
 
-On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 15 tests:
+On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 16 tests:
 
 - **One graph per computation:** a gather, a call made at once, a write and what is left pending give four graphs in order, each with its trigger, its line and the text of the line.
 - **What was computed unasked:** a recording's own counts by call and line, its report, and the same as `events` in its data.
@@ -204,6 +204,7 @@ On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev
 - **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray` and the result of a call made at once; and `earlier` with the graph's index.
 - **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a call of twenty lines as three stretches; a generator expression as a line of its function.
 - **Alike:** a loop that gathers at each step gives one graph per step with one signature from the second on.
+- **A loop that writes in place:** fifty steps with two in-place updates and an assignment each are one graph of 300 operations, 150 of them writes, grouped as one `repeat`, with no write made at once.
 - **No result changes,** and after the block the recording holds no frame.
 - **A failure** is in its graph with the state `failed`.
 - **Dropped work is counted,** and a second recording inside the first raises.

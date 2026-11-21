@@ -70,7 +70,7 @@ One of the graphs of a loop that gathers its loss every fifth step. The three da
 
 What is drawn:
 
-- **An operation** is a box with its name and, under it, the shape and element type of its result. Its colour is its kind: element by element, matrix product, reduction or view; indexing by arrays is drawn as a view is. That makes a chain of element-by-element operations ending in a reduction visible at a glance, which is the first thing fusing would look for.
+- **An operation** is a box with its name and, under it, the shape and element type of its result. Its colour is its kind: element by element, matrix product, reduction, view, or a write into an array; indexing by arrays is drawn as a view is. That makes a chain of element-by-element operations ending in a reduction visible at a glance, which is the first thing fusing would look for.
 - **An input** is a pill: `np.zeros`, `np.asarray`, `ndarray`. A result of a call made at once has a colour of its own, since it marks a cut.
 - **An open group** is a frame with a title: a line of code, `softmax()`, `× 50`.
 - **A folded group** is a stack of cards with its title and how many operations it holds.
@@ -199,7 +199,7 @@ Two things were found by looking and changed:
 - **Other browsers.** One was used.
 - **The code view with only the lines that did something, and with no code.** Both are held by a test of the page's data; neither was looked at in a browser.
 - **A notebook.**
-- **A very large graph.** The largest drawn was 954 operations, of which 86 elements were on screen at most; the page with the most graphs had 749 and a file of 1.7 MB. How long the layout takes on thousands of visible elements was not measured.
+- **A very large graph.** The largest drawn was 2,059 operations, three iterations of a recurrent network's training, which opened folded as 15 elements; unfolded, the most on screen was 86, for another graph. How long the layout takes on thousands of visible elements was not measured.
 - **The page without a network connection.** It says the library could not be loaded; that message was not looked at in a browser.
 - **A keyboard alone, and a screen reader.** The drawing is reached by pointer.
 - **A touch screen.**

@@ -29,7 +29,7 @@
 
   const CATEGORIES = [
     ['elementwise', 'element by element'], ['matmul', 'matrix product'], ['reduction', 'reduction'],
-    ['view', 'view'], ['input', 'input'], ['atonce', 'made at once'], ['earlier', 'from an earlier graph'],
+    ['view', 'view'], ['write', 'write into an array'], ['input', 'input'], ['atonce', 'made at once'], ['earlier', 'from an earlier graph'],
   ];
   const TRIGGER_TEXT = {
     'gather': call => `computed by ${call}`,

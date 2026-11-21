@@ -20,6 +20,8 @@
   --reduction-line: #dd9f31;
   --view-fill: #e0f3ec;
   --view-line: #55b096;
+  --write-fill: #eef5cf;
+  --write-line: #93a83a;
   --input-fill: #ffffff;
   --input-line: #98a2b3;
   --atonce-fill: #fde6e6;
@@ -51,6 +53,8 @@
     --reduction-line: #c98f2a;
     --view-fill: #16342c;
     --view-line: #4a9f87;
+    --write-fill: #2a3214;
+    --write-line: #8a9f38;
     --input-fill: #1a1f28;
     --input-line: #7c8799;
     --atonce-fill: #3d1f1f;
@@ -235,6 +239,7 @@ svg text.tag { fill: var(--muted); font-size: 9.5px; text-transform: uppercase; 
 .node.cat-matmul rect { fill: var(--matmul-fill); stroke: var(--matmul-line); }
 .node.cat-reduction rect { fill: var(--reduction-fill); stroke: var(--reduction-line); }
 .node.cat-view rect { fill: var(--view-fill); stroke: var(--view-line); }
+.node.cat-write rect { fill: var(--write-fill); stroke: var(--write-line); }
 .node.cat-atonce rect { fill: var(--atonce-fill); stroke: var(--atonce-line); }
 .node.kind-earlier rect { fill: var(--earlier-fill); stroke: var(--earlier-line); stroke-dasharray: 4 3; }
 .node.output rect, .folded.output rect.front { stroke-width: 2.6; }

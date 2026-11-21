@@ -66,7 +66,7 @@ def test_one_graph_per_computation_with_what_triggered_it():
         y = x * 2 + 1
         y.gather()
         top = numpy.argmax(y - 3)
-        z = lazy.zeros(6)
+        z = lazy.asarray(numpy.zeros(6))
         late = y / 4
         z[0] = 1.0
         left = z + late
@@ -94,6 +94,23 @@ def test_a_value_needed_without_gather_is_a_graph_of_its_own():
     assert [(each.trigger, each.call) for each in recording.graphs] == [
         (graph.NEEDED, "float()"), (graph.NEEDED, "Conversion to an ndarray")]
     assert [[node.name for node in operations(each)] for each in recording.graphs] == [["add", "sum"], ["multiply", "multiply"]]
+
+
+def test_a_loop_that_writes_in_place_is_one_graph():
+    """Updates in place of an array the layer made are nodes: fifty steps of a loop are computed as one graph."""
+    with record_graphs() as recording:
+        w = lazy.zeros(3)
+        total = lazy.zeros(3)
+        for _ in range(50):
+            step = 0.1 * (w - 1)
+            w -= step
+            total += step * step
+            total[0] = 0.0
+        gather(w, total)
+    assert [(each.trigger, len(operations(each))) for each in recording.graphs] == [(graph.GATHER, 50 * 6)]
+    written = [node for node in operations(recording.graphs[0]) if node.category == "write"]
+    assert len(written) == 150 and {node.name for node in written} == {"x -= y", "x += y", "setitem"}
+    assert recording.report().writes == () and kinds(recording.graphs[0].groups) == [REPEAT]
 
 
 def test_a_node_is_plain_data_and_says_where_it_came_from():
@@ -282,7 +299,7 @@ def test_the_pending_graph_of_one_array():
 def test_a_recording_keeps_what_was_computed_unasked_by_line():
     """A recording has its own count of eager calls, writes and values needed, and reports them."""
     with record_graphs() as recording:
-        x = lazy.arange(4.0)
+        x = lazy.asarray(numpy.arange(4.0))
         for _ in range(2):
             numpy.argmax(x + 1)
         x[0] = float(x.sum())

@@ -54,6 +54,13 @@ PYTHON_NUMBERS = (bool, int, float, complex)
 
 # The kinds of deferred operation.
 ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING = "elementwise", "matmul", "reduction", "view", "indexing"
+# The kind of a node that is a write into an array: a copy of what the array
+# held, with the write made into it. Not planned here; `array.py` makes it.
+WRITE = "write"
+# The view functions whose result always shares its argument's memory.
+# `np.reshape` is not among them: it copies when the memory's layout does not
+# allow a view, which is not known before the argument is computed.
+SURE_VIEWS = frozenset({np.transpose, np.swapaxes, np.expand_dims, np.squeeze})
 
 
 @dataclass(frozen=True)
@@ -131,7 +138,7 @@ def is_basic_index(index: Any) -> bool:
     """
     items = index if isinstance(index, tuple) else (index,)
     return all(item is None or item is Ellipsis or isinstance(item, slice)
-               or (isinstance(item, int) and not isinstance(item, bool)) for item in items)
+               or (isinstance(item, (int, np.integer)) and not isinstance(item, bool)) for item in items)
 
 
 def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | None:
@@ -380,10 +387,10 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
         return args[0].dtype
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
-        return np.result_type(operation(*(_probe(arg) for arg in args), **kwargs))
+        return np.result_type(operation(*(probe(arg) for arg in args), **kwargs))
 
 
-def _probe(operand: Any) -> Any:
+def probe(operand: Any) -> Any:
     """Return a stand-in with an operand's element type and number of dimensions, and one element.
 
     Args:

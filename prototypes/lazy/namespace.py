@@ -37,6 +37,8 @@ from .array import LazyArray, _at_once, wrap
 CONVERTERS = frozenset({"array", "asarray", "asanyarray", "ascontiguousarray", "asfortranarray"})
 # The converters that return their argument unchanged when it is an array already.
 PASS_THROUGH = frozenset({"asarray", "asanyarray"})
+# NumPy's random generators, whose methods make arrays out of the module's sight.
+RANDOM_GENERATORS = (np.random.Generator, np.random.RandomState)
 
 
 def get_lazy(strict: bool = False) -> "LazyNumPy":
@@ -72,7 +74,25 @@ def _lifted(arg: Any, strict: bool) -> Any:
     return arg
 
 
-def _made_lazy(result: Any, source: str, strict: bool) -> Any:
+def _holds_arrays(arguments: Any) -> bool:
+    """Say whether a call's arguments hold an array, at any depth of lists, tuples and dicts.
+
+    Args:
+        arguments: Arguments of a call made through the stand-in.
+
+    Returns:
+        True for an `ndarray` or a lazy array among them. A function called
+        with none has just made whatever array it returns, so nothing
+        outside the layer knows that array's memory.
+    """
+    if isinstance(arguments, (np.ndarray, LazyArray)):
+        return True
+    if isinstance(arguments, dict):
+        arguments = tuple(arguments.values())
+    return isinstance(arguments, (list, tuple)) and any(_holds_arrays(item) for item in arguments)
+
+
+def _made_lazy(result: Any, source: str, strict: bool, owned: bool = False) -> Any:
     """Make the arrays a function returned lazy.
 
     Args:
@@ -80,6 +100,8 @@ def _made_lazy(result: Any, source: str, strict: bool) -> Any:
         source: The function as a reader would name it, such as "np.zeros",
             so a recording can say where an array entered.
         strict: Whether an `ndarray` made lazy here is strict.
+        owned: Whether the function has just made the array, from no array:
+            a write into it can then be deferred. See `array.wrap`.
 
     Returns:
         A lazy array for an exact `ndarray`; a tuple or list with its
@@ -87,9 +109,11 @@ def _made_lazy(result: Any, source: str, strict: bool) -> Any:
         included: `np.sqrt(2.0)` stays an `np.float64`.
     """
     if type(result) is np.ndarray:
-        return wrap(result, source, strict)
+        return wrap(result, source, strict, owned)
     if type(result) in (list, tuple) and any(type(item) is np.ndarray for item in result):
-        return type(result)(_made_lazy(item, source, strict) for item in result)
+        return type(result)(_made_lazy(item, source, strict, owned) for item in result)
+    if isinstance(result, RANDOM_GENERATORS):
+        return LazyRandom(result, strict)
     return result
 
 
@@ -123,9 +147,10 @@ class LazyCallable:
         Returns:
             The result, with any `ndarray` in it made lazy.
         """
+        owned = not _holds_arrays((args, kwargs))
         result = self._function(*(_lifted(arg, self._strict) for arg in args),
                                 **{key: _lifted(arg, self._strict) for key, arg in kwargs.items()})
-        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}", self._strict)
+        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}", self._strict, owned)
 
     def __repr__(self) -> str:
         """Say which function this wraps."""
@@ -141,6 +166,43 @@ class LazyCallable:
             `np.add.reduce` as another wrapped callable; `np.add.nin` as the number it is.
         """
         attribute = getattr(self._function, name)
+        return LazyCallable(attribute, self._strict) if callable(attribute) else attribute
+
+
+class LazyRandom:
+    """Stands where one of NumPy's random generators stands, and makes the arrays it draws lazy.
+
+    `np.random.default_rng()` returns an object of NumPy's, whose methods the
+    stand-in for the module never sees. Without this, `rng.standard_normal(n)`
+    is a plain `ndarray`, and a program that takes its data and its weights
+    from a generator computes most of its arithmetic outside any graph.
+    """
+
+    def __init__(self, generator: Any, strict: bool) -> None:
+        """Stand in for one generator.
+
+        Args:
+            generator: A `numpy.random.Generator` or `numpy.random.RandomState`.
+            strict: Whether the arrays it draws are strict.
+        """
+        self._generator = generator
+        self._strict = strict
+
+    def __repr__(self) -> str:
+        """Say which generator this stands in for."""
+        return f"<lazy stand-in for {self._generator!r}>"
+
+    def __getattr__(self, name: str) -> Any:
+        """Answer an attribute of the generator.
+
+        Args:
+            name: The attribute asked for.
+
+        Returns:
+            A method wrapped so that the arrays it returns are lazy;
+            anything else (`bit_generator`) as it is.
+        """
+        attribute = getattr(self._generator, name)
         return LazyCallable(attribute, self._strict) if callable(attribute) else attribute
 
 
@@ -207,5 +269,7 @@ class LazyNumPy:
                 return args[0]
             if args and isinstance(args[0], LazyArray):
                 return _at_once(function, f"np.{name}", args, kwargs)
-            return _made_lazy(function(*args, **kwargs), f"np.{name}", self._strict)
+            # `np.array` copies unless told not to; the others return an array they are given as it is.
+            owned = not _holds_arrays((args, kwargs)) or (name == "array" and kwargs.get("copy", True) is True)
+            return _made_lazy(function(*args, **kwargs), f"np.{name}", self._strict, owned)
         return convert
