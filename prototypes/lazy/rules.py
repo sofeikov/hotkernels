@@ -37,6 +37,15 @@ REDUCTION_KEYWORDS = frozenset({"axis", "keepdims"})
 VIEWS = frozenset({np.transpose, np.swapaxes, np.reshape, np.expand_dims, np.squeeze})
 # Functions that work element by element and are not ufuncs.
 SELECTIONS = frozenset({np.where})
+# Functions that give their one argument again, as a new array.
+COPIES = frozenset({np.copy})
+# `np.dot` is deferred for operands of these numbers of dimensions, where it
+# is the matrix product. With more, `np.dot` and `@` are different operations.
+DOT_DIMENSIONS = (1, 2)
+# An element type of no size. An array of it takes no memory whatever its
+# shape, so indexing one by arrays gives NumPy's shape and NumPy's errors for
+# nothing; see `_indexed_shape`.
+NO_SIZE = np.dtype([])
 # `dtype.kind` of the element types that are deferred: boolean, signed and
 # unsigned integer, floating and complex. Dates, strings and objects are not.
 DEFERRED_KINDS = frozenset("biufc")
@@ -44,7 +53,7 @@ DEFERRED_KINDS = frozenset("biufc")
 PYTHON_NUMBERS = (bool, int, float, complex)
 
 # The kinds of deferred operation.
-ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW = "elementwise", "matmul", "reduction", "view"
+ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING = "elementwise", "matmul", "reduction", "view", "indexing"
 
 
 @dataclass(frozen=True)
@@ -84,6 +93,32 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
     return Signature(shape, _element_type(kind, operation, args, kwargs), kind)
 
 
+def is_array_index(index: Any) -> bool:
+    """Say whether an index selects by integer arrays, whose result has a shape that does not depend on values.
+
+    Args:
+        index: What was written between the brackets.
+
+    Returns:
+        True when every item is an integer, a slice, `None`, `...`, an
+        `ndarray` of integers or a list of integers, and at least one is an
+        array or a list. False for a mask: the shape of `x[mask]` depends on
+        what the mask holds.
+    """
+    items = index if isinstance(index, tuple) else (index,)
+    arrays = 0
+    for item in items:
+        if isinstance(item, list):
+            item = np.asarray(item)
+        if isinstance(item, np.ndarray):
+            if item.dtype.kind not in "iu":
+                return False
+            arrays += 1
+        elif not is_basic_index(item):
+            return False
+    return arrays > 0
+
+
 def is_basic_index(index: Any) -> bool:
     """Say whether an index selects a view: integers, slices, `None` and `...` only.
 
@@ -111,6 +146,11 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         One of the four kinds, or None for a call this layer does not defer.
     """
     operands = all(_is_operand(arg) for arg in args)
+    if operation is np.dot:
+        arrays = len(args) == 2 and not kwargs and all(isinstance(arg, (Node, np.ndarray)) for arg in args)
+        return MATRIX_PRODUCT if arrays and all(len(arg.shape) in DOT_DIMENSIONS for arg in args) else None
+    if operation in COPIES:
+        return ELEMENTWISE if len(args) == 1 and not kwargs and isinstance(args[0], Node) else None
     if isinstance(operation, np.ufunc):
         if kwargs or not operands or len(args) != operation.nin:
             return None  # where=, dtype=, casting= and the like are NumPy's to handle now.
@@ -125,7 +165,11 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         rest = args[1:] + tuple(kwargs.values())
         of_a_node = bool(args) and isinstance(args[0], Node) and not any(isinstance(item, Node) for item in rest)
         if operation is operator.getitem:
-            return VIEW if of_a_node and len(args) == 2 and is_basic_index(args[1]) else None
+            if not of_a_node or len(args) != 2:
+                return None
+            if is_basic_index(args[1]):
+                return VIEW
+            return INDEXING if is_array_index(args[1]) else None
         return VIEW if of_a_node else None
     return None
 
@@ -287,12 +331,31 @@ def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tup
     Raises:
         Exception: Whatever NumPy raises for a bad axis, shape or index.
     """
-    return operation(_ghost(args[0]), *args[1:], **kwargs).shape
+    return operation(ghost(args[0]), *args[1:], **kwargs).shape
+
+
+def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
+    """Shape of an array indexed by integer arrays: NumPy's own answer, on an array of no size.
+
+    Args:
+        operation: `operator.getitem`. Not used.
+        args: The node, then the index as written.
+        kwargs: Not used.
+
+    Returns:
+        The shape NumPy gives. Unlike a view, the result is a new array, so a
+        stand-in of the operand's element type would cost its size in memory
+        to learn a shape. One of an element type of no size costs nothing.
+
+    Raises:
+        IndexError: NumPy's, for an index out of bounds or index arrays that do not broadcast.
+    """
+    return np.broadcast_to(np.zeros((), NO_SIZE), args[0].shape)[args[1]].shape
 
 
 # The rule that gives the shape of each kind.
 _SHAPE_RULES = {ELEMENTWISE: _elementwise_shape, MATRIX_PRODUCT: _matmul_shape,
-                REDUCTION: _reduced_shape, VIEW: _view_shape}
+                REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape}
 
 
 def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs: dict) -> np.dtype:
@@ -313,7 +376,7 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
         Exception: Whatever NumPy raises for these types, such as a Python
             integer that does not fit the array's type.
     """
-    if kind == VIEW:
+    if kind in (VIEW, INDEXING):
         return args[0].dtype
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
@@ -335,7 +398,7 @@ def _probe(operand: Any) -> Any:
     return np.zeros((1,) * len(operand.shape), operand.dtype)
 
 
-def _ghost(operand: Any) -> Any:
+def ghost(operand: Any) -> Any:
     """Return a stand-in with an operand's shape and element type and no memory.
 
     Args:
@@ -363,4 +426,4 @@ def _let_numpy_raise(operation: Callable[..., Any], args: tuple, kwargs: dict) -
             it reads an element, so nothing is computed on the way.
     """
     with np.errstate(all="ignore"):
-        operation(*(_ghost(arg) for arg in args), **kwargs)
+        operation(*(ghost(arg) for arg in args), **kwargs)
