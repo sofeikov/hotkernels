@@ -68,6 +68,10 @@ jobs:
     needs: [runner, scope]
     if: needs.scope.outputs.tests == 'true'
     runs-on: ${{ needs.runner.outputs.runner }} # Apple Silicon either way
+    env:
+      # Worker processes of `delivery check`. Six runners share the
+      # maintainer's Mac and its ten cores; a hosted macOS runner has three.
+      DELIVERY_JOBS: 3
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -85,10 +89,10 @@ jobs:
       - run: uv run judge check nanstd_cols_f64 --unlocked
       # Every hooked NumPy call, with and without hotkernels installed, on the
       # NumPy in uv.lock.
-      - run: uv run delivery check
+      - run: uv run delivery check --jobs "$DELIVERY_JOBS"
       # NumPy's own test suite, with and without hotkernels installed; a test
-      # whose outcome differs is run again before it fails the job. About two
-      # minutes. See docs/numpy-tests-ci-design.md.
+      # whose outcome differs is run again before it fails the job. The two
+      # runs are made at the same time. See docs/numpy-tests-ci-design.md.
       - run: uv run delivery numpy-tests
 
   # The same check at both ends of the NumPy range hotkernels claims: exactly
@@ -103,6 +107,8 @@ jobs:
     runs-on: ${{ needs.runner.outputs.runner }} # Apple Silicon either way
     env:
       VERSIONS: 'import sys, numpy; print(f"Python {sys.version.split()[0]}, NumPy {numpy.__version__}")'
+      # As in the judge job.
+      DELIVERY_JOBS: 3
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -113,13 +119,13 @@ jobs:
         run: |
           oldest=$(sed -nE 's/^ *"numpy>=([0-9.]+)",$/\1/p' hotkernels/pyproject.toml)
           uv run --python 3.13 --with "numpy==$oldest" python -c "$VERSIONS"
-          uv run --python 3.13 --with "numpy==$oldest" delivery check
+          uv run --python 3.13 --with "numpy==$oldest" delivery check --jobs "$DELIVERY_JOBS"
       # Relocks NumPy to its newest release, on the newest Python the wheels
       # are built for, which a new NumPy supports first.
       - name: delivery check on the newest NumPy
         run: |
           uv run --python 3.14 --upgrade-package numpy python -c "$VERSIONS"
-          uv run --python 3.14 --upgrade-package numpy delivery check
+          uv run --python 3.14 --upgrade-package numpy delivery check --jobs "$DELIVERY_JOBS"
 
   # The judge and the package on their second platform. The hosted runners'
   # processors have the x86-64-v3 instruction sets the kernels need; if one

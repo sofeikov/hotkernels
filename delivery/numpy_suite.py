@@ -10,6 +10,11 @@ expected to fail tests that compare bits.
 A test whose outcome differs is run again, both ways, before it is reported,
 so that a test that fails at random does not fail the comparison. See
 docs/numpy-tests-ci-design.md.
+
+The two runs of the whole suite are made at the same time, in two processes,
+which halves the wall time on a machine with a core to spare. The runs of the
+differing tests are made one after the other: a test that fails only when
+another run shares the machine then agrees when run again, and is not reported.
 """
 from __future__ import annotations
 
@@ -75,8 +80,8 @@ class Comparison:
     rerun: bool
 
 
-def _run_suite(install: bool, outcomes: Path, select: str | None, tests: Path | None = None) -> None:
-    """Run NumPy's tests once in a subprocess and record every outcome.
+def _start_suite(install: bool, outcomes: Path, select: str | None, tests: Path | None = None) -> subprocess.Popen:
+    """Start one run of NumPy's tests in a subprocess that records every outcome.
 
     Args:
         install: Whether hotkernels is installed for the run.
@@ -87,6 +92,10 @@ def _run_suite(install: bool, outcomes: Path, select: str | None, tests: Path | 
             tests; None for the whole suite. Node ids are relative to the
             current directory, as the first run recorded them, so both runs
             must start in the same directory.
+
+    Returns:
+        The running subprocess. Its exit status says whether tests failed,
+        which is an outcome to compare and not an error of this tool.
     """
     environment = dict(os.environ, **{OUTCOMES_VARIABLE: str(outcomes)})
     environment[INSTALL_VARIABLE] = INSTALL_VALUE if install else ""
@@ -100,9 +109,8 @@ def _run_suite(install: bool, outcomes: Path, select: str | None, tests: Path | 
                     f"--ignore={Path(np.__file__).parent / SKIPPED_PACKAGE}"]
         if select:
             command += ["-k", select]
-    # pytest's exit status says tests failed, which is an outcome to compare
-    # and not an error of this tool; its output is not needed.
-    subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    # pytest's output is not needed: the plugin writes the outcomes.
+    return subprocess.Popen(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _read_outcomes(path: Path) -> dict[str, str]:
@@ -137,8 +145,8 @@ def _differences(plain: dict[str, str], installed: dict[str, str],
     )
 
 
-def _run_both(directory: Path, name: str, select: str | None,
-              tests: Path | None = None) -> tuple[dict[str, str], dict[str, str]]:
+def _run_both(directory: Path, name: str, select: str | None, tests: Path | None = None,
+              together: bool = False) -> tuple[dict[str, str], dict[str, str]]:
     """Run the suite, or some of its tests, plain and with hotkernels.
 
     Args:
@@ -146,13 +154,20 @@ def _run_both(directory: Path, name: str, select: str | None,
         name: Distinguishes the files of this pair of runs from another pair's.
         select: A pytest `-k` expression, or None. Ignored with `tests`.
         tests: A file of node ids to run only those tests, or None.
+        together: Whether the two runs are made at the same time rather than
+            one after the other.
 
     Returns:
         The outcomes on plain NumPy and with hotkernels installed.
     """
     plain_file, installed_file = directory / f"{name}-plain.json", directory / f"{name}-installed.json"
-    _run_suite(False, plain_file, select, tests)
-    _run_suite(True, installed_file, select, tests)
+    if together:
+        runs = [_start_suite(False, plain_file, select, tests), _start_suite(True, installed_file, select, tests)]
+        for run in runs:
+            run.wait()
+    else:
+        _start_suite(False, plain_file, select, tests).wait()
+        _start_suite(True, installed_file, select, tests).wait()
     return _read_outcomes(plain_file), _read_outcomes(installed_file)
 def _passed(outcomes: dict[str, str]) -> int:
     """Count the tests whose call phase passed."""
@@ -171,7 +186,7 @@ def compare(select: str | None = None) -> Comparison:
     """
     with tempfile.TemporaryDirectory(prefix="delivery-numpy-") as name:
         directory = Path(name)
-        plain, installed = _run_both(directory, "suite", select)
+        plain, installed = _run_both(directory, "suite", select, together=True)
         tests = sorted(set(plain) | set(installed))
         first = _differences(plain, installed, tests)
         if not first or len(first) > RERUN_LIMIT:

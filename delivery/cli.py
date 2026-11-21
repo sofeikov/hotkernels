@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from . import numpy_suite
 from . import timing as T
 from . import workload_timing as W
 from . import workloads as WL
-from .cases import INEXACT_OPERATIONS, OPERATIONS, Case
+from .cases import INEXACT_OPERATIONS, OPERATIONS
 from .render import render
 
 log = logging.getLogger(__name__)
@@ -63,20 +64,19 @@ def main() -> None:
     logging.getLogger(hotkernels.__name__).setLevel(logging.WARNING)
 
 
-def _keep(only: Optional[str], case_text: Optional[str]):
-    """Build the filter that decides which cases run.
+def _table_order(operations: dict, inexact: dict) -> dict[str, int]:
+    """Give each summary name its place in the report.
 
     Args:
-        only: Keep only cases of the operation with this name, or all if None.
-        case_text: Keep only cases whose label contains this text, or all if None.
+        operations: The operations run under a plain install(), in order.
+        inexact: The operations run under install(inexact=True), in order.
 
     Returns:
-        A function from a case to whether it runs.
+        Summary name -> position: the exact operations first, then the inexact
+        ones, each in the order of its table, as a run in one process gives them.
     """
-    def keep(case: Case) -> bool:
-        """Say whether one case passes both filters."""
-        return (only is None or case.operation == only) and (case_text is None or case_text in case.label)
-    return keep
+    names = [C.summary_name(name, False) for name in operations] + [C.summary_name(name, True) for name in inexact]
+    return {name: position for position, name in enumerate(names)}
 
 
 @app.command()
@@ -84,6 +84,8 @@ def check(
     only: Optional[str] = typer.Option(None, help="Run one operation, for example `clip`."),
     case: Optional[str] = typer.Option(None, help="Run only cases whose label contains this text."),
     all_failures: bool = typer.Option(False, help="Print every failure, not the first few per operation."),
+    jobs: int = typer.Option(os.cpu_count() or 1, min=1,
+                             help="Worker processes. Default: one per core. 1 runs everything in this process."),
 ) -> None:
     """Run every hooked NumPy call with and without hotkernels and compare them.
 
@@ -91,13 +93,19 @@ def check(
         only: Operation to restrict the run to.
         case: Text a case's label must contain.
         all_failures: Whether to print every failure.
+        jobs: Number of worker processes; 1 runs the cases in this process.
     """
     operations = {name: make for name, make in OPERATIONS.items() if only in (None, name)}
     inexact = {name: make for name, make in INEXACT_OPERATIONS.items() if only in (None, name)}
-    summaries = [] if only or case else [C.installation_checks()]
-    for summary in C.run(operations, inexact, _keep(only, case)):
+    keep = C.CaseFilter(only, case)
+    installation = [] if only or case else [C.installation_checks()]
+    finished = C.run(operations, inexact, keep) if jobs == 1 else C.run_parallel(operations, inexact, keep, jobs)
+    summaries = []
+    for summary in finished:
         log.info("%s: %d cases, %d failed", summary.operation, summary.cases, len(summary.failures))
         summaries.append(summary)
+    order = _table_order(operations, inexact)
+    summaries = installation + sorted(summaries, key=lambda summary: order[summary.operation])
     failures = sum(len(s.failures) for s in summaries)
     shown = max((len(s.failures) for s in summaries), default=0) if all_failures else SHOWN_FAILURES
     log.info("\n%s", render("check.txt.j2", summaries=summaries, shown=shown,
