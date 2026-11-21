@@ -105,7 +105,7 @@ def test_a_transformer_block_is_lazy_when_its_input_is():
     x = rng.standard_normal((TOKENS, WIDTH)).astype(numpy.float32)
     expected = attention.block(x, params, HEADS)
     graph.COUNTS.reset()
-    out = attention.block(lazy(x), params, HEADS)
+    out = attention.block(lazy.asarray(x), params, HEADS)
     assert type(out) is LazyArray and out.shape == expected.shape and out.dtype == expected.dtype
     assert graph.COUNTS.deferred > 0 and graph.COUNTS.at_once == {}
     assert same(expected, out.gather())
@@ -210,7 +210,7 @@ def test_a_failure_carries_a_note_and_stays():
     """Under errstate raise the gather raises, the note names the line, and gathering again raises the same."""
     line = sys._getframe().f_lineno + 2
     with numpy.errstate(over="raise"):
-        big = lazy(numpy.array([1e308])) * 10
+        big = lazy.array([1e308]) * 10
     dependant = big + 1
     error = raised(big.gather)
     assert isinstance(error, FloatingPointError) and f"{__file__}:{line}" in error.__notes__[0]
@@ -221,7 +221,7 @@ def test_a_failure_carries_a_note_and_stays():
 def test_a_failure_nobody_gathered_surfaces_once_at_a_write():
     """A write computes everything pending: a first failure is raised there once, and its dependants stay quiet."""
     with numpy.errstate(over="raise"):
-        big = lazy(numpy.array([1e308])) * 10
+        big = lazy.array([1e308]) * 10
     dependant = big + 1
     target = lazy.zeros(2)
     with pytest.raises(FloatingPointError):
@@ -260,7 +260,7 @@ def test_writes_into_lazy_arrays_have_numpys_meaning():
 def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     """A call outside the deferred set is NumPy's, on gathered operands, and its result is a computed lazy array."""
     data = numpy.random.default_rng(SEED).standard_normal(50)
-    x = lazy(data)
+    x = lazy.asarray(data)
     cases = {
         "mask": (x[x > 0], data[data > 0]),
         "fancy": (x[[0, 2, 4]], data[[0, 2, 4]]),
@@ -292,7 +292,7 @@ def test_the_stand_in_answers_like_the_module():
     assert copy is not pending and copy.gather() is not pending.gather() and same(pending.gather(), copy.gather())
 
     data = numpy.arange(3.0)
-    assert lazy(data).gather() is data and lazy.asarray(data).gather() is data
+    assert lazy.asarray(data).gather() is data
     assert lazy.array(data).gather() is not data
 
 
@@ -345,3 +345,73 @@ def test_gather_takes_several_and_everything():
     assert same(numpy.arange(3.0) + 1, values[0]) and values[1] == 7 and same(numpy.arange(3.0) * 2, values[2])
     c = a + b
     assert gather() == () and not c._node.pending
+
+
+def test_get_lazy_patches_nothing():
+    """get_lazy() returns an object: the numpy module, its functions and other modules' imports are as they were."""
+    module, zeros = sys.modules["numpy"], numpy.zeros
+    stand_in = get_lazy()
+    assert sys.modules["numpy"] is module and numpy.zeros is zeros and stand_in is not module
+    assert type(numpy.zeros(3)) is numpy.ndarray and type(stand_in.zeros(3)) is LazyArray
+    # A module that imported numpy before or after is served by the real one, and stays lazy on lazy input.
+    assert attention.np is numpy and type(attention.softmax(stand_in.ones((2, 3)))) is LazyArray
+    assert not callable(stand_in)
+
+
+def test_a_reduction_is_called_as_it_was_written():
+    """A node keeps the arguments that were given, given the same way, for a method and for a function."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 5))
+    x = lazy.asarray(data)
+    cases = {
+        "method, bare": (x.sum(), data.sum(), (), {}),
+        "method, axis by position": (x.sum(0), data.sum(0), (0,), {}),
+        "method, keywords": (x.mean(axis=1, keepdims=True), data.mean(axis=1, keepdims=True), (), {"axis": 1, "keepdims": True}),
+        "function, bare": (numpy.sum(x), numpy.sum(data), (), {}),
+        "function, axis by position": (numpy.max(x, 1), numpy.max(data, 1), (1,), {}),
+        "function, keywords": (numpy.std(x, axis=0), numpy.std(data, axis=0), (), {"axis": 0}),
+    }
+    for name, (got, expected, args, kwargs) in cases.items():
+        assert got._node.pending and got._node.args[1:] == args and got._node.kwargs == kwargs, name
+        assert got.shape == numpy.shape(expected) and same(expected, got.gather()), name
+    assert type(raised(lambda: x.sum(0, axis=0))) is type(raised(lambda: data.sum(0, axis=0)))
+    assert str(raised(lambda: x.sum(axis=2))) == str(raised(lambda: data.sum(axis=2)))
+
+
+def kernel_calls(hotkernels) -> dict[str, int]:
+    """Return how many calls each kernel of hotkernels has taken since it was installed.
+
+    Args:
+        hotkernels: The package, with `install()` in effect.
+
+    Returns:
+        Kernel name -> calls taken, for the kernels that took any.
+    """
+    return {kernel.name: kernel.calls for kernel in hotkernels.report().kernels if kernel.calls}
+
+
+def test_a_gather_reaches_the_kernels_of_hotkernels():
+    """With hotkernels.install() in effect, a lazy program gives the same bits and its calls reach the same kernels."""
+    hotkernels = pytest.importorskip("hotkernels")
+    rng = numpy.random.default_rng(SEED)
+    features = rng.standard_normal((EXAMPLES, FEATURES))
+    targets = features @ rng.standard_normal(FEATURES) + 0.1 * rng.standard_normal(EXAMPLES)
+    plain = regression.fit(numpy, features, targets, STEPS)
+    with hotkernels.enabled():
+        if not hotkernels.report().installed:
+            pytest.skip(f"hotkernels does not install here: {hotkernels.report().unsupported}")
+        before = kernel_calls(hotkernels)
+        expected = regression.fit(numpy, features, targets, STEPS)
+        eager = kernel_calls(hotkernels)
+        weights, intercept, losses = regression.fit(lazy, features, targets, STEPS)
+        got = gather(weights, intercept, *losses)
+        after = kernel_calls(hotkernels)
+    for reference in (expected, plain):
+        assert same(reference[0], got[0]) and same(reference[1], got[1])
+        assert all(same(a, b) for a, b in zip(reference[2], got[2:], strict=True))
+    taken_eagerly = {name: eager[name] - before.get(name, 0) for name in eager if eager[name] > before.get(name, 0)}
+    if not taken_eagerly:
+        pytest.skip("no kernel takes a call of this program on this platform")
+    # On ARM64 the penalty's `(w ** 2).sum()` is the call a kernel takes, once per step. At least as
+    # often, not equally often: the layer's dry run for an element type is a real call, and a kernel
+    # that takes arrays of any size takes it too.
+    assert all(after.get(name, 0) - eager[name] >= count for name, count in taken_eagerly.items())
