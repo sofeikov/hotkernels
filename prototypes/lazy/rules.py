@@ -118,8 +118,7 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
     if operation in SELECTIONS:
         return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
     if operation in REDUCTIONS:
-        plain = len(args) == 1 and isinstance(args[0], Node) and set(kwargs) <= REDUCTION_KEYWORDS
-        return REDUCTION if plain else None
+        return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in VIEWS or operation is operator.getitem:
         rest = args[1:] + tuple(kwargs.values())
         of_a_node = bool(args) and isinstance(args[0], Node) and not any(isinstance(item, Node) for item in rest)
@@ -127,6 +126,27 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
             return VIEW if of_a_node and len(args) == 2 and is_basic_index(args[1]) else None
         return VIEW if of_a_node else None
     return None
+
+
+def _is_plain_reduction(args: tuple, kwargs: dict) -> bool:
+    """Say whether a reduction's arguments are ones this layer defers.
+
+    Args:
+        args: The operand, and the axis when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for one node as the operand, an axis given at most once (by
+        position or as `axis=`) and no keyword other than `axis` and
+        `keepdims`. Anything else is NumPy's to handle at once, including the
+        error for an axis given twice.
+    """
+    if not 1 <= len(args) <= 2 or not isinstance(args[0], Node):
+        return False
+    by_position = len(args) == 2
+    if by_position and ("axis" in kwargs or isinstance(args[1], Node)):
+        return False
+    return set(kwargs) <= REDUCTION_KEYWORDS
 
 
 def _is_operand(arg: Any) -> bool:
@@ -235,8 +255,8 @@ def _reduced_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
 
     Args:
         operation: The reduction. Not used.
-        args: The one operand.
-        kwargs: `axis` (None, an int or a tuple of ints) and `keepdims`.
+        args: The one operand, then the axis if it was given by position.
+        kwargs: `axis` (None, an int or a tuple of ints) if it was given by keyword, and `keepdims`.
 
     Returns:
         The reduced shape.
@@ -244,7 +264,7 @@ def _reduced_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
     Raises:
         AxisError: For an axis the operand does not have.
     """
-    shape, axis = _shape(args[0]), kwargs.get("axis")
+    shape, axis = _shape(args[0]), args[1] if len(args) > 1 else kwargs.get("axis")
     reduced = range(len(shape)) if axis is None else normalize_axis_tuple(axis, len(shape))
     if kwargs.get("keepdims", False):
         return tuple(1 if position in reduced else length for position, length in enumerate(shape))

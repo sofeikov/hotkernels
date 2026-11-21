@@ -9,10 +9,14 @@ because NumPy passes the call to it. What the real module cannot do is make
 an array lazy when no lazy array is among the arguments: `np.zeros(3)`,
 `np.arange(10)`, `np.array(data)`. That is all the stand-in adds.
 
-It can also be called, to wrap one array and keep `import numpy as np`:
+An `ndarray` that exists already enters through it too, held by reference:
 
-    lazy = get_lazy()
-    x = lazy(existing_ndarray)
+    x = np.asarray(existing_ndarray)
+
+Nothing is patched: `get_lazy()` returns an object, the line above binds a
+name in the module that wrote it, and `sys.modules["numpy"]` and NumPy's own
+functions are as they were. Another module's `import numpy as np` is the real
+module, and its calls still reach a lazy array that is handed to them.
 """
 from __future__ import annotations
 
@@ -130,17 +134,6 @@ class LazyNumPy:
             module: `numpy`, or one of its submodules such as `numpy.linalg`.
         """
         self._module = module
-
-    def __call__(self, array: Any) -> LazyArray:
-        """Wrap one array.
-
-        Args:
-            array: An `ndarray`, held by reference, or anything `np.asarray` accepts.
-
-        Returns:
-            A lazy array with those values. A lazy array is returned as it is.
-        """
-        return wrap(array)
 
     def __repr__(self) -> str:
         """Say which module this stands in for."""

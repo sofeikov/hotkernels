@@ -117,14 +117,19 @@ def _valued(obj: Any) -> Any:
     return obj
 
 
-def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict) -> "LazyArray | None":
+def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
+               ruled_as: Callable[..., Any] | None = None) -> "LazyArray | None":
     """Add a call to the graph if the rules allow it.
 
     Args:
-        operation: The NumPy callable.
+        operation: The callable the node will call: a NumPy function or
+            ufunc, or a method written on a lazy array.
         name: What to call the node.
         args: Positional arguments as the user wrote them.
         kwargs: Keyword arguments as the user wrote them.
+        ruled_as: The NumPy function whose rule gives the shape and element
+            type, when `operation` is a method and has no rule of its own:
+            `np.sum` for `x.sum(...)`. None when `operation` has one.
 
     Returns:
         A pending lazy array, or None when the call has to be made at once.
@@ -133,7 +138,7 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
         Exception: NumPy's own, when the shapes or types are wrong.
     """
     unwrapped = _unwrapped(args)
-    signature = rules.plan(operation, unwrapped, kwargs)
+    signature = rules.plan(ruled_as or operation, unwrapped, kwargs)
     if signature is None:
         return None
     if graph.pending_count() >= graph.PENDING_LIMIT:
@@ -316,19 +321,29 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str) -> Callable[..., An
     return write
 
 
-def _reduction(function: Callable[..., Any]) -> Callable[..., Any]:
+def _reduction(function: Callable[..., Any], name: str) -> Callable[..., Any]:
     """Build the method form of a reduction.
 
     Args:
-        function: The NumPy function, such as `np.sum`.
+        function: The NumPy function whose rule gives the shape and element type, such as `np.sum`.
+        name: The method's name, such as "sum".
 
     Returns:
-        A method taking `axis` and `keepdims`, which calls the function: the
-        call comes back through `__array_function__` and is deferred there.
+        A method that defers the call as it was written: the node calls the
+        same method on the computed value, with the arguments that were
+        given, given the same way. `x.sum()` is not turned into
+        `np.sum(x, axis=None, keepdims=False)`. The values would be the same,
+        but code that looks at how a call is spelled would not treat it the
+        same: the kernels of `hotkernels.install()` take `x.sum()` and leave a
+        sum that names an axis or `keepdims` to NumPy.
     """
-    def reduce(self, axis=None, keepdims=False):
-        """Reduce along `axis` (None for all axes), keeping reduced axes at length one if `keepdims`."""
-        return function(self, axis=axis, keepdims=keepdims)
+    method = _method(name)
+
+    def reduce(self, *args, **kwargs):
+        """Reduce the array, with the arguments `ndarray`'s method of this name takes."""
+        operands = (self,) + args
+        deferred = _try_defer(method, name, operands, kwargs, ruled_as=function)
+        return deferred if deferred is not None else _at_once(method, f"ndarray.{name}", operands, kwargs)
     return reduce
 
 
@@ -565,13 +580,13 @@ class LazyArray:
 
     # ---- Methods the graph knows. Any other method is `ndarray`'s, through `__getattr__`.
 
-    sum = _reduction(np.sum)
-    mean = _reduction(np.mean)
-    max = _reduction(np.max)
-    min = _reduction(np.min)
-    prod = _reduction(np.prod)
-    var = _reduction(np.var)
-    std = _reduction(np.std)
+    sum = _reduction(np.sum, "sum")
+    mean = _reduction(np.mean, "mean")
+    max = _reduction(np.max, "max")
+    min = _reduction(np.min, "min")
+    prod = _reduction(np.prod, "prod")
+    var = _reduction(np.var, "var")
+    std = _reduction(np.std, "std")
 
     def reshape(self, *shape: Any) -> "LazyArray":
         """Give the array a new shape, deferred.
