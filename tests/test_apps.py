@@ -334,4 +334,3 @@ def test_a_new_record_round_trips():
     profile = P.from_row(row["profile"], timing.size)
     assert A.from_row(A.as_row(timing)) == timing
     assert P.from_row(P.as_row(profile), "") == profile
-# CI trial: a change outside documentation. Not to be merged.
