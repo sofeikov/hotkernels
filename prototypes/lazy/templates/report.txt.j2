@@ -1,0 +1,18 @@
+{# What report.lazy_report() prints: three parts, each a ranked list of calls with how often and where. `shown` is how many places a row names. A place in the same file as the one before it is written without the file's name. #}
+{% for title, rows in parts %}
+{{ title }}
+{% for row in rows %}
+{% set places = [] %}
+{% set last = namespace(file="") %}
+{% for place, times in row.places[:shown] %}
+{% set file, _, line = place.rpartition(":") %}
+{% set _ = places.append((":" ~ line if file == last.file else place) ~ (" × " ~ times if times > 1 else "")) %}
+{% set last.file = file %}
+{% endfor %}
+{% set more = row.places | length - shown %}
+  {{ "%6d" | format(row.count) }}  {{ row.call.ljust(26) }}  {{ places | join(", ") }}{{ ", and " ~ more ~ (" more line" if more == 1 else " more lines") if more > 0 else "" }}
+{% else %}
+       none
+{% endfor %}
+
+{% endfor %}

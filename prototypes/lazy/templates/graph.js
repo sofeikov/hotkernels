@@ -57,6 +57,9 @@
 
   const state = {
     index: 0,            // Which graph is shown.
+    mode: 'code',        // 'code' for the program's lines, 'graph' for the drawing.
+    file: null,          // The file the code view shows.
+    flash: null,         // A line the code view was asked to point at.
     folds: new Map(),    // Graph index -> the set of folded group ids.
     selected: null,      // Id of the selected node, or null.
     query: '',           // The search text, lower case.
@@ -615,6 +618,187 @@
     applyPan();
   }
 
+  // ---- The code view: the program's lines, with what each wrote and where the layer computed.
+
+  const LINES = new Map();   // "file:line" -> what happened on that line; see touch.
+  const FILES = new Map();   // File name -> {text: Map(line number -> text), ops: operations its lines wrote}.
+
+  function placeOf(where) {
+    const cut = where.lastIndexOf(':');
+    return { file: where.slice(0, cut), line: Number(where.slice(cut + 1)) };
+  }
+
+  function touch(where) {
+    const { file, line } = placeOf(where);
+    if (!FILES.has(file)) FILES.set(file, { text: new Map(), ops: 0 });
+    if (!FILES.get(file).text.has(line)) FILES.get(file).text.set(line, '');
+    // ops: operations written here. graphs: graph index -> how many of them went into it.
+    // computed: indices of the graphs computed because of this line. eager: calls made at once here.
+    if (!LINES.has(where)) LINES.set(where, { ops: 0, graphs: new Map(), computed: [], eager: [] });
+    return LINES.get(where);
+  }
+
+  function indexLines() {
+    for (const source of DATA.sources || []) {
+      FILES.set(source.file, { text: new Map(Object.entries(source.text).map(([number, line]) => [Number(number), line])), ops: 0 });
+    }
+    DATA.graphs.forEach((graph, index) => {
+      for (const node of graph.nodes) {
+        if (node.kind !== 'operation' || !node.where) continue;
+        const info = touch(node.where);
+        info.ops += 1;
+        info.graphs.set(index, (info.graphs.get(index) || 0) + 1);
+        FILES.get(placeOf(node.where).file).ops += 1;
+      }
+      if (graph.where && graph.trigger !== 'pending') touch(graph.where).computed.push(index);
+    });
+    for (const event of DATA.events || []) if (event.where && event.kind === 'at once') touch(event.where).eager.push(event);
+  }
+
+  function linesOfGraph(index) {
+    return new Set(DATA.graphs[index].nodes.filter(node => node.kind === 'operation' && node.where).map(node => node.where));
+  }
+
+  // "regression.py:27, 32-36" for the lines a graph's operations were written on.
+  function coverage(index) {
+    const byFile = new Map();
+    for (const where of linesOfGraph(index)) push(byFile, placeOf(where).file, placeOf(where).line);
+    const parts = [];
+    for (const [file, numbers] of byFile) {
+      numbers.sort((a, b) => a - b);
+      const runs = [];
+      for (const number of numbers) {
+        if (runs.length && number === runs[runs.length - 1][1] + 1) runs[runs.length - 1][1] = number;
+        else runs.push([number, number]);
+      }
+      parts.push(`${file}:${runs.map(([first, last]) => (first === last ? first : `${first}-${last}`)).join(', ')}`);
+    }
+    return parts.join('; ');
+  }
+
+  function chipFor(text, kind, title, act) {
+    const made = html('button', `chip ${kind}`, text);
+    made.title = title;
+    made.addEventListener('click', event => { event.stopPropagation(); act(); });
+    return made;
+  }
+
+  async function openGraph(index, where) {
+    state.mode = 'graph';
+    await showGraph(index);
+    const node = state.model.graph.nodes.find(each => each.kind === 'operation' && each.where === where);
+    if (node) await reveal(node.id);
+  }
+
+  function chipsOf(where, info) {
+    const chips = html('span', 'chips');
+    const times = count => (count > 1 ? ` × ${count.toLocaleString('en')}` : '');
+    // How often each call was made at once on this line. One that also made the
+    // layer compute a graph gets one chip, below, that says both.
+    const eager = new Map(info.eager.map(event => [event.call, event.count]));
+    const byCause = new Map();
+    for (const index of info.computed) push(byCause, `${DATA.graphs[index].trigger}|${DATA.graphs[index].call}`, index);
+    for (const [cause, indices] of byCause) {
+      const [trigger, call] = cause.split('|');
+      const target = indices.length === 1 ? `graph ${indices[0] + 1}` : `${indices.length} graphs`;
+      let text = trigger === call ? trigger : `${trigger} ${call}`, kind = 'cause unasked';
+      if (trigger === 'gather') kind = 'cause asked';
+      if (trigger === 'at once') {
+        text = `eager ${call}${times(eager.get(call) || 0)}`;
+        kind = 'eager';
+        eager.delete(call);
+      }
+      chips.append(chipFor(`${text} → ${target}`, kind,
+        'This line made the layer compute. Click for the graph it computed', () => openGraph(indices[0], where)));
+    }
+    for (const [call, count] of eager) {
+      chips.append(chipFor(`eager ${call}${times(count)}`, 'eager still',
+        'Not in the deferred set: NumPy made the call at once. Nothing was pending, so no graph was computed here', () => {}));
+    }
+    const graphs = [...info.graphs.keys()];
+    if (graphs.length <= 3) {
+      for (const index of graphs) {
+        chips.append(chipFor(`in graph ${index + 1}`, index === state.index ? 'member current' : 'member',
+          'The operations this line wrote are in this graph. Click to see them there', () => openGraph(index, where)));
+      }
+    } else {
+      const index = graphs.includes(state.index) ? state.index : graphs[0];
+      chips.append(chipFor(`in ${graphs.length} graphs`, graphs.includes(state.index) ? 'member current' : 'member',
+        'The operations this line wrote, over all its runs, are in this many graphs. Click for one of them', () => openGraph(index, where)));
+    }
+    return chips;
+  }
+
+  function drawCode() {
+    const holder = $('code');
+    const kept = holder.querySelector('.listing') ? holder.querySelector('.listing').scrollTop : 0;
+    holder.replaceChildren();
+    const files = [...FILES.entries()].sort((a, b) => b[1].ops - a[1].ops);
+    if (!files.length) { holder.append(html('p', 'muted', 'This page carries no line of code.')); return; }
+    if (!FILES.has(state.file)) state.file = files[0][0];
+    const tabs = html('div', 'files');
+    for (const [name, file] of files) {
+      const tab = html('button', name === state.file ? 'file current' : 'file', name);
+      tab.append(html('span', 'muted', file.ops ? `  ${plural(file.ops, 'operation')}` : ''));
+      tab.addEventListener('click', () => { state.file = name; drawCode(); });
+      tabs.append(tab);
+    }
+    const listing = html('div', 'listing');
+    const text = FILES.get(state.file).text;
+    const current = linesOfGraph(state.index);
+    let before = 0;
+    for (const number of [...text.keys()].sort((a, b) => a - b)) {
+      if (before && number > before + 1) listing.append(html('div', 'gap', '⋯'));
+      before = number;
+      const where = `${state.file}:${number}`;
+      const info = LINES.get(where);
+      const row = html('div', 'row');
+      row.dataset.where = where;
+      if (info && info.ops) row.classList.add('wrote');
+      if (current.has(where)) row.classList.add('in-graph');
+      if (info && info.computed.includes(state.index)) row.classList.add('computed-here');
+      if (where === state.flash) row.classList.add('flash');
+      const line = html('code', 'text', text.get(number));
+      line.title = text.get(number);
+      row.append(html('span', 'no', String(number)), html('span', 'ops', info && info.ops ? info.ops.toLocaleString('en') : ''), line);
+      if (info) row.append(chipsOf(where, info));
+      listing.append(row);
+    }
+    holder.append(tabs, listing);
+    listing.scrollTop = kept;
+  }
+
+  // Bring the lines of the graph that is shown into view, in the file that holds most of them.
+  function showLinesOfGraph() {
+    const counts = new Map();
+    for (const where of linesOfGraph(state.index)) counts.set(placeOf(where).file, (counts.get(placeOf(where).file) || 0) + 1);
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (best) state.file = best[0];
+    else if (state.model.graph.where) state.file = placeOf(state.model.graph.where).file;
+    drawCode();
+    const first = $('code').querySelector('.row.in-graph, .row.computed-here');
+    if (first) first.scrollIntoView({ block: 'center' });
+  }
+
+  function showCode(where) {
+    state.mode = 'code';
+    state.file = placeOf(where).file;
+    state.flash = where;
+    applyMode();
+    banner();
+    drawCode();
+    const row = $('code').querySelector('.row.flash');
+    if (row) row.scrollIntoView({ block: 'center' });
+  }
+
+  function applyMode() {
+    const code = state.mode === 'code';
+    $('code').hidden = !code;
+    canvas.style.display = code ? 'none' : '';
+    $('legend').hidden = code;
+    if (code) { $('busy').hidden = true; $('tip').hidden = true; }
+  }
+
   // ---- One drawing: fold state -> elements -> layout -> SVG.
 
   async function draw(options) {
@@ -662,6 +846,12 @@
   }
 
   async function reveal(id) {
+    if (state.mode !== 'graph') {
+      state.mode = 'graph';
+      applyMode();
+      banner();
+      await draw({ fit: 'top' });
+    }
     const folded = foldsOf(state.index);
     let changed = false;
     for (let gid = state.model.parentOf.get(id); gid; gid = state.model.groups.get(gid).parent) {
@@ -682,8 +872,16 @@
     state.index = clamp(index, 0, DATA.graphs.length - 1);
     state.selected = null;
     state.model = modelOf(state.index);
+    if (selected !== undefined) state.mode = 'graph';
     listGraphs();
     banner();
+    applyMode();
+    if (state.mode === 'code') {
+      state.flash = null;
+      showLinesOfGraph();
+      describe();
+      return;
+    }
     await draw({ fit: 'top' });
     search($('search').value);
     if (selected !== undefined && state.model.nodes.has(selected)) await reveal(selected);
@@ -734,6 +932,12 @@
     const graph = state.model.graph;
     const bar = $('banner');
     bar.replaceChildren();
+    for (const [mode, text, title] of [['code', 'Code', 'The program, and what each line wrote'], ['graph', 'Graph', 'The drawing of this graph']]) {
+      const tab = html('button', state.mode === mode ? 'tab current' : 'tab', text);
+      tab.title = title;
+      tab.addEventListener('click', () => { state.mode = mode; showGraph(state.index); });
+      bar.append(tab);
+    }
     const back = html('button', '', '‹'), on = html('button', '', '›');
     back.title = 'The graph before'; on.title = 'The graph after';
     back.addEventListener('click', () => showGraph(state.index - 1));
@@ -787,6 +991,11 @@
     if (model.outputs.has(node.id)) pairs.push(['asked for', `by ${model.graph.call}`]);
     panel.append(facts(pairs));
     if (node.code) panel.append(html('pre', '', node.code));
+    if (node.where && FILES.has(placeOf(node.where).file)) {
+      const there = html('button', 'link', `Show ${node.where} in the code`);
+      there.addEventListener('click', () => showCode(node.where));
+      panel.append(there);
+    }
     if (node.kind === 'earlier') {
       if (node.graph === null) {
         panel.append(html('p', 'muted', 'Computed before the recording began.'));
@@ -840,13 +1049,15 @@
       ['from earlier graphs', String(graph.nodes.filter(node => node.kind === 'earlier').length)],
       ['asked for', String(graph.outputs.length)],
       ['results, if all were kept', bytesText(written)],
+      ['written on', coverage(state.index) || 'no line known'],
     ]));
     if (DATA.dropped) panel.append(html('p', 'muted', `${plural(DATA.dropped, 'operation')} of the block were written and dropped without being computed.`));
     panel.append(html('h3', '', 'Operations by name'));
     meters(panel, countsOf(model, model.root));
     panel.append(html('h3', '', 'Using the page'));
     const help = html('ul');
-    for (const line of ['Click a stacked box to unfold it; click the title of an open group to fold it.',
+    for (const line of ['Code shows the program: the lines of this graph are marked, and each line says what it wrote and what it made the layer compute.',
+      'Click a stacked box to unfold it; click the title of an open group to fold it.',
       'Click a node for its line, its arguments and what reads it.',
       'Drag to move, scroll to zoom, f to fit.',
       'Type / to search; Enter goes to the next match and unfolds what hides it.']) help.append(html('li', '', line));
@@ -1008,6 +1219,8 @@
   const operations = DATA.graphs.reduce((total, graph) => total + graph.nodes.filter(node => node.kind === 'operation').length, 0);
   $('summary').textContent = `${plural(DATA.graphs.length, 'graph')}, ${plural(operations, 'operation')}`;
   legend();
-  window.lazyGraphs = { state, DATA, showGraph, reveal, fit };   // For looking around from the console.
+  indexLines();
+  if (!FILES.size) state.mode = 'graph';
+  window.lazyGraphs = { state, DATA, showGraph, reveal, fit, showCode };   // For looking around from the console.
   showGraph(0);
 })();

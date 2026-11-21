@@ -35,7 +35,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from . import graph, view
+from . import graph, report, view
 from .graph import Node, Trigger
 
 # A group holding more operations than this is drawn folded by the page.
@@ -79,6 +79,12 @@ BLOCK, CALL, LINE, LINES, REPEAT, STEP, REST = "block", "call", "line", "lines",
 BLOCK_LABEL, PENDING_LABEL = "the recorded block", "pending under this array"
 # The index of a graph that is not part of a recording.
 NO_INDEX = -1
+# How much of the user's code a page carries. WHOLE_FILES: every file that
+# wrote an operation, in full, so the page can show the program with its
+# graphs beside it. WRITTEN_LINES: only the lines that wrote an operation or
+# made the layer compute. NO_SOURCE: no code at all, file names and line
+# numbers only, for a page that is passed on.
+WHOLE_FILES, WRITTEN_LINES, NO_SOURCE = "files", "lines", "none"
 # Indent of `to_json`, in spaces.
 JSON_INDENT = 1
 
@@ -224,8 +230,8 @@ class Graph:
         return json.dumps(self.to_dict(), indent=JSON_INDENT)
 
     def page(self) -> str:
-        """Return the graph as one HTML page; see `view.py`."""
-        return view.page(_page_data([self], 0), "Lazy graph")
+        """Return the graph as one HTML page; see `view.py`. It carries the lines that wrote the graph, not whole files."""
+        return view.page(_page_data([self], 0, {}, (), WRITTEN_LINES), "Lazy graph")
 
     def save(self, path: str | os.PathLike) -> Path:
         """Write the graph's page to a file.
@@ -292,17 +298,26 @@ class _Record:
 class Recording:
     """The graphs a block of code produced. Made by `record_graphs()`, used as a `with` block."""
 
-    def __init__(self, path: str | os.PathLike | None = None) -> None:
+    def __init__(self, path: str | os.PathLike | None = None, source: str = WHOLE_FILES) -> None:
         """Prepare a recording; nothing is recorded until the `with` block is entered.
 
         Args:
             path: Where to write the page when the block ends, or None to write nothing.
+            source: How much of the user's code its pages carry unless told
+                otherwise: WHOLE_FILES, WRITTEN_LINES or NO_SOURCE.
         """
         # The graphs, in the order they were computed. Public: this is the result.
         self.graphs: list[Graph] = []
         # How many operations the block wrote and then dropped without computing them.
         self.dropped = 0
         self._path = path
+        # How much code a page carries when `page`, `save` or `show` is not told.
+        self.source = source
+        # How often the layer computed without being asked during the block,
+        # by (kind, call, file, line), as `graph.SITES` keeps it for the process.
+        self.sites: dict[tuple[str, str, str, int], int] = {}
+        # Full paths of the files that wrote an operation or made the layer compute.
+        self._files: set[str] = set()
         # Record of every node seen, by id.
         self._records: dict[int, _Record] = {}
         # For each plain `ndarray` met as an operand, by `id()`: the array held
@@ -362,6 +377,19 @@ class Recording:
             self._ensure(arg for arg in node.args if isinstance(arg, Node))
             self._records[node.number] = self._record(node, source, self._frames())
 
+    def fell_back(self, kind: str, call: str, origin: graph.Origin) -> None:
+        """Count one time the layer computed without being asked.
+
+        Args:
+            kind: graph.AT_ONCE, graph.WRITE or graph.NEEDED.
+            call: The call as a reader would name it.
+            origin: The line of the user's code where it happened.
+        """
+        with graph.LOCK:
+            site = (kind, call, origin.filename, origin.lineno)
+            self.sites[site] = self.sites.get(site, 0) + 1
+            self._files.add(origin.filename)
+
     def computing(self, nodes: list[Node]) -> None:
         """Write down any node about to be computed that was made before the block.
 
@@ -386,40 +414,63 @@ class Recording:
                 record = self._records[number]
                 record.graph, record.state = index, FAILED if number in failed else COMPUTED
             origin = graph.caller()
+            self._files.add(origin.filename)
             self.graphs.append(self._graph(index, sorted(numbers), roots, trigger, origin.filename, origin.lineno))
 
     # ---- The result.
 
     def to_dict(self) -> dict[str, Any]:
-        """Return every graph as built-in types, for JSON, with the number of operations dropped."""
-        return {"graphs": [each.to_dict() for each in self.graphs], "dropped": self.dropped}
+        """Return every graph as built-in types, for JSON, with what was computed unasked and what was dropped."""
+        return {"graphs": [each.to_dict() for each in self.graphs], "events": _events(self.sites), "dropped": self.dropped}
 
     def to_json(self) -> str:
         """Return every graph as JSON text."""
         return json.dumps(self.to_dict(), indent=JSON_INDENT)
 
-    def page(self) -> str:
-        """Return all the graphs as one HTML page; see `view.py`."""
-        return view.page(_page_data(self.graphs, self.dropped), "Lazy graphs")
+    def report(self) -> report.Report:
+        """Summarise what the layer computed without being asked during the block.
 
-    def save(self, path: str | os.PathLike) -> Path:
+        Returns:
+            The calls made at once, the writes and the values needed, each
+            ranked by how often, with their lines. Printing it gives a table.
+        """
+        return report.build(self.sites)
+
+    def page(self, source: str | None = None) -> str:
+        """Return all the graphs as one HTML page; see `view.py`.
+
+        Args:
+            source: How much of the user's code the page carries: WHOLE_FILES,
+                WRITTEN_LINES or NO_SOURCE. None for what the recording was made with.
+
+        Returns:
+            The page's HTML.
+        """
+        return view.page(_page_data(self.graphs, self.dropped, self.sites, sorted(self._files), source or self.source),
+                         "Lazy graphs")
+
+    def save(self, path: str | os.PathLike, source: str | None = None) -> Path:
         """Write the page to a file.
 
         Args:
             path: Where to write it.
+            source: As for `page`.
 
         Returns:
             The path written.
         """
-        return view.save(self.page(), path)
+        return view.save(self.page(source), path)
 
-    def show(self) -> Path:
+    def show(self, source: str | None = None) -> Path:
         """Write the page to a temporary file and open it in the browser.
+
+        Args:
+            source: As for `page`.
 
         Returns:
             The path of the file.
         """
-        return view.show(self.page())
+        return view.show(self.page(source))
 
     def _repr_html_(self) -> str:
         """Return the page for a notebook to show under the cell."""
@@ -506,6 +557,8 @@ class Recording:
             path, line = node.origin.filename, node.origin.lineno
         else:
             path, line = "", 0
+        if path:
+            self._files.add(path)
         nbytes = int(np.prod(node.shape, dtype=np.int64)) * node.dtype.itemsize
         if not node.pending:
             name = source if node.origin is None else node.name
@@ -632,7 +685,7 @@ class Recording:
                      _graph_signature(trigger, where, nodes))
 
 
-def record_graphs(path: str | os.PathLike | None = None) -> Recording:
+def record_graphs(path: str | os.PathLike | None = None, source: str = WHOLE_FILES) -> Recording:
     """Record the graphs a block of code produces.
 
         with record_graphs() as recording:
@@ -641,13 +694,15 @@ def record_graphs(path: str | os.PathLike | None = None) -> Recording:
 
     Args:
         path: Where to write the page when the block ends. None writes nothing.
+        source: How much of the user's code a page of the recording carries:
+            WHOLE_FILES ("files"), WRITTEN_LINES ("lines") or NO_SOURCE ("none").
 
     Returns:
         A recording, to be used as a `with` block. Its `graphs` are filled as
         the block runs: one per computation, and a last one for what is
         still pending when the block ends.
     """
-    return Recording(path)
+    return Recording(path, source)
 
 
 def graph_of(root: Node) -> Graph:
@@ -1075,14 +1130,88 @@ def _same_run(signatures: list[str], first: int, second: int, period: int) -> bo
     return all(signatures[first + offset] == signatures[second + offset] for offset in range(period))
 
 
-def _page_data(graphs: list[Graph], dropped: int) -> dict[str, Any]:
+def _events(sites: dict[tuple[str, str, str, int], int]) -> list[dict[str, Any]]:
+    """Turn the counts of what was computed unasked into rows, the most frequent first.
+
+    Args:
+        sites: (kind, call, file, line) -> times.
+
+    Returns:
+        One dict per line and call: kind, call, where, the line's text, and the count.
+    """
+    rows = []
+    for (kind, call, path, line), count in sorted(sites.items(), key=lambda item: -item[1]):
+        where, code = _place(path, line)
+        rows.append({"kind": kind, "call": call, "where": where, "code": code, "count": count})
+    return rows
+
+
+def _page_data(graphs: list[Graph], dropped: int, sites: dict[tuple[str, str, str, int], int],
+               files: Iterable[str], source: str) -> dict[str, Any]:
     """Gather what the page needs.
 
     Args:
         graphs: The graphs to show.
         dropped: How many operations were written and dropped without being computed.
+        sites: (kind, call, file, line) -> times the layer computed unasked.
+        files: Full paths of the files that wrote an operation or made the layer compute.
+        source: WHOLE_FILES, WRITTEN_LINES or NO_SOURCE.
 
     Returns:
-        The graphs as built-in types, with the constant the page folds by.
+        The graphs and events as built-in types, the constant the page folds
+        by, and `sources`: per file, the text of its lines by number. With
+        WRITTEN_LINES only the lines that did something are there; with
+        NO_SOURCE none are, and every text of a line is removed from the
+        graphs as well.
     """
-    return {"graphs": [each.to_dict() for each in graphs], "dropped": dropped, "fold_above": FOLD_ABOVE}
+    data = {"graphs": [each.to_dict() for each in graphs], "events": _events(sites), "dropped": dropped,
+            "fold_above": FOLD_ABOVE, "sources": []}
+    if source == NO_SOURCE:
+        _remove_code(data)
+        return data
+    texts = _written_lines(data)
+    if source == WHOLE_FILES:
+        for path in files:
+            lines = linecache.getlines(path)
+            if lines:
+                texts[os.path.basename(path)] = {number: line.rstrip("\n") for number, line in enumerate(lines, start=1)}
+    data["sources"] = [{"file": name, "text": {str(number): line for number, line in sorted(lines.items())}}
+                       for name, lines in sorted(texts.items())]
+    return data
+
+
+def _written_lines(data: dict[str, Any]) -> dict[str, dict[int, str]]:
+    """Collect the lines of code a page's graphs and events already carry.
+
+    Args:
+        data: The page's data.
+
+    Returns:
+        File name -> line number -> the line's text, for every line that
+        wrote an operation, triggered a computation or made the layer compute.
+    """
+    texts: dict[str, dict[int, str]] = {}
+    carried = [node for each in data["graphs"] for node in each["nodes"]] + data["graphs"] + data["events"]
+    for item in carried:
+        name, _, number = item["where"].rpartition(":")
+        if name:
+            texts.setdefault(name, {})[int(number)] = item["code"]
+    return texts
+
+
+def _remove_code(data: dict[str, Any]) -> None:
+    """Take every text of a line of code out of a page's data, in place.
+
+    Args:
+        data: The page's data. Afterwards it names files and lines and holds
+            no code: a LINE group is called by its place instead of its text.
+    """
+    for item in [node for each in data["graphs"] for node in each["nodes"]] + data["graphs"] + data["events"]:
+        item["code"] = ""
+    stack = [each["groups"] for each in data["graphs"]]
+    while stack:
+        group = stack.pop()
+        group["code"] = ""
+        if group["kind"] == LINE:
+            group["label"] = group["where"]
+        stack.extend(child for child in group["children"] if isinstance(child, dict))

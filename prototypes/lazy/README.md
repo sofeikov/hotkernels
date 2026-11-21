@@ -17,7 +17,7 @@ Try it from the repository's root with `uv run python`.
 
 - Defers a narrow set of NumPy operations into a graph: element-by-element operations, the matrix product, the common reductions, and views.
 - Makes every other NumPy call at once, on gathered operands, and returns a lazy array that has its values.
-- Gives values through `gather()`, and computes on the spot where something else needs them (`float(x)`, `if x > 0:`, `np.asarray(x)`), saying so in the log once per line. `get_lazy(strict=True)` gives arrays that raise `NotGathered` there instead.
+- Gives values through `gather()`, and computes on the spot where something else needs them (`float(x)`, `if x > 0:`, `np.asarray(x)`), saying so in the log once per line and counting every time for `lazy_report()`. `get_lazy(strict=True)` gives arrays that raise `NotGathered` there instead.
 - Computes the graph one node at a time, each with the call the user wrote, spelled the same way, so results are NumPy's and nothing is faster. With `hotkernels.install()` in effect those calls reach the kernels as the eager program's do.
 - Patches nothing: `get_lazy()` returns an object, and the `numpy` module and other modules' imports are as they were. An `ndarray` that exists enters with `np.asarray(a)`.
 
@@ -32,7 +32,8 @@ Try it from the repository's root with `uv run python`.
 | [namespace.py](namespace.py) | The stand-in for the `numpy` module |
 | [explain.py](explain.py) | The text of a pending graph |
 | [record.py](record.py) | The graph as an object, and the mode that records the graphs a block of code produced |
-| [view.py](view.py), [templates/](templates) | The page that draws recorded graphs: `graph.html.j2`, `graph.js`, `graph.css` |
+| [report.py](report.py) | What was computed without being asked, ranked: `lazy_report()` |
+| [view.py](view.py), [templates/](templates) | The page: the program's code and its graphs. `graph.html.j2`, `graph.js`, `graph.css` |
 | [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; and `pages.py`, which writes the page of all three |
 
 ## Looking at its graphs
@@ -50,7 +51,12 @@ np = get_lazy()
 with record_graphs() as recording:
     ...                       # NumPy code on lazy arrays
 recording.show()              # or recording.save("graphs.html"), recording.to_json()
+print(recording.report())     # what NumPy had to compute at once, and where graphs were cut, ranked
 ```
+
+The page opens on your code. `record_graphs(source="lines")` or `source="none"` makes pages that carry less of it.
+
+To see as it runs what the layer could not defer, turn its logger on: `logging.getLogger("prototypes.lazy").setLevel(logging.INFO)`. `DEBUG` adds the places where a graph was computed early.
 
 The design of the two is in [docs/lazy-recording-design.md](../../docs/lazy-recording-design.md) and [docs/lazy-graph-page-design.md](../../docs/lazy-graph-page-design.md).
 

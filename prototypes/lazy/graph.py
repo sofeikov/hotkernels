@@ -36,18 +36,23 @@ LOCK = threading.RLock()
 # Hands out node numbers. Operands are always numbered below their consumer.
 _numbers = itertools.count()
 
-log = logging.getLogger(__name__)
+# The package this module is in: "hotkernels.lazy" once it is in the package.
+_PACKAGE = __name__.rpartition(".")[0]
+# Two loggers, so that standard logging configuration chooses what is seen.
+# A call the layer could not defer, which NumPy made at once: logged at INFO.
+eager_log = logging.getLogger(f"{_PACKAGE}.eager")
+# A graph computed early, by a write into a lazy array or because a value was
+# needed without `gather()`: logged at DEBUG. So the package's logger at INFO
+# shows the eager calls alone, and at DEBUG the cuts as well.
+cut_log = logging.getLogger(f"{_PACKAGE}.cut")
 
 # What can make the layer compute: the kinds of `Trigger`.
 GATHER, AT_ONCE, WRITE, NEEDED, LIMIT, PENDING = "gather", "at once", "write", "needed", "limit", "pending"
 
-# The three ways the layer computes without being asked, and what the log says
-# of each. The arguments are the call, the file's name and the line.
-_FALLBACK_MESSAGES = {
-    AT_ONCE: "%s is not deferred: NumPy made the call at once, and the result is still lazy (%s:%d)",
-    WRITE: "%s writes into a lazy array: everything pending was computed first (%s:%d)",
-    NEEDED: "%s needed values without gather(): computed here (%s:%d)",
-}
+# One line of the log: what happened, the call, the file's name and the line.
+_FALLBACK_LINE = "%s: %s at %s:%d"
+# The word a fallback of each kind starts its line with.
+FALLBACK_WORDS = {AT_ONCE: "eager", WRITE: "write", NEEDED: "needed"}
 
 
 class NotGathered(TypeError):
@@ -102,6 +107,15 @@ class Observer(Protocol):
 
         Args:
             nodes: The pending nodes one computation will compute.
+        """
+
+    def fell_back(self, kind: str, call: str, origin: "Origin") -> None:
+        """Hear that the layer computed without being asked.
+
+        Args:
+            kind: AT_ONCE, WRITE or NEEDED.
+            call: The call as a reader would name it.
+            origin: The line of the user's code where it happened.
         """
 
     def computed(self, numbers: list[int], failed: set[int], roots: list[int], trigger: Trigger) -> None:
@@ -189,6 +203,7 @@ class Counts:
         self.deferred = 0
         self.at_once = {}
         self.needed = {}
+        SITES.clear()
 
 
 # The one set of counters of the process.
@@ -202,6 +217,9 @@ _pending: weakref.WeakSet[Node] = weakref.WeakSet()
 # The fallbacks already logged, as (kind, call, file, line): each line of the
 # user's code is reported once, however often it runs.
 _logged: set[tuple[str, str, str, int]] = set()
+# How often the layer computed without being asked, by (kind, call, file,
+# line): every occurrence, for `report.lazy_report`.
+SITES: dict[tuple[str, str, str, int], int] = {}
 
 
 def fallback(kind: str, call: str) -> None:
@@ -213,13 +231,15 @@ def fallback(kind: str, call: str) -> None:
     """
     counts = COUNTS.needed if kind == NEEDED else COUNTS.at_once
     counts[call] = counts.get(call, 0) + 1
-    if not log.isEnabledFor(logging.DEBUG):
-        return
     origin = caller()
-    seen = (kind, call, origin.filename, origin.lineno)
-    if seen not in _logged:
-        _logged.add(seen)
-        log.debug(_FALLBACK_MESSAGES[kind], call, os.path.basename(origin.filename), origin.lineno)
+    site = (kind, call, origin.filename, origin.lineno)
+    SITES[site] = SITES.get(site, 0) + 1
+    if observer is not None:
+        observer.fell_back(kind, call, origin)
+    logger, level = (eager_log, logging.INFO) if kind == AT_ONCE else (cut_log, logging.DEBUG)
+    if logger.isEnabledFor(level) and site not in _logged:
+        _logged.add(site)
+        logger.log(level, _FALLBACK_LINE, FALLBACK_WORDS[kind], call, os.path.basename(origin.filename), origin.lineno)
 
 
 def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False) -> Node:

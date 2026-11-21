@@ -22,11 +22,13 @@ The modules, in the order to read them:
     namespace.py  the stand-in for the numpy module
     explain.py    the text of a pending graph
     record.py     the graph as an object, and the mode that records a block's graphs
+    report.py     what was computed without being asked, ranked
     view.py       the page that draws recorded graphs
 """
 from .array import LazyArray, gather
 from .graph import NotGathered
 from .namespace import get_lazy
 from .record import Graph, Recording, record_graphs
+from .report import lazy_report
 
-__all__ = ["get_lazy", "gather", "record_graphs", "LazyArray", "NotGathered", "Graph", "Recording"]
+__all__ = ["get_lazy", "gather", "record_graphs", "lazy_report", "LazyArray", "NotGathered", "Graph", "Recording"]
