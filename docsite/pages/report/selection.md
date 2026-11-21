@@ -97,6 +97,8 @@ The NumPy column is so large because it combines both steps: removing the branch
 The switch between the two plans is itself a branch, and near 10% density it is mispredicted. Measured outside the judge, `nonzero_bool` costs 0.127 ns per element at 10% density, against 0.045 at 5% and 0.110 at 20%. The judge times 5% and 50%, so this dip is real but does not appear in the tables.
 :::
 
+**On a matrix,** `np.nonzero(m)` needs a row and a column for each True element, and NumPy returns them as two views of one array of (row, column) pairs. `nonzero_2d_bool`, on ARM64, writes those pairs. Its sparse plan is `nonzero_bool`'s, with each position turned into a row by a multiplication instead of a division; its dense plan works a row at a time, in chunks that never cross the end of a row, and rows narrower than 8 are taken several at once with a small table of the row and column of each byte. At a million elements in rows of 22 it is 14.0x faster than the branch-free C with one in twenty True and 3.7x with half, and 36x and 22x faster than NumPy.
+
 ## Masked assignment: write what you did not change
 
 `x[mask] = v` looks like the mirror image of selection, and the naive loop has the same problem: `if (mask[i]) x[i] = v;` is a branch per element that a random mask makes unpredictable. Both NumPy and naive C cost 3.4 to 3.9 ns per element at half density.
@@ -191,7 +193,7 @@ These kernels were first written with one length for the sorted array and the ne
 :::
 
 ::: note A float sum in NumPy's order
-`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It was written for x86-64 and ships as its C on ARM64 for now. On an Intel Core i5-14600KF it is 5.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million.
+`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It has assembly for both architectures, written separately. On an Intel Core i5-14600KF it is 5.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million.
 :::
 
 ::: note The search on int64

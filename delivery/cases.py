@@ -1964,8 +1964,173 @@ def maskfill_cases() -> Iterator[Case]:
                    partial(function, 1.5), None)
 
 
+# The kernel that takes np.nonzero on a C-ordered boolean matrix: on ARM64
+# only, and elsewhere such a call stays with NumPy.
+NONZERO_2D = "nonzero_2d_bool" if ON_ARM64 else None
+# Shapes of the boolean matrices of the nonzero cases: no rows or no
+# columns, one of either, either side of the 8 and 16 bytes the kernel reads
+# at a time, the workload's matrices of 30 to 50 rows of 22 columns, and
+# wide rows.
+NONZERO_2D_SHAPES = ((0, 0), (0, 1), (1, 0), (0, 22), (40, 0), (1, 1), (1, 22), (22, 1), (2, 3), (3, 2),
+                     (7, 8), (8, 7), (5, 15), (9, 17), (16, 16), (30, 22), (40, 22), (50, 22), (33, 64),
+                     (12, 65), (64, 100), (20, 1000))
+# Shape of the matrices of the layout cases: more than 64 elements, so that
+# the kernel would take its fast paths, and not square, so that a transposed
+# or Fortran-ordered copy is laid out differently from the plain one.
+NONZERO_2D_LAYOUT_SHAPE = (40, 22)
+# Shape of the three-dimensional mask, which NumPy keeps.
+NONZERO_3D_SHAPE = (4, 10, 22)
+
+
+def _nonzero_structure(result: tuple) -> tuple:
+    """Describe how NumPy's nonzero result for a matrix is laid out in memory.
+
+    For a matrix NumPy fills one (count, 2) int64 array of (row, column)
+    pairs and returns two views of it with a stride of 16 bytes. A caller can
+    observe that, and `describe` does not compare strides or bases, so a case
+    returns this beside the result.
+
+    Args:
+        result: The tuple of index arrays.
+
+    Returns:
+        Each array's strides, whether it owns its data and whether it is
+        aligned; whether they share one base, and that base's shape, strides
+        and flags; and how far in bytes each array starts from the first.
+    """
+    first, *rest = result
+    base = first.base
+    starts = [array.__array_interface__["data"][0] for array in result]
+    return (tuple((array.strides, array.flags.owndata, array.flags.aligned) for array in result),
+            all(array.base is base for array in rest),
+            None if base is None else (base.shape, base.strides, base.flags.owndata, base.flags.c_contiguous),
+            tuple(start - starts[0] for start in starts))
+
+
+def _with_structure(function: Callable[[np.ndarray], tuple], mask: np.ndarray) -> tuple:
+    """Call a nonzero spelling and return its result beside its layout in memory.
+
+    Args:
+        function: Takes the mask and returns NumPy's tuple of index arrays.
+        mask: The mask.
+
+    Returns:
+        (the result, `_nonzero_structure` of it).
+    """
+    result = function(mask)
+    return result, _nonzero_structure(result)
+
+
+def _with_strides(function: Callable[[np.ndarray], np.ndarray], mask: np.ndarray) -> tuple:
+    """Call a spelling that returns np.argwhere's (count, 2) array, and return it with its strides.
+
+    Args:
+        function: Takes the mask and returns an array.
+        mask: The mask.
+
+    Returns:
+        (the result, its strides, whether it owns its data).
+    """
+    result = function(mask)
+    return result, result.strides, result.flags.owndata
+
+
+def _matrix(shape: tuple[int, ...], cls: str, position: int = 0, dtype: str = "bool") -> np.ndarray:
+    """Build a C-ordered array of several dimensions from a judge value class.
+
+    Args:
+        shape: The array's shape.
+        cls: Value class name, such as "sparse".
+        position: Index of the interesting element in C order, for positional classes.
+        dtype: Element type as a spec name.
+
+    Returns:
+        A new C-contiguous array of that shape.
+    """
+    return values(dtype, math.prod(shape), cls, position, arg="mask").reshape(shape)
+
+
+def _bad_matrix(shape: tuple[int, int], byte: int) -> np.ndarray:
+    """Return a boolean matrix whose True elements are stored as `byte`, not 1.
+
+    Args:
+        shape: (rows, columns).
+        byte: The byte that stands for True, other than 1.
+
+    Returns:
+        A new C-contiguous boolean array of that shape.
+    """
+    return _bad_mask(math.prod(shape), byte).reshape(shape)
+
+
+# The ways of writing np.nonzero on a matrix, each returning what a caller can
+# observe: (text, call). The first three reach the binding's nonzero; the
+# last two reach it through np.nonzero in NumPy's Python code.
+NONZERO_2D_SPELLINGS = (
+    ("mask.nonzero()", partial(_with_structure, lambda m: m.nonzero())),
+    ("np.nonzero(mask)", partial(_with_structure, np.nonzero)),
+    ("np.where(mask)", partial(_with_structure, np.where)),
+    ("np.argwhere(mask)", partial(_with_strides, np.argwhere)),
+    ("np.transpose(np.nonzero(mask))", partial(_with_strides, lambda m: np.transpose(np.nonzero(m)))),
+)
+
+
+def _nonzero_2d_layouts() -> Iterator[tuple[str, Callable[[], object], str | None]]:
+    """Yield the masks of two or more dimensions to try every spelling on.
+
+    Yields:
+        (name, function that builds the mask, the kernel expected to take
+        it). A plain C-ordered boolean matrix goes to the kernel; any other
+        layout, a subclass, another element type or another number of
+        dimensions stays with NumPy.
+    """
+    shape = NONZERO_2D_LAYOUT_SHAPE
+    plain = partial(_matrix, shape, judge_cases.RANDOM)
+    yield "contiguous", plain, NONZERO_2D
+    yield "readonly", lambda: _readonly(plain()), NONZERO_2D
+    yield "fortran", lambda: np.asfortranarray(plain()), None
+    yield "transposed", lambda: plain().T, None
+    yield "every second column", lambda: _matrix((shape[0], 2 * shape[1]), judge_cases.RANDOM)[:, ::2], None
+    yield "every second row", lambda: _matrix((2 * shape[0], shape[1]), judge_cases.RANDOM)[::2], None
+    yield "subclass", lambda: plain().view(_Subclass), None
+    yield "three dimensions", partial(_matrix, NONZERO_3D_SHAPE, judge_cases.RANDOM), None
+    for dtype in ("u8", "i64", "f64"):
+        yield dtype, partial(_matrix, shape, judge_cases.RANDOM, dtype=dtype), None
+
+
+def nonzero_2d_cases() -> Iterator[Case]:
+    """Yield the cases of `nonzero` on boolean arrays of two or more dimensions.
+
+    Every spelling is compared on its result and on how the result sits in
+    memory: for np.nonzero, two views of one array of pairs, as NumPy builds
+    it.
+
+    Yields:
+        The cases.
+    """
+    plain, positional = judge_cases.classes("bool")
+    for shape in NONZERO_2D_SHAPES:
+        n = math.prod(shape)
+        for text, call in NONZERO_2D_SPELLINGS:
+            for cls in plain:
+                yield Case("nonzero", f"{text} matrix {shape} mask={cls}",
+                           partial(_made, partial(_matrix, shape, cls)), call, NONZERO_2D)
+            if not n:
+                continue
+            for cls in positional:
+                for position in sorted({0, n // 2, n - 1}):
+                    yield Case("nonzero", f"{text} matrix {shape} mask={cls}@{position}",
+                               partial(_made, partial(_matrix, shape, cls, position)), call, NONZERO_2D)
+            for byte in BAD_MASK_BYTES:
+                yield Case("nonzero", f"{text} matrix {shape} mask bytes are {byte}",
+                           partial(_made, partial(_bad_matrix, shape, byte)), call, None)
+    for name, build, expect in _nonzero_2d_layouts():
+        for text, call in NONZERO_2D_SPELLINGS:
+            yield Case("nonzero", f"{text} matrix layout={name}", partial(_made, build), call, expect)
+
+
 def nonzero_cases() -> Iterator[Case]:
-    """Yield the cases of `nonzero` on booleans."""
+    """Yield the cases of `nonzero` on booleans, of one dimension and of two."""
     spellings = (
         Spelling("mask.nonzero()", lambda m: m.nonzero(), any_shape=False),
         Spelling("np.nonzero(mask)", np.nonzero, any_shape=False, normalises=True),
@@ -1975,15 +2140,20 @@ def nonzero_cases() -> Iterator[Case]:
         Spelling("np.where(mask, 1.0, 0.0)", lambda m: np.where(m, 1.0, 0.0), NEVER),
         Spelling("np.where(mask, mask, mask)", lambda m: np.where(m, m, m), NEVER),
     )
-    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
-    yield from unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings)
     # The spellings that would take the kernel for a clean mask.
     taking = (spellings[0], spellings[1], spellings[4])
+    # Labels of the cases in which one of them meets a C-ordered boolean
+    # matrix, which goes to a kernel of its own.
+    matrix_labels = {f"{spelling.text} bool n={n} layout=rows" for spelling in taking for n in LAYOUT_SIZES}
+    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
+    for case in unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings):
+        yield replace(case, expect=NONZERO_2D) if case.label in matrix_labels else case
     for n in LAYOUT_SIZES:
         for byte in BAD_MASK_BYTES:
             for spelling in taking:
                 yield Case("nonzero", f"{spelling.text} n={n} mask bytes are {byte}",
                            lambda n=n, byte=byte: (_bad_mask(n, byte),), spelling.call, None)
+    yield from nonzero_2d_cases()
 
 
 def cumsum_cases(inexact: bool) -> Iterator[Case]:
@@ -2065,8 +2235,9 @@ _SUM_LEFT_SPELLINGS = (
     Spelling("x.sum(0)", lambda x: x.sum(0), NEVER),
     Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
 )
-# The float sum kernels, by element type.
-SUM_FLOAT_KERNELS = {"f32": "sum_f32"}
+# The float sum kernels, by element type: float64's on ARM64 only, until it
+# is written for x86-64 (docs/coverage-gaps-arm64.md).
+SUM_FLOAT_KERNELS = {"f32": "sum_f32", **({"f64": "sum_f64"} if ON_ARM64 else {})}
 # Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
 # do not give it: leaves of different lengths, a node of 33 or 65 to 67
 # vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a
@@ -2123,7 +2294,8 @@ def _float_sum_cases() -> Iterator[Case]:
 
     A kernel takes `np.sum(x)` and `x.sum()` on a contiguous one-dimensional
     array with no other argument, and only when the sum is finite; a matrix,
-    a strided array and every other spelling go to NumPy.
+    a strided array and every other spelling go to NumPy. On x86-64 no kernel
+    takes float64.
     """
     spellings = (
         Spelling("np.sum(x)", np.sum, any_shape=False, sweep_values=False),

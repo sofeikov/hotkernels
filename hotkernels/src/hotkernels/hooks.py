@@ -50,6 +50,10 @@ ON_ARM64 = platform.machine() in ARM64_MACHINES
 INPLACE = "inplace"
 # Why the in-place loops are not installed on another architecture.
 INPLACE_ARM64_ONLY = "ARM64 only: see docs/gradient-step-findings.md"
+# Why the kernels of docs/coverage-gaps-arm64.md are not installed on
+# another architecture: their calls stay with NumPy there until each kernel
+# is measured on it.
+COVERAGE_GAPS_ARM64_ONLY = "ARM64 only until measured on x86-64: see docs/coverage-gaps-arm64.md"
 # Element count of the in-place probes: the fewest the loops take
 # (INPLACE_MIN_N in hook_loop.c).
 PROBE_INPLACE_N = 131072
@@ -125,10 +129,11 @@ PROBE_SORT_TIES = 4
 # PROBE_SUM_N is more than one leaf of NumPy's pairwise summation (128
 # elements) and not a multiple of 8, so the sum goes through splits, the
 # leaves' eight running sums and the elements left over. With these values
-# the float32 sum in NumPy's order differs from the sum added one after
-# another, from a tree split at n / 2 not rounded to a multiple of 8, from
-# leaves of 64 or 256 elements, and from leaves whose running sums are added
-# in turn: a kernel that adds in any of those orders fails the probe.
+# the float32 and the float64 sum in NumPy's order each differ from the sum
+# added one after another, from a tree split at n / 2 not rounded to a
+# multiple of 8, from leaves of 64 or 256 elements, and from leaves whose
+# running sums are added in turn: a kernel that adds in any of those orders
+# fails the probe.
 PROBE_SUM_N = 1003
 PROBE_SUM_DIVISOR = 7
 PROBE_SUM_OFFSET = 0.1
@@ -476,6 +481,24 @@ def _nonzero(function: Callable[[np.ndarray], tuple]) -> bool:
     """
     (indices,) = function(_stride_mask())
     return bool(np.array_equal(indices, np.arange(0, PROBE_N, PROBE_STRIDE)))
+
+
+def _nonzero_2d(function: Callable[[np.ndarray], tuple]) -> bool:
+    """Probe `mask.nonzero()` or `np.where(mask)` on a boolean matrix.
+
+    The mask is the stride mask of PROBE_N elements in PROBE_ROWS rows.
+
+    Args:
+        function: Takes the mask and returns NumPy's tuple of index arrays.
+
+    Returns:
+        Whether the two index arrays hold the row and the column of every
+        PROBE_STRIDE-th element.
+    """
+    mask = _stride_mask().reshape(PROBE_ROWS, -1)
+    rows, cols = function(mask)
+    expected_rows, expected_cols = np.divmod(np.arange(0, PROBE_N, PROBE_STRIDE), mask.shape[1])
+    return bool(np.array_equal(rows, expected_rows) and np.array_equal(cols, expected_cols))
 
 
 def _where() -> bool:
@@ -991,6 +1014,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.sum", FUNCTION, (
         Probe("sum_u8", _sum_function),
         Probe("sum_f32", partial(_sum_float, np.float32, np.sum)),
+        *((Probe("sum_f64", partial(_sum_float, np.float64, np.sum)),) if ON_ARM64 else ()),
     )),
     Hook("function.histogram", FUNCTION, (Probe("histogram_f64", _histogram),)),
     Hook("function.bincount", FUNCTION, (
@@ -1012,6 +1036,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.copyto", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _copyto)),)),
     Hook("function.where", FUNCTION, (
         Probe("nonzero_bool", partial(_nonzero, np.where)),
+        *((Probe("nonzero_2d_bool", partial(_nonzero_2d, np.where)),) if ON_ARM64 else ()),
         Probe("where_f64", _where),
     )),
     Hook("function.clip", FUNCTION, (
@@ -1031,8 +1056,12 @@ HOOKS: tuple[Hook, ...] = (
     Hook("method.sum", METHOD, (
         Probe("sum_u8", _sum_method),
         Probe("sum_f32", partial(_sum_float, np.float32, _sum_method_of)),
+        *((Probe("sum_f64", partial(_sum_float, np.float64, _sum_method_of)),) if ON_ARM64 else ()),
     )),
-    Hook("method.nonzero", METHOD, (Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),)),
+    Hook("method.nonzero", METHOD, (
+        Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),
+        *((Probe("nonzero_2d_bool", partial(_nonzero_2d, _nonzero_method)),) if ON_ARM64 else ()),
+    )),
     Hook("method.cumsum", METHOD, (
         Probe("cumsum_i64", partial(_cumsum, np.int64)),
         Probe("cumsum_f32", partial(_cumsum, np.float32), inexact=True),
@@ -1123,6 +1152,9 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("compress_f64", "x[mask]", "float64", "compress", COMPRESS_HOOKS),
     KernelInfo("maskfill_f64", "x[mask] = v", "float64", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("nonzero_bool", "np.nonzero", "bool", "nonzero", ("method.nonzero", "function.where")),
+    # The same call on a C-ordered matrix, on ARM64.
+    KernelInfo("nonzero_2d_bool", "np.nonzero, matrix", "bool", "nonzero", ("method.nonzero", "function.where"),
+               unbound_reason=None if ON_ARM64 else COVERAGE_GAPS_ARM64_ONLY),
     KernelInfo("cumsum_i64", "np.cumsum", "int64", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f32", "np.cumsum", "float32", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f64", "np.cumsum", "float64", "cumsum", ("method.cumsum",)),
@@ -1133,6 +1165,9 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("cast_u8_f32", "x.astype(float32)", "uint8", "astype", ("method.astype",)),
     KernelInfo("sum_u8", "np.sum", "uint8", "sum", ("function.sum", "method.sum")),
     KernelInfo("sum_f32", "np.sum", "float32", "sum", ("function.sum", "method.sum")),
+    # On ARM64 only, until written for x86-64.
+    KernelInfo("sum_f64", "np.sum", "float64", "sum", ("function.sum", "method.sum"),
+               unbound_reason=None if ON_ARM64 else COVERAGE_GAPS_ARM64_ONLY),
     KernelInfo("count_nonzero_i64", "np.count_nonzero", "int64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("count_nonzero_f64", "np.count_nonzero", "float64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("histogram_f64", "np.histogram", "float64", "histogram", ("function.histogram",)),
