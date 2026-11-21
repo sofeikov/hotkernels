@@ -1,0 +1,56 @@
+{# The page of recorded graphs. `data` is JSON, `style` and `script` are the files beside this one, `library` is the layout library's URL. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>
+{{ style }}
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>{{ title }}</h1>
+  <span id="summary" class="muted"></span>
+  <span class="spacer"></span>
+  <input id="search" type="search" placeholder="Find an operation, a line, a shape   /" autocomplete="off" spellcheck="false">
+  <span id="matches" class="muted"></span>
+  <button id="fit" title="Fit the graph to the window (f)">Fit</button>
+  <button id="reset" title="Fold as when the page opened">Fold</button>
+  <button id="unfold" title="Unfold every group, except the middle of long loops">Unfold all</button>
+  <button id="download" title="Save the graphs as JSON">JSON</button>
+</header>
+<main>
+  <nav id="graphs" aria-label="Graphs"></nav>
+  <section id="stage">
+    <div id="banner"></div>
+    <svg id="canvas" role="img" aria-label="The graph">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9 z" class="arrowhead"></path>
+        </marker>
+        <marker id="arrow-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+          <path d="M 0 1 L 9 5 L 0 9 z" class="arrowhead hot"></path>
+        </marker>
+      </defs>
+      <g id="viewport">
+        <g id="boxes"></g>
+        <g id="edges"></g>
+        <g id="nodes"></g>
+      </g>
+    </svg>
+    <div id="legend"></div>
+    <div id="busy" hidden>Laying out…</div>
+    <div id="problem" hidden></div>
+  </section>
+  <aside id="details" aria-label="Details"></aside>
+</main>
+<div id="tip" hidden></div>
+<script id="data" type="application/json">{{ data }}</script>
+<script src="{{ library }}"></script>
+<script>
+{{ script }}
+</script>
+</body>
+</html>
