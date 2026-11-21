@@ -173,6 +173,11 @@ class Node:
     # True for an array that refuses to give its values without `gather()`:
     # one made by a strict stand-in, or computed from such an array.
     strict: bool = False
+    # True when the memory of the value may be known outside the layer: an
+    # `ndarray` the user handed in, one `gather()` handed out, one that a call
+    # made at once may have kept a view of. A write into such memory has to
+    # happen in that memory, at once; a write into any other can be deferred.
+    exposed: bool = False
 
     @property
     def pending(self) -> bool:
@@ -242,7 +247,7 @@ def fallback(kind: str, call: str) -> None:
         logger.log(level, _FALLBACK_LINE, FALLBACK_WORDS[kind], call, os.path.basename(origin.filename), origin.lineno)
 
 
-def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False) -> Node:
+def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False, exposed: bool = False) -> Node:
     """Make a node for an array or NumPy scalar that already exists.
 
     Args:
@@ -251,19 +256,21 @@ def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False
             came from outside, or the call's name, such as "np.zeros".
         kind: AT_ONCE for the result of a call made at once; empty otherwise.
         strict: Whether the array refuses to give its values without `gather()`.
+        exposed: Whether the array's memory may be known outside the layer.
 
     Returns:
         A computed node with that value.
     """
     node = Node(number=next(_numbers), name="array", operation=None, args=(), kwargs={},
-                shape=value.shape, dtype=value.dtype, value=value, kind=kind, strict=strict)
+                shape=value.shape, dtype=value.dtype, value=value, kind=kind, strict=strict, exposed=exposed)
     if observer is not None:
         observer.made(node, source)
     return node
 
 
 def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
-             shape: tuple[int, ...], dtype: np.dtype, kind: str, strict: bool = False) -> Node:
+             shape: tuple[int, ...], dtype: np.dtype, kind: str, strict: bool = False,
+             origin: "Origin | None" = None) -> Node:
     """Make a pending node and add it to the pending list.
 
     Args:
@@ -275,12 +282,15 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
         dtype: Element type of the result.
         kind: The kind of deferred operation, as `rules` names it.
         strict: Whether the array refuses to give its values without `gather()`.
+        origin: The line that wrote the operation, when it is not the line
+            running now: a view is made again, after a write, for the line
+            that first made it. None for the caller's line.
 
     Returns:
-        The node. It remembers the caller's line and the `np.errstate` in effect.
+        The node. It remembers the line and the `np.errstate` in effect.
     """
     node = Node(number=next(_numbers), name=name, operation=operation, args=args, kwargs=kwargs,
-                shape=shape, dtype=dtype, origin=caller(), errstate=np.geterr(), kind=kind, strict=strict)
+                shape=shape, dtype=dtype, origin=origin or caller(), errstate=np.geterr(), kind=kind, strict=strict)
     with LOCK:
         _pending.add(node)
     COUNTS.deferred += 1

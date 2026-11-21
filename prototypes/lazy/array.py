@@ -8,7 +8,9 @@ functions). Each call then takes one of three paths:
 - deferred: `rules.plan` accepts it, and a node joins the graph;
 - made at once: NumPy makes the call on gathered operands, and the result is
   a lazy array that already has its values;
-- a write: everything pending is computed first, then NumPy writes.
+- a write: a node too, the array's contents after the write, when nothing
+  outside the layer can know the array's memory; otherwise everything
+  pending is computed first and NumPy writes in the memory.
 
 `gather()` is the way to ask for values. Anything else that needs them
 (`float(x)`, `if x > 0:`, `np.asarray(x)`, a library) gets them too: they are
@@ -18,6 +20,9 @@ strict stand-in raises `NotGathered` there instead.
 from __future__ import annotations
 
 import operator
+import warnings
+import weakref
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 import numpy as np
@@ -38,7 +43,66 @@ WRITING_METHODS = frozenset({"sort", "fill", "put", "partition", "resize", "item
 WRITING_UFUNC_METHOD = "at"
 
 
-def wrap(value: Any, source: str = "array", strict: bool = False) -> "LazyArray":
+# In-place ufunc calls and `np.clip` take `out=`; these functions are deferred as writes when they do.
+OUT_FUNCTIONS = frozenset({np.clip})
+
+
+@dataclass(eq=False)
+class _Cell:
+    """One array as NumPy knows it: memory that several lazy arrays may be looking at.
+
+    A lazy array and every view made of it share a cell. A deferred write
+    gives the cell a new node, and each of them reads the new contents.
+    """
+
+    # The node of the cell's contents now.
+    node: Node
+    # Lazy arrays made by `np.reshape` of this cell's, held weakly. NumPy
+    # shares memory between them or does not, depending on a layout that is
+    # not known before computing; while one is alive, writes are not deferred.
+    # A list of references, not a set: a lazy array, like an `ndarray`, has no hash.
+    doubtful: list[weakref.ref] = field(default_factory=list)
+    # True for the cell of such an array.
+    doubted: bool = False
+
+    def shared_in_doubt(self) -> bool:
+        """Say whether an array that may share this cell's memory is still alive, forgetting those that are not."""
+        self.doubtful = [reference for reference in self.doubtful if reference() is not None]
+        return bool(self.doubtful)
+
+
+@dataclass(frozen=True)
+class _Step:
+    """One view operation on the way from a cell's contents to a lazy array that is a view of them."""
+
+    # The view function, or `operator.getitem`.
+    operation: Callable[..., Any]
+    # What a node of it is called.
+    name: str
+    # The arguments after the array: the index, the axes.
+    tail: tuple
+    # Keyword arguments as written.
+    kwargs: dict
+    # Shape of the view.
+    shape: tuple[int, ...]
+    # Element type of the view.
+    dtype: np.dtype
+    # The line that wrote the view.
+    origin: graph.Origin
+
+    def of(self, array: Any) -> Any:
+        """Take the view of an array.
+
+        Args:
+            array: A computed array.
+
+        Returns:
+            NumPy's view of it.
+        """
+        return self.operation(array, *self.tail, **self.kwargs)
+
+
+def wrap(value: Any, source: str = "array", strict: bool = False, owned: bool = False) -> "LazyArray":
     """Make a lazy array of something that already has values.
 
     Args:
@@ -49,6 +113,9 @@ def wrap(value: Any, source: str = "array", strict: bool = False) -> "LazyArray"
             of the stand-in's function, such as "np.zeros".
         strict: Whether the new array refuses to give its values without
             `gather()`. A lazy array that is passed in keeps what it has.
+        owned: True when nothing outside the layer can know the array's
+            memory: the stand-in has just made it. False for an array the
+            user handed in, into which a write has to happen at once.
 
     Returns:
         A lazy array on a computed node.
@@ -57,7 +124,7 @@ def wrap(value: Any, source: str = "array", strict: bool = False) -> "LazyArray"
         return value
     if not isinstance(value, (np.ndarray, np.generic)):
         value = np.asarray(value)
-    return LazyArray(graph.leaf(value, source, strict=strict))
+    return LazyArray(graph.leaf(value, source, strict=strict, exposed=not owned))
 
 
 def gather(*arrays: Any) -> tuple:
@@ -74,6 +141,9 @@ def gather(*arrays: Any) -> tuple:
     if not arrays:
         evaluate.compute_pending(trigger)
     evaluate.compute([array._node for array in arrays if isinstance(array, LazyArray)], trigger)
+    for array in arrays:
+        if isinstance(array, LazyArray):
+            array._expose()
     return tuple(array._node.value if isinstance(array, LazyArray) else array for array in arrays)
 
 
@@ -194,8 +264,20 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
         return None
     if graph.pending_count() >= graph.PENDING_LIMIT:
         evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
-    return LazyArray(graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype, signature.kind,
-                                    _strict(args, kwargs)))
+    node = graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype, signature.kind,
+                          _strict(args, kwargs))
+    base = args[0] if args and isinstance(args[0], LazyArray) else None
+    if signature.kind != rules.VIEW or base is None or (operation is operator.getitem and signature.shape == ()):
+        # A new array. An index that leaves no dimension gives a number, which is a copy, not a view.
+        return LazyArray(node)
+    if operation is operator.getitem or operation in rules.SURE_VIEWS:
+        step = _Step(operation, name, unwrapped[1:], kwargs, signature.shape, signature.dtype, node.origin)
+        return LazyArray(node, base._cell, base._steps + (step,))
+    # `np.reshape`: a view or a copy, which is not known yet.
+    made = LazyArray(node)
+    made._cell.doubted = True
+    base._cell.doubtful.append(weakref.ref(made))
+    return made
 
 
 def _defer_or_call(operation: Callable[..., Any], name: str, call: str, args: tuple) -> Any:
@@ -235,17 +317,45 @@ def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
     """
     graph.fallback(graph.AT_ONCE, name)
     strict = _strict(args, kwargs)
-    evaluate.compute([lazy._node for lazy in _lazies_in((args, kwargs))], Trigger(graph.AT_ONCE, name))
-    return _made_lazy(operation(*_valued(args), **_valued(kwargs)), name, strict)
+    lazies = _lazies_in((args, kwargs))
+    evaluate.compute([lazy._node for lazy in lazies], Trigger(graph.AT_ONCE, name))
+    result = operation(*_valued(args), **_valued(kwargs))
+    return _made_lazy(result, name, strict, _shares_memory(result, lazies))
 
 
-def _made_lazy(result: Any, name: str, strict: bool) -> Any:
+def _shares_memory(result: Any, lazies: list["LazyArray"]) -> bool:
+    """Say whether what a call made at once returned may share memory with one of its lazy arguments.
+
+    `x.ravel()`, `np.atleast_2d(x)` and `x.astype(t, copy=False)` can return
+    a view of `x`, or `x` itself. NumPy then lets a write into either be
+    seen through the other, so neither may have a write deferred.
+
+    Args:
+        result: What NumPy returned.
+        lazies: The lazy arrays among the call's arguments, computed.
+
+    Returns:
+        True when an array of the result may overlap one of them. Those
+        arguments are marked as exposed on the way.
+    """
+    arrays = [item for item in (result if isinstance(result, (list, tuple)) else [result]) if isinstance(item, np.ndarray)]
+    shared = False
+    for lazy in lazies:
+        value = lazy._node.value
+        if isinstance(value, np.ndarray) and any(np.may_share_memory(array, value) for array in arrays):
+            lazy._expose()
+            shared = True
+    return shared
+
+
+def _made_lazy(result: Any, name: str, strict: bool, exposed: bool = False) -> Any:
     """Turn the result of a call made at once into lazy arrays.
 
     Args:
         result: What NumPy returned.
         name: The call's name, for messages and the log.
         strict: Whether a strict array was among the call's arguments.
+        exposed: Whether the result may share memory with an argument.
 
     Returns:
         A lazy array for an array or a NumPy scalar; the same kind of tuple
@@ -257,11 +367,11 @@ def _made_lazy(result: Any, name: str, strict: bool) -> Any:
         NotGathered: For such a value when a strict array was involved.
     """
     if isinstance(result, (np.ndarray, np.generic)):
-        return LazyArray(graph.leaf(result, name, graph.AT_ONCE, strict))
+        return LazyArray(graph.leaf(result, name, graph.AT_ONCE, strict, exposed))
     if result is None:
         return None
     if isinstance(result, (list, tuple)) and all(isinstance(item, (np.ndarray, np.generic)) for item in result):
-        items = [LazyArray(graph.leaf(item, name, graph.AT_ONCE, strict)) for item in result]
+        items = [LazyArray(graph.leaf(item, name, graph.AT_ONCE, strict, exposed)) for item in result]
         return type(result)(*items) if hasattr(result, "_fields") else type(result)(items)
     if strict:
         raise NotGathered(f"{name} gives a plain Python value ({type(result).__name__}) and its arguments are lazy: "
@@ -348,6 +458,8 @@ def _leaving(what: str, convert: Callable[..., Any], everything: bool = False) -
         """Give what was asked for, computing first; refuse for a strict array."""
         _hand_out(what, self._node.strict, everything, [self._node],
                   f"{what} needs the values of a lazy array: call .gather() first")
+        if everything:
+            self._expose()
         return convert(self._node.value, *args, **kwargs)
     return leave
 
@@ -398,22 +510,269 @@ def _unary(ufunc: np.ufunc) -> Callable[..., Any]:
     return apply
 
 
-def _in_place(apply: Callable[[Any, Any], Any], symbol: str) -> Callable[..., Any]:
+@dataclass(frozen=True)
+class _Slot:
+    """The place, in an index, of a lazy array whose values come when the write is computed."""
+
+    # Which of the write's lazy index arrays goes here.
+    place: int
+
+
+def _is_number(node: Node) -> bool:
+    """Say whether NumPy gives a number, not an array, for a node without dimensions.
+
+    Args:
+        node: A node of shape ().
+
+    Returns:
+        True for the result of a ufunc, a reduction, a product or an index:
+        NumPy returns a scalar for those, and `s += v` on a scalar makes a
+        new scalar and changes nothing that exists. False for what may be an
+        array without dimensions, such as `np.zeros(())`, which is written in place.
+    """
+    if not node.pending:
+        return isinstance(node.value, np.generic)
+    return (isinstance(node.operation, np.ufunc) or node.kind in (rules.REDUCTION, rules.MATRIX_PRODUCT, rules.INDEXING)
+            or (node.kind == rules.VIEW and node.operation is operator.getitem))
+
+
+def _may_defer_write(target: "LazyArray") -> bool:
+    """Say whether a write into a lazy array can be a node of the graph instead of happening now.
+
+    Args:
+        target: The array written into.
+
+    Returns:
+        True when nothing outside the layer can know the array's memory (so
+        nobody can be watching it for the write), no array made by
+        `np.reshape` may be sharing it, and it is an array the layer defers
+        operations on at all. Otherwise the write is made at once, in the
+        memory, after everything pending.
+    """
+    cell = target._cell
+    node = cell.node
+    return (not node.exposed and node.failure is None and not cell.doubted and not cell.shared_in_doubt()
+            and node.shape != () and 0 not in node.shape and node.dtype.kind in rules.DEFERRED_KINDS)
+
+
+def _defer_write(target: "LazyArray", name: str, perform: Callable[..., Any], operands: tuple) -> None:
+    """Make a write into a lazy array a node: the array's cell gets new contents, and nothing is computed.
+
+    The node's value is a copy of what the cell held with the write made
+    into it. Operations written before the write read the node the cell had,
+    so they have the old contents whenever they are computed; the array, its
+    other names and its views read the new node from here on.
+
+    Args:
+        target: The array written into: a cell's own array, or a view of it.
+        name: What to call the node.
+        perform: Makes the write: called with the part of the copy the
+            target is a view of, then the operands' values.
+        operands: What the write reads: lazy arrays, `ndarray`s, numbers.
+    """
+    cell, steps = target._cell, target._steps
+
+    def run(old: np.ndarray, *values: Any) -> np.ndarray:
+        """Copy what the array held and make the write into the copy."""
+        new = old.copy()
+        view = new
+        for step in steps:
+            view = step.of(view)
+        perform(view, *values)
+        return new
+
+    # Read before the cell changes: an operand that is a view of this array is a view of what it held.
+    read = _unwrapped(tuple(operands))
+    strict = cell.node.strict or _strict(operands)
+    if graph.pending_count() >= graph.PENDING_LIMIT:
+        evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
+    cell.node = graph.deferred(run, name, (cell.node,) + read, {}, cell.node.shape, cell.node.dtype, rules.WRITE, strict)
+
+
+def _shape_of(operand: Any) -> tuple[int, ...] | None:
+    """Return the shape of something a write reads, or None for what the layer does not look into.
+
+    Args:
+        operand: A lazy array, an `ndarray`, a NumPy scalar, a Python number, or anything else.
+
+    Returns:
+        The shape; () for a number; None for a list or another object.
+    """
+    if isinstance(operand, (LazyArray, np.ndarray, np.generic)):
+        return tuple(operand.shape)
+    return () if isinstance(operand, rules.PYTHON_NUMBERS) else None
+
+
+def _probe_of(operand: Any) -> Any:
+    """Return a one-element stand-in for something a write reads, to try the write's types on.
+
+    Args:
+        operand: A lazy array, an `ndarray`, a NumPy scalar or a Python number.
+
+    Returns:
+        Zeros of its element type and number of dimensions; a number as it is.
+    """
+    return rules.probe(operand._node if isinstance(operand, LazyArray) else operand)
+
+
+def _types_fit(call: Callable[..., Any], target: "LazyArray", operands: tuple) -> None:
+    """Try a write on one-element stand-ins, so that a write of the wrong types raises on its line.
+
+    Args:
+        call: The write, taking the target then the operands.
+        target: The array written into.
+        operands: What the write reads.
+
+    Raises:
+        Exception: NumPy's, for a result that cannot be cast into the target.
+    """
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        call(np.zeros((1,) * len(target.shape), target.dtype), *(_probe_of(operand) for operand in operands))
+
+
+def _fits_elementwise(call: Callable[..., Any], target: "LazyArray", operands: tuple) -> bool:
+    """Say whether an element-by-element write into an array can be deferred, raising if its types are wrong.
+
+    Args:
+        call: The write, taking the target then the operands.
+        target: The array written into.
+        operands: What the write reads.
+
+    Returns:
+        True when every operand has a shape the layer knows and they
+        broadcast to the target's shape exactly. False sends the write the
+        other way, where NumPy makes it at once and raises its own message
+        if the shapes are wrong.
+
+    Raises:
+        Exception: NumPy's, for a result that cannot be cast into the target.
+    """
+    shapes = [_shape_of(operand) for operand in operands]
+    if any(shape is None for shape in shapes):
+        return False
+    try:
+        if np.broadcast_shapes(target.shape, *shapes) != target.shape:
+            return False
+    except ValueError:
+        return False
+    _types_fit(call, target, operands)
+    return True
+
+
+def _index_parts(index: Any) -> tuple[Callable[[tuple], Any], list["LazyArray"], list] | None:
+    """Take an index apart into what is known now and the lazy arrays whose values come later.
+
+    Args:
+        index: What was written between the brackets of an assignment.
+
+    Returns:
+        (a function that puts values in and gives the index back, the lazy
+        arrays still pending, the index's items with a `_Slot` for each of
+        them). A lazy array that has its values is replaced by them. None
+        when the index holds a pending lazy array that is not a mask, whose
+        values the bounds would have to be checked against, or a lazy array
+        inside a list.
+    """
+    items = index if isinstance(index, tuple) else (index,)
+    pending: list[LazyArray] = []
+    template: list[Any] = []
+    for item in items:
+        if not isinstance(item, LazyArray):
+            if _lazies_in(item):
+                return None
+            template.append(item)
+        elif not item._node.pending:
+            template.append(item._node.value)
+        elif item.dtype.kind != "b":
+            return None
+        else:
+            template.append(_Slot(len(pending)))
+            pending.append(item)
+
+    def fill(found: tuple) -> Any:
+        """Put the masks' values in their places."""
+        parts = tuple(found[part.place] if isinstance(part, _Slot) else part for part in template)
+        return parts if isinstance(index, tuple) else parts[0]
+    return fill, pending, template
+
+
+def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
+    """Say whether `x[index] = value` can be deferred, raising NumPy's error if the index or the shapes are wrong.
+
+    The assignment is tried on arrays of an element type of no size, which
+    take no memory: NumPy checks the index against the bounds and the value
+    against the shape selected, and raises its own message on the line.
+
+    Args:
+        target: The array assigned into.
+        parts: What `_index_parts` returned for the index.
+        value: What is assigned.
+
+    Returns:
+        False for a value the layer does not know the shape of, and for an
+        array assigned through a mask that is still pending: how many
+        elements the mask selects is not known yet.
+
+    Raises:
+        Exception: NumPy's, for an index out of bounds or a value that does not fit.
+    """
+    fill, pending, _ = parts
+    shape = _shape_of(value)
+    if shape is None or (pending and shape != ()):
+        return False
+    ghost = np.empty(target._cell.node.shape, rules.NO_SIZE)
+    for step in target._steps:
+        ghost = step.of(ghost)
+    masks = tuple(np.broadcast_to(np.zeros((), np.bool_), mask.shape) for mask in pending)
+    ghost[fill(masks)] = np.broadcast_to(np.zeros((), rules.NO_SIZE), shape)
+    return True
+
+
+def _same_index(first: Any, second: Any) -> bool:
+    """Say whether two basic indices are the same.
+
+    Args:
+        first: One index.
+        second: Another.
+
+    Returns:
+        True for equal integers, slices and tuples of them. False for
+        anything that cannot be compared plainly, such as an index holding an array.
+    """
+    try:
+        return type(first) is type(second) and bool(first == second)
+    except (ValueError, TypeError):
+        return False
+
+
+def _in_place(apply: Callable[[Any, Any], Any], symbol: str, ufunc: np.ufunc) -> Callable[..., Any]:
     """Build the method for an in-place operator, which is a write.
 
     Args:
         apply: The function of the `operator` module, such as `operator.iadd`.
-        symbol: The operator as written, for the counters.
+        symbol: The operator as written, for the node, the counters and the log.
+        ufunc: The ufunc the operator stands for.
 
     Returns:
-        A method that computes everything pending and hands the operator to
-        NumPy on the computed value. NumPy returns the same array when it
-        wrote in place, and then the lazy array is returned unchanged, so
-        every name for it sees the write; for a NumPy scalar, which cannot be
-        written, NumPy returns a new one and so does the method.
+        A method that makes the write a node of the graph when
+        `_may_defer_write` allows it, and the array is returned unchanged in
+        identity, so every name for it reads the new contents. For a number,
+        which cannot be written, the method gives a new lazy array, as
+        `s += v` gives a new scalar in NumPy. Otherwise everything pending
+        is computed and NumPy applies the operator in the memory.
     """
+    def perform(view: np.ndarray, other: Any) -> None:
+        """Apply the operator in place to the part of the copy the target is a view of."""
+        apply(view, other)
+
     def write(self, other):
         """Apply the in-place operator with NumPy's meaning."""
+        if self._node.shape == () and _is_number(self._node):
+            return _defer_or_call(ufunc, ufunc.__name__, f"np.{ufunc.__name__}", (self, other))
+        if _may_defer_write(self) and _fits_elementwise(apply, self, (other,)):
+            _defer_write(self, symbol, perform, (other,))
+            return self
         graph.fallback(graph.WRITE, symbol)
         trigger = Trigger(graph.WRITE, symbol)
         evaluate.compute_pending(trigger)
@@ -422,6 +781,31 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str) -> Callable[..., An
         result = apply(value, _valued(other))
         return self if result is value else LazyArray(graph.leaf(result, symbol, graph.AT_ONCE, self._node.strict))
     return write
+
+
+def _write_out(function: Callable[..., Any], call: str, args: tuple, target: Any) -> bool:
+    """Defer a call that writes its result into `out=`, when that is safe.
+
+    Args:
+        function: A ufunc, or one of OUT_FUNCTIONS.
+        call: What to call the node.
+        args: The call's positional arguments.
+        target: What was given as `out`.
+
+    Returns:
+        True when the write was made a node. False when it has to be made at once.
+
+    Raises:
+        Exception: NumPy's, for a result that cannot be cast into `out`.
+    """
+    def into(view: np.ndarray, *values: Any) -> None:
+        """Make the call with its result written into the part of the copy the target is a view of."""
+        function(*values, out=view)
+
+    if not isinstance(target, LazyArray) or not _may_defer_write(target) or not _fits_elementwise(into, target, args):
+        return False
+    _defer_write(target, call, into, args)
+    return True
 
 
 def _reduction(function: Callable[..., Any], name: str) -> Callable[..., Any]:
@@ -458,19 +842,48 @@ class LazyArray:
     and a pending array has none.
     """
 
-    __slots__ = ("_node", "__weakref__")
+    __slots__ = ("_cell", "_steps", "_seen", "__weakref__")
     # So that type(x) prints the name a user imports, not the file the class is written in.
     __module__ = "prototypes.lazy"
     # Arrays compare element by element, so they cannot be hashed. As for `ndarray`.
     __hash__ = None
 
-    def __init__(self, node: Node) -> None:
-        """Make a handle on a node.
+    def __init__(self, node: Node, cell: _Cell | None = None, steps: tuple[_Step, ...] = ()) -> None:
+        """Make a lazy array.
 
         Args:
-            node: The node of the graph this array stands for.
+            node: The node of the graph the array stands for now.
+            cell: The cell the array is a view into, or None for an array of its own, which gets a new cell.
+            steps: For a view, the view operations from the cell's contents to this array.
         """
-        self._node = node
+        self._cell = cell if cell is not None else _Cell(node)
+        self._steps = steps
+        # For a view: the cell's contents the node was made from, and the node.
+        self._seen = (self._cell.node, node)
+
+    @property
+    def _node(self) -> Node:
+        """The node the array stands for now.
+
+        Returns:
+            The cell's contents for an array of its own. For a view, the
+            view of them: made again, as deferred nodes, when a write has
+            given the cell new contents since the view was last read.
+        """
+        if not self._steps:
+            return self._cell.node
+        contents, node = self._seen
+        if contents is not self._cell.node:
+            node = self._cell.node
+            for step in self._steps:
+                node = graph.deferred(step.operation, step.name, (node,) + step.tail, step.kwargs, step.shape, step.dtype,
+                                      rules.VIEW, node.strict, step.origin)
+            self._seen = (self._cell.node, node)
+        return node
+
+    def _expose(self) -> None:
+        """Note that the array's memory is known outside the layer from now on, so a write into it is made at once."""
+        self._cell.node.exposed = True
 
     # ---- Known without computing.
 
@@ -547,6 +960,7 @@ class LazyArray:
                 that wrote the operation.
         """
         evaluate.compute([self._node], Trigger(graph.GATHER, "gather"))
+        self._expose()
         return self._node.value
 
     # ---- Everything else that needs values: computed and logged, or refused for a strict array.
@@ -620,6 +1034,7 @@ class LazyArray:
         if not callable(attribute):
             what = f"The attribute .{name}"
             _hand_out(what, self._node.strict, True, [self._node], f"{what} needs the values of a lazy array: call .gather() first")
+            self._expose()
             return getattr(self._node.value, name)
         method, call = _method(name), f"ndarray.{name}"
         if name in WRITING_METHODS:
@@ -647,6 +1062,8 @@ class LazyArray:
         """
         call = f"np.{ufunc.__name__}" if method == "__call__" else f"np.{ufunc.__name__}.{method}"
         if out is not None:
+            if method == "__call__" and len(out) == 1 and not kwargs and _write_out(ufunc, ufunc.__name__, inputs, out[0]):
+                return out[0]
             _write(getattr(ufunc, method), call, inputs, {**kwargs, "out": out}, out)
             return out[0] if len(out) == 1 else out
         if method == WRITING_UFUNC_METHOD:
@@ -679,6 +1096,8 @@ class LazyArray:
             return getattr(args[0], SHAPE_QUESTIONS[func])
         target = kwargs.get("out")
         if target is not None:
+            if func in OUT_FUNCTIONS and set(kwargs) == {"out"} and _write_out(func, func.__name__, args, target):
+                return target
             _write(func, call, args, kwargs, target if isinstance(target, tuple) else (target,))
             return target
         if func in WRITING_FUNCTIONS:
@@ -716,7 +1135,36 @@ class LazyArray:
             index: What was written between the brackets.
             value: What to assign. A lazy array's values are used.
         """
+        if isinstance(value, LazyArray) and value._cell is self._cell and self._is_view_at(value, index):
+            # `x[i] += v`: Python takes the view, updates it, and assigns it back to where it already is.
+            return
+        if _may_defer_write(self):
+            parts = _index_parts(index)
+            if parts is not None and _assignment_fits(self, parts, value):
+                fill = parts[0]
+
+                def assign(view: np.ndarray, assigned: Any, *masks: Any) -> None:
+                    """Assign into the part of the copy the target is a view of."""
+                    view[fill(masks)] = assigned
+
+                _defer_write(self, "setitem", assign, (value, *parts[1]))
+                return
         _write(operator.setitem, "x[index] = v", (self, index, value), {}, (self,))
+
+    def _is_view_at(self, other: "LazyArray", index: Any) -> bool:
+        """Say whether another lazy array is this array's own view at an index.
+
+        Args:
+            other: A lazy array of the same cell.
+            index: An index into this array.
+
+        Returns:
+            True when `other` is `self[index]` as a tracked view.
+        """
+        if len(other._steps) != len(self._steps) + 1 or any(a is not b for a, b in zip(other._steps, self._steps)):
+            return False
+        last = other._steps[-1]
+        return last.operation is operator.getitem and _same_index(last.tail[0], index)
 
     # ---- Methods the graph knows. Any other method is `ndarray`'s, through `__getattr__`.
 
@@ -784,5 +1232,6 @@ class LazyArray:
     __eq__, __ne__ = _binary(np.equal), _binary(np.not_equal)
     __neg__, __pos__ = _unary(np.negative), _unary(np.positive)
     __abs__, __invert__ = _unary(np.absolute), _unary(np.invert)
-    __iadd__, __isub__ = _in_place(operator.iadd, "x += y"), _in_place(operator.isub, "x -= y")
-    __imul__, __itruediv__ = _in_place(operator.imul, "x *= y"), _in_place(operator.itruediv, "x /= y")
+    __iadd__, __isub__ = _in_place(operator.iadd, "x += y", np.add), _in_place(operator.isub, "x -= y", np.subtract)
+    __imul__ = _in_place(operator.imul, "x *= y", np.multiply)
+    __itruediv__ = _in_place(operator.itruediv, "x /= y", np.true_divide)

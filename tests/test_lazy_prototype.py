@@ -214,7 +214,7 @@ def test_eager_calls_and_cuts_are_logged_apart_and_once_per_line(caplog):
     """A call made at once is an INFO line of one logger; a write or a value needed is a DEBUG line of another."""
     caplog.set_level(logging.DEBUG, logger="prototypes.lazy")
     graph.COUNTS.reset()
-    x = lazy.arange(4.0)
+    x = lazy.asarray(numpy.arange(4.0))
     for _ in range(3):
         float((x * 2).sum())
     numpy.argmax(x)
@@ -231,7 +231,7 @@ def test_eager_calls_and_cuts_are_logged_apart_and_once_per_line(caplog):
 def test_at_info_only_eager_calls_are_logged(caplog):
     """With the package's logger at INFO, a line says what NumPy had to compute at once and nothing else."""
     caplog.set_level(logging.INFO, logger="prototypes.lazy")
-    x = lazy.arange(4.0)
+    x = lazy.asarray(numpy.arange(4.0))
     float((x * 2).sum())
     numpy.argmin(x)
     x[1] = 9.0
@@ -242,7 +242,7 @@ def test_at_info_only_eager_calls_are_logged(caplog):
 def test_the_report_ranks_what_was_computed_unasked():
     """lazy_report() has every occurrence by call and by line, the most frequent first, in three parts."""
     lazy_report(reset=True)
-    x = lazy.arange(4.0)
+    x = lazy.asarray(numpy.arange(4.0))
     for _ in range(3):
         numpy.argmax(x * 2)
     numpy.cumsum(x)
@@ -348,7 +348,7 @@ def test_a_failure_nobody_gathered_surfaces_once_at_a_write():
     with numpy.errstate(over="raise"):
         big = lazy.array([1e308]) * 10
     dependant = big + 1
-    target = lazy.zeros(2)
+    target = lazy.asarray(numpy.zeros(2))
     with pytest.raises(FloatingPointError):
         target += 1
     target += 1
@@ -380,6 +380,111 @@ def test_writes_into_lazy_arrays_have_numpys_meaning():
     counts = lazy.arange(3)
     error = raised(lambda: counts.__iadd__(0.5))
     assert type(error) is type(raised(lambda: numpy.arange(3).__iadd__(0.5)))
+
+
+def test_a_write_into_an_array_of_the_layers_own_is_a_node():
+    """In-place operators, assignment, out= and np.clip into such an array compute nothing and give NumPy's values."""
+    def program(np):
+        """Write into an array in five ways; return it, another name for it, and what read it before the writes."""
+        w = np.arange(8.0).reshape(2, 4) * 1.0
+        alias, before = w, w + 100
+        w += 2
+        w[1, 1:3] = np.ones(2) * 50
+        w *= np.arange(4.0)
+        np.multiply(w, 0.5, out=w)
+        np.clip(w, 1.0, 40.0, out=w)
+        w[w > 30] = -1.0
+        return w, alias, before
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    w, alias, before = program(lazy)
+    assert w is alias and w._node.pending and w._node.kind == "write" and graph.COUNTS.at_once == {}
+    assert same(expected[2], before.gather()) and same(expected[0], w.gather())
+
+
+def test_a_write_reaches_every_view_and_a_write_through_a_view_reaches_the_array():
+    """Views are views of the array's contents now: they follow writes, and writes through them are writes into it."""
+    def program(np):
+        """Write through rows, columns and a transpose of one array, and read the views afterwards."""
+        base = np.zeros((3, 4))
+        row, column, turned = base[1], base[:, 2], base.T
+        row += 1
+        base[0, :2] = 7
+        column *= 3
+        turned[3, 2] = 9
+        base[2] -= 4
+        row[1:3] = row[0:2] + 10
+        return base, row, column, turned
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert all(each._node.pending for each in got) and graph.COUNTS.at_once == {}
+    for name, plain, mine in zip(("base", "row", "column", "turned"), expected, got, strict=True):
+        assert same(plain, mine.gather()), name
+
+
+def test_a_number_is_not_written_in_place():
+    """`s += v` on what NumPy gives as a number makes a new lazy array, deferred, and leaves the old one alone."""
+    s = (lazy.arange(4.0) * 2).sum()
+    first = s
+    graph.COUNTS.reset()
+    s += 1
+    s *= 2
+    assert s is not first and s._node.pending and graph.COUNTS.at_once == {}
+    assert same(numpy.float64(26.0), s.gather()) and same(numpy.float64(12.0), first.gather())
+
+
+def test_a_write_into_memory_known_outside_is_made_at_once():
+    """An array the user handed in, one that was gathered, and one a reshape may share are written in their memory."""
+    mine = numpy.zeros(3)
+    x = lazy.asarray(mine)
+    x += 1
+    assert mine.tolist() == [1.0, 1.0, 1.0] and not x._node.pending
+
+    w = lazy.zeros(3) + 1
+    held = w.gather()
+    w += 1
+    assert held is w.gather() and held.tolist() == [2.0, 2.0, 2.0]
+
+    def program(np):
+        """Write into an array through a reshape of it and through a ravel of it, and into it while they live."""
+        base = np.zeros(6)
+        shaped, flat = base.reshape(2, 3), base.ravel()
+        shaped[0, 0] = 5
+        flat[1] = 6
+        base += 1
+        return base, shaped, flat
+
+    for name, plain, got in zip(("base", "reshape", "ravel"), program(numpy), program(lazy), strict=True):
+        assert same(plain, got.gather()), name
+
+
+def test_a_deferred_write_of_the_wrong_shape_or_place_raises_on_its_line():
+    """An index out of bounds and a value that does not fit raise NumPy's error when written, and nothing changes."""
+    w, plain = lazy.zeros((3, 4)), numpy.zeros((3, 4))
+    cases = {
+        "out of bounds": lambda x: x.__setitem__((5, 0), 1.0),
+        "too many values": lambda x: x.__setitem__((0, slice(0, 2)), numpy.ones(3)),
+        "through a view": lambda x: x[1].__setitem__(9, 1.0),
+        "cast": lambda x: (x > 0).__iadd__(1.5),
+    }
+    for name, case in cases.items():
+        assert str(raised(lambda: case(w))) == str(raised(lambda: case(plain))), name
+    assert same(plain, w.gather())
+
+
+def test_arrays_from_a_random_generator_are_lazy():
+    """np.random.default_rng() through the stand-in gives a generator whose arrays are lazy and the layer's own."""
+    rng, plain = lazy.random.default_rng(SEED), numpy.random.default_rng(SEED)
+    x, expected = rng.standard_normal((3, 4)), plain.standard_normal((3, 4))
+    assert type(x) is LazyArray and same(expected, (x * 1).gather())
+    graph.COUNTS.reset()
+    x -= 0.5
+    expected -= 0.5
+    assert x._node.pending and graph.COUNTS.at_once == {} and same(expected, x.gather())
+    assert same(plain.permutation(5), rng.permutation(5).gather()) and rng.bit_generator is not None
 
 
 def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
@@ -453,6 +558,8 @@ def test_indexing_by_integer_arrays_is_deferred():
     assert graph.COUNTS.at_once == {}
     assert str(raised(lambda: x[numpy.array([0, 6])])) == str(raised(lambda: plain[numpy.array([0, 6])]))
     assert not x[x > 0]._node.pending and not x[lazy.arange(3) * 2]._node.pending
+    row = x[numpy.argmax(lazy.arange(5.0))]
+    assert row._node.pending and row._node.kind == "view" and same(plain[4], row.gather())
     assert same(plain[numpy.arange(3) * 2], x[lazy.arange(3) * 2].gather())
 
 
