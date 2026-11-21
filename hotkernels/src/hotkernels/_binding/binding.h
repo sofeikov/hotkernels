@@ -68,7 +68,7 @@ typedef enum {
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
     HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64, HK_ANY_COLS_BOOL, HK_SUM_F32,
-    HK_NONZERO_2D_BOOL, HK_SUM_F64, HK_ISIN_I32,
+    HK_NONZERO_2D_BOOL, HK_SUM_F64, HK_ISIN_I32, HK_COMPRESS_U8, HK_COMPRESS_I16,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.
@@ -630,8 +630,9 @@ PyObject *hk_try_clip(PyObject *array, PyObject *lo, PyObject *hi, PyObject *out
 void hk_clip_in_place(hk_kernel kernel, void *data, size_t n, double lo, double hi);
 
 // The elements of `x` where `mask` is True, as a new one-dimensional array:
-// the compress kernels. `x` is contiguous float32, float64 or int64 (which
-// the float64 kernel selects, as bit patterns) and `mask` a
+// the compress kernels. `x` is contiguous float32, float64, int64 or int32
+// (which the float64 and float32 kernels select as bit patterns), uint8, int8
+// or bool (compress_u8), or int16 or uint16 (compress_i16), and `mask` a
 // contiguous boolean array of the same size, each of any shape; both are
 // read in C order. A caller whose NumPy operation needs more, such as both
 // being one-dimensional, tests that first. In hook_index.c.

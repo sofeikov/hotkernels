@@ -23,8 +23,10 @@ static inline bool is_mask(PyObject *index) {
 }
 
 // The compress kernels on a buffer of the binding's own. See binding.h.
-// int64 elements go to the float64 kernel and int32 elements to the float32
-// one, and are counted as their calls.
+// The kernels move elements by their bits and never compute with one, so
+// each serves every element type of its width: int64 elements go to the
+// float64 kernel and int32 elements to the float32 one, counted as their
+// calls; int8 and bool to compress_u8, uint16 to compress_i16.
 // As with nonzero, the kernel's output is scratch, so it runs on a buffer of
 // n elements and the selected elements are copied into an array of exactly
 // their number. Shared with the function hooks for np.compress and
@@ -34,11 +36,13 @@ HK_NOINLINE PyObject *hk_try_compress(PyObject *array, PyObject *selector) {
     int type_num;
     if (hk_is_flat(array, NPY_DOUBLE)) kernel = HK_COMPRESS_F64, type_num = NPY_DOUBLE;
     else if (hk_is_flat(array, NPY_FLOAT)) kernel = HK_COMPRESS_F32, type_num = NPY_FLOAT;
-    // The float64 kernel moves 64-bit elements and never computes with one,
-    // so it selects int64 elements as they are.
     else if (hk_is_flat(array, NPY_INT64)) kernel = HK_COMPRESS_F64, type_num = NPY_INT64;
-    // Likewise the float32 kernel for int32.
     else if (hk_is_flat(array, NPY_INT32)) kernel = HK_COMPRESS_F32, type_num = NPY_INT32;
+    else if (hk_is_flat(array, NPY_UINT8)) kernel = HK_COMPRESS_U8, type_num = NPY_UINT8;
+    else if (hk_is_flat(array, NPY_INT8)) kernel = HK_COMPRESS_U8, type_num = NPY_INT8;
+    else if (hk_is_flat(array, NPY_BOOL)) kernel = HK_COMPRESS_U8, type_num = NPY_BOOL;
+    else if (hk_is_flat(array, NPY_INT16)) kernel = HK_COMPRESS_I16, type_num = NPY_INT16;
+    else if (hk_is_flat(array, NPY_UINT16)) kernel = HK_COMPRESS_I16, type_num = NPY_UINT16;
     else return NULL;
     if (!hk_is_flat(selector, NPY_BOOL)) return NULL;
     PyArrayObject *x = (PyArrayObject *)array, *mask = (PyArrayObject *)selector;
@@ -55,9 +59,13 @@ HK_NOINLINE PyObject *hk_try_compress(PyObject *array, PyObject *selector) {
     {
         HK_BEGIN_NOGIL(n)
         if (hk_mask_is_clean(PyArray_DATA(mask), (size_t)n)) {
-            count = kernel == HK_COMPRESS_F64
-                ? (npy_intp)compress_f64(PyArray_DATA(x), PyArray_DATA(mask), scratch, (size_t)n)
-                : (npy_intp)compress_f32(PyArray_DATA(x), PyArray_DATA(mask), scratch, (size_t)n);
+            const bool *selected = PyArray_DATA(mask);
+            switch (kernel) {
+            case HK_COMPRESS_F64: count = (npy_intp)compress_f64(PyArray_DATA(x), selected, scratch, (size_t)n); break;
+            case HK_COMPRESS_F32: count = (npy_intp)compress_f32(PyArray_DATA(x), selected, scratch, (size_t)n); break;
+            case HK_COMPRESS_I16: count = (npy_intp)compress_i16(PyArray_DATA(x), selected, scratch, (size_t)n); break;
+            default: count = (npy_intp)compress_u8(PyArray_DATA(x), selected, scratch, (size_t)n); break;
+            }
         }
         HK_END_NOGIL
     }
