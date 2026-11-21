@@ -173,6 +173,8 @@ def _compute_one(node: Node) -> None:
         _fail(node, error)
         raise
     node.value = value
+    if not graph.is_known(node.shape):
+        node.shape = np.shape(value)  # The length a mask selected is known now.
     graph.settle(node)
     for warning in caught:
         _reissue(warning, node.origin)

@@ -36,6 +36,20 @@ LOCK = threading.RLock()
 # Hands out node numbers. Operands are always numbered below their consumer.
 _numbers = itertools.count()
 
+# A length that is not known until a mask is computed: how many elements the
+# mask selects. This prototype stands it in, inside a shape, as an integer no
+# array on this machine can have (2**40 elements of one byte are a terabyte):
+# this floor plus the mask's node number. NumPy's own shape arithmetic then
+# carries it through broadcasting, products and reductions, and two
+# selections by the same mask have the same length. The package is to have a
+# type of its own for it.
+UNKNOWN_FLOOR = 2 ** 40
+# Node numbers stay below this, so a stand-in is below the floor plus this.
+# Twice a stand-in, which a reshape could produce, is not: it stands for nothing.
+UNKNOWN_SPAN = 2 ** 32
+# What a length that is not known is written as, for a reader.
+UNKNOWN_TEXT = "?"
+
 # The package this module is in: "hotkernels.lazy" once it is in the package.
 _PACKAGE = __name__.rpartition(".")[0]
 # Two loggers, so that standard logging configuration chooses what is seen.
@@ -153,7 +167,9 @@ class Node:
     args: tuple
     # Keyword arguments of the call, none of them a `Node`.
     kwargs: dict
-    # Shape of the result, known when the node is made.
+    # Shape of the result, known when the node is made. One length may be a
+    # stand-in (`unknown_length`) until the node is computed: how many
+    # elements a pending mask selects.
     shape: tuple[int, ...]
     # Element type of the result, known when the node is made.
     dtype: np.dtype
@@ -297,6 +313,68 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
     if observer is not None:
         observer.made(node, name)
     return node
+
+
+def unknown_length(mask: Node) -> int:
+    """Return the stand-in for the number of elements a pending mask selects.
+
+    Args:
+        mask: The node of a boolean array.
+
+    Returns:
+        An integer at or above UNKNOWN_FLOOR: the same one each time for the
+        same node, and a different one for every other node.
+    """
+    return UNKNOWN_FLOOR + mask.number
+
+
+def is_known(shape: tuple[int, ...]) -> bool:
+    """Say whether every length of a shape is known.
+
+    Args:
+        shape: A node's shape.
+
+    Returns:
+        False when a length is a stand-in for one that depends on values.
+    """
+    return all(length < UNKNOWN_FLOOR for length in shape)
+
+
+def is_issued(length: int) -> bool:
+    """Say whether an integer is a stand-in that `unknown_length` gives.
+
+    Args:
+        length: A length at or above UNKNOWN_FLOOR.
+
+    Returns:
+        False for an integer that arithmetic on a stand-in produced, which stands for nothing.
+    """
+    return UNKNOWN_FLOOR <= length < UNKNOWN_FLOOR + UNKNOWN_SPAN
+
+
+def shown(shape: tuple[int, ...]) -> tuple[int | None, ...]:
+    """Return a shape as it is shown and recorded.
+
+    Args:
+        shape: A node's shape.
+
+    Returns:
+        The same lengths, with None for each that is not known.
+    """
+    return tuple(length if length < UNKNOWN_FLOOR else None for length in shape)
+
+
+def shape_text(shape: tuple[int, ...]) -> str:
+    """Write a shape for a reader.
+
+    Args:
+        shape: A node's shape.
+
+    Returns:
+        The shape as Python writes a tuple, with `?` for a length that is not known: "(?, 2)".
+    """
+    lengths = [UNKNOWN_TEXT if length is None else str(length) for length in shown(shape)]
+    return f"({lengths[0]},)" if len(lengths) == 1 else f"({', '.join(lengths)})"
 
 
 def caller() -> Origin:

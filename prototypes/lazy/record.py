@@ -123,9 +123,10 @@ class GraphNode:
     category: str
     # Element type of the result, as NumPy prints it.
     dtype: str
-    # Shape of the result.
-    shape: tuple[int, ...]
-    # Size of the result in bytes.
+    # Shape of the result. None for a length that was not known when the
+    # operation was written: how many elements a mask selects.
+    shape: tuple[int | None, ...]
+    # Size of the result in bytes; 0 when a length was not known.
     nbytes: int
     # File name and line of the user's code that wrote the operation, or where
     # an input entered; empty when not known.
@@ -272,7 +273,7 @@ class _Record:
     # As `GraphNode.dtype`.
     dtype: str
     # As `GraphNode.shape`.
-    shape: tuple[int, ...]
+    shape: tuple[int | None, ...]
     # As `GraphNode.nbytes`.
     nbytes: int
     # Full path of the file of the user's code that wrote it; empty when not known.
@@ -559,13 +560,15 @@ class Recording:
             path, line = "", 0
         if path:
             self._files.add(path)
-        nbytes = int(np.prod(node.shape, dtype=np.int64)) * node.dtype.itemsize
+        # A length that depends on values is recorded as None, and the size as 0: neither is known.
+        shape = graph.shown(node.shape)
+        nbytes = int(np.prod(node.shape, dtype=np.int64)) * node.dtype.itemsize if graph.is_known(node.shape) else 0
         if not node.pending:
             name = source if node.origin is None else node.name
-            return _Record(node.number, INPUT, name, node.kind or ARRAY, str(node.dtype), tuple(node.shape), nbytes,
+            return _Record(node.number, INPUT, name, node.kind or ARRAY, str(node.dtype), shape, nbytes,
                            path, line, (), (), frames, None, node.state)
         operands, arguments = self._arguments(node, path, line)
-        return _Record(node.number, OPERATION, node.name, node.kind, str(node.dtype), tuple(node.shape), nbytes,
+        return _Record(node.number, OPERATION, node.name, node.kind, str(node.dtype), shape, nbytes,
                        path, line, operands, arguments, frames, weakref.ref(node), PENDING)
 
     def _arguments(self, node: Node, path: str, line: int) -> tuple[tuple[int, ...], tuple[int | str, ...]]:

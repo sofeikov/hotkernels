@@ -3,7 +3,7 @@
 It is here for the recording mode. `regression.fit` never needs a value, so
 it leaves one graph. This one gathers its loss every few steps, and each
 gather is a graph of its own, alike from one to the next; and it ends with
-`np.argmax`, a call outside the deferred set, which is made at once and so
+`np.nanargmax`, a call outside the deferred set, which is made at once and so
 cuts the graph a second way.
 """
 from __future__ import annotations
@@ -40,5 +40,5 @@ def fit(np: Any, features: Any, targets: Any, steps: int) -> tuple[Any, list[flo
         w = w - LEARNING_RATE * (2 / len(y)) * (X.T @ residual)
         if step % REPORT_EVERY == 0:
             history.append(float(loss.gather()))
-    worst = np.argmax(np.abs(residual))
+    worst = np.nanargmax(np.abs(residual))
     return w.gather(), history, int(worst.gather())

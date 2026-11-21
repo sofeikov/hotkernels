@@ -64,7 +64,7 @@ The names are provisional. One recording runs at a time; entering a second raise
 | Trigger | When | Example of `call` |
 |---|---|---|
 | `gather` | `x.gather()` or `hotkernels.gather(...)` | `gather` |
-| `at once` | A call outside the deferred set needed its operands | `np.argmax` |
+| `at once` | A call outside the deferred set needed its operands | `np.argsort` |
 | `write` | A write into a lazy array had to be made at once, in memory known outside the layer, and computed everything pending first. A deferred write triggers nothing: it is a node | `x[index] = v`, `x += y` |
 | `needed` | Something needed values and `gather()` was not called | `float()`, `Conversion to an ndarray`, `np.add` |
 | `limit` | Too many nodes were pending | `the limit of pending nodes` |
@@ -89,7 +89,7 @@ The prototype's three example programs, run in one recorded block by `uv run pyt
 |---|---|---|
 | The regression that never needs a value, 50 steps | 1 | 954 operations, computed by the one `gather` at the end |
 | The transformer block | 1 | 55 operations |
-| A regression that gathers its loss every fifth step and ends with `np.argmax` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.argmax` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
+| A regression that gathers its loss every fifth step and ends with `np.nanargmax` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.nanargmax` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
 
 15 graphs and 1,336 operations in all. A further 78 operations were written and dropped: the losses of the steps that were not reported.
 
@@ -113,7 +113,7 @@ A file is named by its name alone at every level, never by its path. `x.graph()`
 | `kind` | `operation`; `input` for an array from outside this graph that was never an operation of the recording; `earlier` for an operation an earlier graph computed |
 | `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it |
 | `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
-| `dtype`, `shape`, `nbytes` | The element type, shape and size of its result |
+| `dtype`, `shape`, `nbytes` | The element type, shape and size of its result. A length that was not known when the operation was written, how many elements a pending mask selects, is `None` in the shape (`null` in JSON), and the size is then 0 |
 | `where`, `code` | File name and line of the user's code that wrote it, and the text of that line |
 | `operands` | The ids of the nodes it reads |
 | `arguments` | Every argument in the order written: an id for an operand, text for anything else (`2.0`, `axis=0`, `1:3, None`) |
@@ -134,7 +134,7 @@ An input says where it entered the lazy world, as well as the layer knows:
 |---|---|---|
 | A function of the stand-in made it or took it in | `np.zeros`, `np.asarray` | The line of that call |
 | A plain `ndarray` met a lazy array in an operation | `ndarray` | The line of the first operation that read it |
-| A call made at once returned it | The call: `np.argmax` | The line of that call |
+| A call made at once returned it | The call: `np.argsort` | The line of that call |
 | It was made before the recording began | `array`, or the operation's name | The line it remembers, if it was an operation |
 
 How an `ndarray` was made before it entered is outside the layer and is not recorded.
