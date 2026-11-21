@@ -96,7 +96,8 @@ Counted on the first push of each of the last 120 pull requests: 240 macOS jobs 
 
 The queue's capacity is the number of runners: four on the maintainer's Mac, an Apple M1 Pro with eight performance cores, two efficiency cores and 32 GB of memory.
 
-- **More runners add capacity only while cores are free.** A macOS job of `ci.yml` uses about one core for most of its length: `delivery check` is one process and spends about 65% of its time on the processor, and each run of NumPy's suite is one pytest process. Six runners would still leave the performance cores enough for six jobs.
+- **More runners add capacity only while cores are free.** The jobs do not keep their cores busy. With all four runners busy on 21 November, each job's Python process used 30% to 71% of a core, about 2.5 cores in all; `delivery check` alone, run by hand, spends about 65% of its time on the processor. The load average was 12.9 at the same moment, so the rest of each job's time is spent waiting, not computing. Six runners fit on the eight performance cores by this count.
+- **Spotlight indexes the jobs' files.** At the same moment `mds_stores`, Spotlight's indexer, used 82% of a core: each job builds a virtual environment and the package under `/Users/ci-runner`, and Spotlight indexes what it writes. Adding `/Users/ci-runner` to Spotlight's Privacy list in System Settings stops that; it is a setting of the machine, not of this repository.
 - **What it costs.** Every job on the Mac slows the others and whatever else runs on it, including timings taken by hand, which are only trustworthy when nothing else runs.
 - **Which comes first.** This design takes jobs out of the queue; it is the cheaper change and is measured first. Making the jobs faster with several processes each would change the arithmetic: a job that uses four cores leaves room for fewer runners. The runner count is best decided after both.
 
