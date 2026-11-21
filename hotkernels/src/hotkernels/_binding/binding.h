@@ -67,7 +67,7 @@ typedef enum {
     HK_WHERE_F64, HK_CUMMAX_I64, HK_CUMFMAX_F64, HK_FMAX_REDUCE_F64, HK_ANY_ROWS_BOOL,
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
-    HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64,
+    HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64, HK_ANY_COLS_BOOL,
     // Taken on ARM64 only (docs/coverage-gaps-arm64.md); the counters exist everywhere.
     HK_SUM_F32, HK_SUM_F64, HK_NONZERO_2D_BOOL,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
@@ -194,8 +194,8 @@ static inline bool hk_is_flat_1d(PyObject *obj, int type_num) {
 }
 
 // True when `obj` is exactly an ndarray, not a subclass, of booleans with two
-// dimensions: the arrays whose any(axis=1) has a kernel. Byte order and
-// layout are left to the hook to test.
+// dimensions: the arrays whose any(axis=1) and any(axis=0) have a kernel.
+// Byte order and layout are left to the hook to test.
 static inline bool hk_is_bool_matrix(PyObject *obj) {
     return hk_is_plain_array(obj) && PyArray_TYPE((PyArrayObject *)obj) == NPY_BOOL &&
            PyArray_NDIM((PyArrayObject *)obj) == 2;
@@ -209,6 +209,16 @@ static inline bool hk_is_last_axis(PyObject *axis) {
     int overflow = 0;
     const long value = PyLong_AsLongAndOverflow(axis, &overflow);
     return overflow == 0 && (value == 1 || value == -1);
+}
+
+// True when `axis` names the first axis of a two-dimensional array as a
+// Python int: 0 or -2. Anything else, a bool among them, is NumPy's to
+// interpret.
+static inline bool hk_is_first_axis(PyObject *axis) {
+    if (!PyLong_CheckExact(axis)) return false;
+    int overflow = 0;
+    const long value = PyLong_AsLongAndOverflow(axis, &overflow);
+    return overflow == 0 && (value == 0 || value == -2);
 }
 
 // True when two arrays have the same number of dimensions and the same
@@ -545,6 +555,12 @@ PyObject *hk_try_nonzero(PyObject *mask);
 // arguments; the layout and the mask's bytes are tested here. In
 // hook_method.c.
 PyObject *hk_try_any_rows(PyObject *mask);
+
+// Whether each column of a boolean matrix holds a True, as the new
+// one-dimensional boolean array NumPy's `m.any(axis=0)` returns: the
+// any_cols_bool kernel. The caller has tested hk_is_bool_matrix and the
+// arguments; the layout and the shape are tested here. In hook_method.c.
+PyObject *hk_try_any_cols(PyObject *mask);
 
 // np.round(x, decimals) for a contiguous float64 `array` of 1 to
 // ROUND_F64_MAX_N elements, as the new array NumPy returns: the binding's own

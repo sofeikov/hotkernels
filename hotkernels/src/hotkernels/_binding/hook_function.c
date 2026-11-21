@@ -1487,20 +1487,22 @@ static PyObject *call_where(HK_VECTORCALL_PARAMETERS) {
 
 // --------------------------------------------------------------------- any
 
-// np.any(m, axis=1) for a two-dimensional boolean array: the array and the
-// axis, the Python int 1 or -1, by position or the axis as `axis=`, and
-// nothing else. For a plain ndarray np.any calls np.logical_or.reduce itself
-// and never reaches the method, so it needs this hook as well; the work is
-// the method hook's (hk_try_any_rows). The parameters are a, axis, out,
-// keepdims and, by keyword only, where.
+// np.any(m, axis=1) and np.any(m, axis=0) for a two-dimensional boolean
+// array: the array and the axis, the Python int 1 or -1 for the rows, 0 or
+// -2 for the columns, by position or the axis as `axis=`, and nothing else.
+// For a plain ndarray np.any calls np.logical_or.reduce itself and never
+// reaches the method, so it needs this hook as well; the work is the method
+// hook's (hk_try_any_rows, hk_try_any_cols). The parameters are a, axis,
+// out, keepdims and, by keyword only, where.
 static HK_NOINLINE PyObject *try_any(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames) {
     const Py_ssize_t keywords = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
     if (nargs < 1 || nargs + keywords != 2) return NULL;
     if (keywords == 1 && !hk_text_is(PyTuple_GET_ITEM(kwnames, 0), "axis")) return NULL;
     // A keyword's value follows the positional arguments, so either way the
     // axis is args[1].
-    if (!hk_is_last_axis(args[1])) return NULL;
-    return hk_try_any_rows(args[0]);
+    if (hk_is_last_axis(args[1])) return hk_try_any_rows(args[0]);
+    if (hk_is_first_axis(args[1])) return hk_try_any_cols(args[0]);
+    return NULL;
 }
 
 // `np.any(m)` with the array alone is one of the commonest NumPy calls and
