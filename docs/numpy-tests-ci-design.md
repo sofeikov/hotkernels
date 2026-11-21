@@ -29,7 +29,7 @@ The README says "about ten minutes"; that figure is older than the current machi
 
 ### Running a differing test again
 
-`delivery numpy-tests` runs the suite plain, then with hotkernels installed, and compares the outcomes of every test, as today. When some outcomes differ, it then runs only those tests again, plain and installed, each in a fresh subprocess. It reports a test only if its outcomes differ in the second pair of runs too.
+`delivery numpy-tests` runs the suite plain and with hotkernels installed, at the same time in two subprocesses, and compares the outcomes of every test. When some outcomes differ, it then runs only those tests again, plain and installed, each in a fresh subprocess, one after the other. It reports a test only if its outcomes differ in the second pair of runs too, so a test that fails only while the other run shares the machine is not reported.
 
 - **Why.** Some of NumPy's tests can fail at random: tests that depend on threads, timing or free memory. Without a second run, such a test fails CI for a reason that has nothing to do with the change. Hypothesis tests are not among them: an installed NumPy has no `pytest.ini`, so its `conftest.py` loads the profile with `derandomize=True`, and both runs draw the same inputs.
 - **How.** The outcomes file names each test by pytest's node id, a path under the environment's `site-packages`. The node ids go into a file that pytest reads as arguments (`pytest @ids.txt`), so their number does not meet a command-line limit.

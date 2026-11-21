@@ -3,13 +3,21 @@
 Each fixture kernel has a correct version and several deliberately broken
 variants. The selftest passes only if the correct versions pass and every
 broken variant is caught for the reason it was built to trigger.
+
+The fixtures are checked at the same time, one thread each, since every check
+waits on the subprocesses that build and run the kernel. One fixture's checks
+run one after another: each check rebuilds the fixture's naive reference and
+harness into the same files. The steps that build a fixture outside its
+thread, the timing buffers and the slow variant, run after the threads.
 """
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -313,16 +321,81 @@ def _expected() -> dict[str, dict[str, str]]:
     return {name: {**variants, **own.get(name, {})} for name, variants in EXPECT.items()}
 
 
-def _outcomes(speed: bool) -> Iterator[Outcome]:
-    """Yield the outcome of every selftest step, in order."""
-    for name, variants in _expected().items():
-        yield _correct_outcome(name)
-        for variant, expected in variants.items():
-            yield _broken_outcome(name, variant, expected)
-    yield from _drawn_outcomes()
-    yield from _times_outcomes()
-    yield from _placement_outcomes()
-    yield from _slow_outcomes(speed)
+def _one(step: Callable[..., Outcome], *args) -> list[Outcome]:
+    """Run a step that gives one outcome, and return it as a list.
+
+    Args:
+        step: The step, such as `_correct_outcome`.
+        *args: Its arguments.
+
+    Returns:
+        The step's outcome, alone in a list.
+    """
+    return [step(*args)]
+
+
+def _slow(timed: bool) -> list[Outcome]:
+    """Run the slow variant's step.
+
+    Args:
+        timed: Whether it is timed as well as checked.
+
+    Returns:
+        Its outcomes: the check, and the timing when `timed`.
+    """
+    return list(_slow_outcomes(timed))
+
+
+def _fixture_steps(name: str, variants: dict[str, str]) -> list[Callable[[], list[Outcome]]]:
+    """List the checks of one fixture kernel, in the order they run.
+
+    Args:
+        name: The fixture kernel.
+        variants: Its broken variants -> the failure category that must catch each.
+
+    Returns:
+        One function per check, each returning its outcomes: the correct
+        version first, then every broken variant.
+    """
+    return [partial(_one, _correct_outcome, name)] + [partial(_one, _broken_outcome, name, variant, expected)
+                                                      for variant, expected in variants.items()]
+
+
+def _run_steps(steps: list[Callable[[], list[Outcome]]]) -> list[list[Outcome]]:
+    """Run steps one after another, in one thread.
+
+    Args:
+        steps: Functions that each return a list of outcomes.
+
+    Returns:
+        Each step's outcomes, in the order of the steps.
+    """
+    return [step() for step in steps]
+
+
+def _outcomes(speed: bool) -> list[Outcome]:
+    """Run every selftest step and return the outcomes, in the order they are reported.
+
+    The fixtures' checks run in threads, one per fixture. The steps that build
+    nothing run in this thread meanwhile. The two that build a fixture's
+    libraries outside its thread, the timing buffers and the slow variant, run
+    once every thread has finished, so that no two builds of one fixture
+    overlap and nothing else runs while the slow variant is timed.
+
+    Args:
+        speed: Whether the slow variant is timed as well as checked.
+
+    Returns:
+        The fixtures' outcomes in the order of EXPECT, then the checks of the
+        spec format and the timing buffers, then the slow variant.
+    """
+    groups = [_fixture_steps(name, variants) for name, variants in _expected().items()]
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        futures = [pool.submit(_run_steps, steps) for steps in groups]
+        # Neither builds a library: they read specs and make inputs.
+        unbuilt = [*_drawn_outcomes(), *_times_outcomes()]
+        fixtures = [outcome for future in futures for step in future.result() for outcome in step]
+    return fixtures + unbuilt + list(_placement_outcomes()) + _slow(speed)
 
 
 def selftest(speed: bool = True) -> bool:

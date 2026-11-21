@@ -12,12 +12,16 @@ delivering nothing.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import importlib
+import multiprocessing
 import subprocess
 import sys
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator
 
@@ -27,7 +31,7 @@ import hotkernels
 from hotkernels.environment import BINDING_MODULE
 from hotkernels.hooks import BOTTLENECK_HOOKS, KERNELS
 
-from .cases import ANY, Case
+from .cases import ANY, INEXACT_OPERATIONS, OPERATIONS, Case
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +43,17 @@ SHOWN_CHARACTERS = 300
 # What a case ended in.
 RETURNED = "returned"
 RAISED = "raised"
+
+# Shares each operation's cases are split into when the check runs in several
+# processes. Enough that the operation with the most work (clip, about 40
+# seconds of it on an Apple M1 Pro) does not leave one process running alone
+# at the end; few enough that each share is still a second or more of work
+# for the larger operations, against 5 ms to install and uninstall.
+SHARDS_PER_OPERATION = 12
+# How worker processes are started. Spawned, not forked: a fork of a process
+# whose NumPy has started its BLAS threads can deadlock, and spawn behaves the
+# same on macOS and Linux.
+START_METHOD = "spawn"
 
 
 @dataclass(frozen=True)
@@ -224,6 +239,41 @@ def operation_kernels(operation: str) -> tuple[str, ...]:
     return tuple(kernel.name for kernel in KERNELS if kernel.operation == operation)
 
 
+@dataclass(frozen=True)
+class CaseFilter:
+    """Which cases a run keeps. A dataclass rather than a closure, so that it
+    can be sent to the worker processes."""
+
+    # Keep only cases of the operation with this name; None keeps every operation.
+    only: str | None = None
+    # Keep only cases whose label contains this text; None keeps every case.
+    text: str | None = None
+
+    def __call__(self, case: Case) -> bool:
+        """Say whether a case passes both filters.
+
+        Args:
+            case: The case.
+
+        Returns:
+            True when the case runs.
+        """
+        return (self.only is None or case.operation == self.only) and (self.text is None or self.text in case.label)
+
+
+def summary_name(operation: str, inexact: bool) -> str:
+    """Return the name an operation's summary carries.
+
+    Args:
+        operation: Operation name.
+        inexact: Whether its cases run under install(inexact=True).
+
+    Returns:
+        The operation's name, with a suffix for the inexact run.
+    """
+    return f"{operation} (inexact)" if inexact else operation
+
+
 def run_operation(operation: str, cases: Iterable[Case], inexact: bool, keep: Callable[[Case], bool]) -> Summary:
     """Run one operation's cases on plain NumPy, then with hotkernels installed.
 
@@ -254,8 +304,7 @@ def run_operation(operation: str, cases: Iterable[Case], inexact: bool, keep: Ca
                 failures.append(failure)
     finally:
         hotkernels.uninstall()
-    name = f"{operation} (inexact)" if inexact else operation
-    return Summary(name, len(selected), taken, tuple(failures))
+    return Summary(summary_name(operation, inexact), len(selected), taken, tuple(failures))
 
 
 # Name of the summary line for the checks of install() and uninstall() themselves.
@@ -507,3 +556,107 @@ def run(operations: dict, inexact_operations: dict, keep: Callable[[Case], bool]
             summary = run_operation(operation, make_cases(), inexact, keep)
             if summary.cases:
                 yield summary
+
+
+@functools.cache
+def _operation_cases(operation: str, inexact: bool) -> tuple[Case, ...]:
+    """Build an operation's cases once per process.
+
+    A worker process runs several shares of one operation; the cases are built
+    on its first and kept for the rest. They cannot be sent from the parent,
+    since they hold functions, so each process builds its own. Building is
+    deterministic: every process gets the same cases in the same order.
+
+    Args:
+        operation: Operation name, a key of OPERATIONS or INEXACT_OPERATIONS.
+        inexact: Which of the two tables to read.
+
+    Returns:
+        The operation's cases, in order.
+    """
+    table = INEXACT_OPERATIONS if inexact else OPERATIONS
+    return tuple(table[operation]())
+
+
+def _every_case(case: Case) -> bool:
+    """Keep every case: the filter of a share whose cases were filtered already."""
+    return True
+
+
+def run_shard(operation: str, inexact: bool, shard: int, shards: int, keep: CaseFilter) -> Summary:
+    """Run one share of an operation's cases, in a worker process.
+
+    The cases the filter keeps are split into `shards` contiguous blocks of
+    nearly equal size, so the failures of the blocks, put together in block
+    order, are in the order a run in one process gives.
+
+    Args:
+        operation: Operation name.
+        inexact: Whether its cases run under install(inexact=True).
+        shard: Which block to run, from 0 to `shards` - 1.
+        shards: How many blocks the cases are split into.
+        keep: Says which cases to run.
+
+    Returns:
+        The summary of this block alone. hotkernels is left uninstalled.
+    """
+    kept = [case for case in _operation_cases(operation, inexact) if keep(case)]
+    start, stop = len(kept) * shard // shards, len(kept) * (shard + 1) // shards
+    return run_operation(operation, kept[start:stop], inexact, _every_case)
+
+
+def _merge(parts: list[Summary]) -> Summary:
+    """Put the summaries of an operation's blocks together.
+
+    Args:
+        parts: One summary per block, in block order. They share a name.
+
+    Returns:
+        The operation's summary, as a run in one process would give it.
+    """
+    failures = tuple(failure for part in parts for failure in part.failures)
+    return Summary(parts[0].operation, sum(p.cases for p in parts), sum(p.taken for p in parts), failures)
+
+
+def run_parallel(operations: dict, inexact_operations: dict, keep: CaseFilter, jobs: int) -> Iterator[Summary]:
+    """Run every operation in worker processes, each split into shares.
+
+    Each share installs and uninstalls hotkernels in its own process, as
+    `run_operation` does in one, so no share can see another's state.
+
+    Args:
+        operations: Operation name -> function yielding its cases, run under a
+            plain install(). Only the names are used: the workers build the
+            cases from the same tables.
+        inexact_operations: The same for cases run under install(inexact=True).
+        keep: Says which cases to run.
+        jobs: Number of worker processes, at least 1.
+
+    Yields:
+        One summary per operation that had at least one case to run, in the
+        order the operations finish.
+
+    Raises:
+        RuntimeError: A worker process died, as a crash in a kernel makes it.
+    """
+    work = [(operation, inexact) for inexact, table in ((False, operations), (True, inexact_operations))
+            for operation in table]
+    parts: dict[tuple[str, bool], list[Summary | None]] = {key: [None] * SHARDS_PER_OPERATION for key in work}
+    context = multiprocessing.get_context(START_METHOD)
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=context) as pool:
+        # Every operation's first share before any operation's second, so the
+        # operations finish in a spread and the progress lines come steadily.
+        futures = {pool.submit(run_shard, operation, inexact, shard, SHARDS_PER_OPERATION, keep): (operation, inexact, shard)
+                   for shard in range(SHARDS_PER_OPERATION) for operation, inexact in work}
+        try:
+            for future in as_completed(futures):
+                operation, inexact, shard = futures[future]
+                done = parts[(operation, inexact)]
+                done[shard] = future.result()
+                if all(part is not None for part in done):
+                    summary = _merge(done)
+                    if summary.cases:
+                        yield summary
+        except BrokenProcessPool as error:
+            raise RuntimeError("a worker process died, as a crash in a kernel or in NumPy makes it; "
+                               "rerun with --jobs 1 to see which case") from error
