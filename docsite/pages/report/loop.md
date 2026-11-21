@@ -36,7 +36,7 @@ The instruction given to an agent is short. Reach a statistically significant ov
 
 ## The log, all of it
 
-Across the 42 kernels the logs hold **[[ data.attempts.total ]] attempts: [[ data.attempts.kept ]] kept and [[ data.attempts.reverted ]] reverted.** Of the ones taken to `judge compare`, [[ data.attempts.verdicts.faster ]] came out significantly faster, [[ data.attempts.verdicts.same ]] showed no significant difference and [[ data.attempts.verdicts.slower ]] were significantly slower. The rest were first versions with nothing to compare against, or ideas screened with a quick private measurement and dropped before reaching the judge.
+Across the 44 kernels the logs hold **[[ data.attempts.total ]] attempts: [[ data.attempts.kept ]] kept and [[ data.attempts.reverted ]] reverted.** Of the ones taken to `judge compare`, [[ data.attempts.verdicts.faster ]] came out significantly faster, [[ data.attempts.verdicts.same ]] showed no significant difference and [[ data.attempts.verdicts.slower ]] were significantly slower. The rest were first versions with nothing to compare against, or ideas screened with a quick private measurement and dropped before reaching the judge.
 
 Here they are. Pick a kernel, then click through its attempts.
 

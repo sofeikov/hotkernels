@@ -67,6 +67,7 @@ typedef enum {
     HK_WHERE_F64, HK_CUMMAX_I64, HK_CUMFMAX_F64, HK_FMAX_REDUCE_F64, HK_ANY_ROWS_BOOL,
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
+    HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64,
     // Taken on ARM64 only (docs/coverage-gaps-arm64.md); the counters exist everywhere.
     HK_SUM_F32, HK_SUM_F64, HK_NONZERO_2D_BOOL,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
@@ -457,6 +458,26 @@ static inline bool hk_as_exact_double(PyObject *obj, double *out) {
         return true;
     }
     return hk_as_double(obj, out);
+}
+
+// Convert an np.int64 or a Python int that fits int64 to an int64. Returns
+// false, with no exception set, for anything else, including bool, the other
+// NumPy integers and a Python int outside int64: NumPy converts those by its
+// own rules.
+static inline bool hk_as_int64(PyObject *obj, int64_t *out) {
+    if (Py_IS_TYPE(obj, &PyInt64ArrType_Type)) {
+        *out = PyArrayScalar_VAL(obj, Int64);
+        return true;
+    }
+    if (!PyLong_CheckExact(obj)) return false;
+    int overflow = 0;
+    const long long v = PyLong_AsLongLongAndOverflow(obj, &overflow);
+    if (overflow != 0 || (v == -1 && PyErr_Occurred())) {
+        PyErr_Clear();
+        return false;
+    }
+    *out = (int64_t)v;
+    return true;
 }
 
 // Release the interpreter lock for the block that follows when `n` elements

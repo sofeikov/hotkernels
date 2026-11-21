@@ -2843,14 +2843,48 @@ NEEDLE_CLASSES = ("random", "ties", "inf_mix", "nan_some", "nan_all", "extremes"
 POINT_CLASSES = ("random", "ties", "inf_mix", "equal", "zeros")
 # Value classes for the values at the sample points.
 FP_CLASSES = ("random", "nan_some", "inf_mix", "extremes", "equal")
+# Lengths of the sorted array for the int64 search kernels. Besides the
+# float64 kernels' lengths, the ones around which their first pass changes:
+# it takes one step for one element, two for a number of steps that is even
+# and three for one that is odd, and the number of steps is the number of
+# bits of the length.
+INT_TABLE_SIZES = (*TABLE_SIZES, 3, 4, 7, 8)
+# Numbers of needles for the int64 search kernels: either side of the four
+# from which they search in vectors, a count that is not a multiple of four,
+# and either side of the 256 they search in step.
+INT_NEEDLE_COUNTS = (0, 1, 2, 3, 4, 5, 15, 16, 17, 63, 64, 65, 255, 256, 257, 260, 1000)
+# Lengths from which the int64 search kernels change path: 262,144, where
+# they take 512 needles in step, 524,288, where a pass takes one step, and a
+# length well above both that is not a power of two.
+INT_LARGE_TABLE_SIZES = (262_144, 524_288, BEYOND_LARGE_TABLE_N)
+# Numbers of needles tried against those: one, and either side of 512.
+INT_LARGE_TABLE_NEEDLES = (1, 64, 511, 512, 513, 1000)
+# (value class of the array, value class of the needles) tried against them.
+INT_LARGE_TABLE_PAIRS = (("random", "random"), ("random", "hits"), ("equal", "hits"), ("extremes", "hits"))
+# Value classes for a sorted int64 array: ordinary values, a few values
+# repeated, one value, and the type's minimum and maximum with zero between.
+INT_TABLE_CLASSES = ("random", "small", "equal", "extremes")
+# Value classes for int64 needles. Against an ordinary array `small` and
+# `equal` are needles that fall between elements and `extremes` are needles
+# below and above every element.
+INT_NEEDLE_CLASSES = ("random", "small", "equal", "extremes")
 # Mirrors INTERP_MAX_POINTS_PER_QUERY in the binding: with more sample points
 # than this per query, np.interp is left to NumPy.
 INTERP_MAX_POINTS_PER_QUERY = 64
 
 
-def _table(n: int, cls: str = judge_cases.RANDOM) -> np.ndarray:
-    """Build a sorted float64 array of `n` elements from a value class, NaNs last."""
-    return np.sort(values("f64", n, cls, arg="a"))
+def _table(n: int, cls: str = judge_cases.RANDOM, dtype: str = "f64") -> np.ndarray:
+    """Build a sorted array from a value class.
+
+    Args:
+        n: Element count.
+        cls: Value class name.
+        dtype: Element type as a spec name: "f64" or "i64".
+
+    Returns:
+        A sorted array of `n` elements; NaNs are last.
+    """
+    return np.sort(values(dtype, n, cls, arg="a"))
 
 
 def _hits(table: np.ndarray, count: int) -> np.ndarray:
@@ -2861,15 +2895,16 @@ def _hits(table: np.ndarray, count: int) -> np.ndarray:
         count: Number of needles.
 
     Returns:
-        A float64 array of `count` elements; zeros when the table is empty.
+        An array of `count` elements of the table's type; zeros when the
+        table is empty.
     """
     if len(table) == 0:
-        return np.zeros(count)
+        return np.zeros(count, table.dtype)
     picks = np.random.default_rng([SEED, len(table), count]).integers(0, len(table), count)
     return table[picks].copy()
 
 
-def _search_arguments(n: int, table_class: str, count: int, needle_class: str) -> tuple:
+def _search_arguments(n: int, table_class: str, count: int, needle_class: str, dtype: str = "f64") -> tuple:
     """Build the sorted array and the needles of a searchsorted case.
 
     Args:
@@ -2878,14 +2913,15 @@ def _search_arguments(n: int, table_class: str, count: int, needle_class: str) -
         count: Number of needles.
         needle_class: Value class of the needles, or "hits" for needles taken
             from the array itself.
+        dtype: Element type of both, as a spec name: "f64" or "i64".
 
     Returns:
         (sorted array, needles).
     """
-    table = _table(n, table_class)
+    table = _table(n, table_class, dtype)
     if needle_class == "hits":
         return table, _hits(table, count)
-    return table, values("f64", count, needle_class, arg="v")
+    return table, values(dtype, count, needle_class, arg="v")
 
 
 def _search_layout_expectation(kernel: str, variant: Variant, n: int, any_shape: bool) -> str | None:
@@ -2964,6 +3000,12 @@ def _search_grid_cases(text: str, search: Callable, kernel: str) -> Iterator[Cas
 
 
 def searchsorted_cases() -> Iterator[Case]:
+    """Yield the cases of `searchsorted`: float64 and then int64, for both sides."""
+    yield from searchsorted_float_cases()
+    yield from searchsorted_int_cases()
+
+
+def searchsorted_float_cases() -> Iterator[Case]:
     """Yield the cases of `searchsorted` on float64, for both sides."""
     kernel, right = "searchsorted_f64", "searchsorted_right_f64"
     for side in SEARCH_SIDES:
@@ -3030,6 +3072,144 @@ def searchsorted_cases() -> Iterator[Case]:
             expect = None if variant.name == "list" else _search_layout_expectation(kernel, variant, size, any_shape=True)
             yield Case("searchsorted", f"{text} n={n} needles={size} v layout={variant.name}",
                        lambda size=size, variant=variant: (_table(n), variant.build(values("f64", size, arg="v"))),
+                       search, expect)
+
+
+# The two sides of a search on int64, as SEARCH_SIDES.
+INT_SEARCH_SIDES = (
+    ("np.searchsorted(a, v)", np.searchsorted, "searchsorted_i64"),
+    ("np.searchsorted(a, v, side='right')", _search_right, "searchsorted_right_i64"),
+)
+# Python ints at the two ends of int64 and one step outside each: the first
+# two are needles the int64 kernels take, the last two are NumPy's.
+INT64_MIN, INT64_MAX = -2**63, 2**63 - 1
+BELOW_INT64, ABOVE_INT64 = INT64_MIN - 1, INT64_MAX + 1
+# A needle for the cases that pass one number: any value inside int64.
+ONE_NEEDLE = 7
+
+
+def _int_search_grid_cases(text: str, search: Callable, kernel: str) -> Iterator[Case]:
+    """Yield the cases of one side of a search on int64 over sizes and value classes.
+
+    Args:
+        text: The call, as the cases name it.
+        search: Makes the call from (sorted array, needles).
+        kernel: The kernel expected to take every case.
+
+    Returns:
+        An iterator over the cases.
+    """
+    # Every class of needle on an ordinary array, then every class of array.
+    pairs = [("random", needle_class) for needle_class in (*INT_NEEDLE_CLASSES, "hits")]
+    pairs += [(table_class, needle_class) for table_class in INT_TABLE_CLASSES[1:] for needle_class in ("random", "hits")]
+    grid = itertools.product(INT_TABLE_SIZES, INT_NEEDLE_COUNTS, pairs)
+    large = itertools.product(INT_LARGE_TABLE_SIZES, INT_LARGE_TABLE_NEEDLES, INT_LARGE_TABLE_PAIRS)
+    for n, count, (table_class, needle_class) in itertools.chain(grid, large):
+        yield Case("searchsorted", f"{text} int64 a={table_class} n={n} v={needle_class} needles={count}",
+                   partial(_search_arguments, n, table_class, count, needle_class, "i64"), search, kernel)
+
+
+def searchsorted_int_cases() -> Iterator[Case]:
+    """Yield the cases of `searchsorted` on int64, for both sides.
+
+    The needles the kernels take are an int64 array, an `np.int64` and a
+    Python int that fits int64. Every other kind is NumPy's, which converts
+    it and the array to a common type by its own rules, and each kind is
+    here so that a change to what the binding takes shows.
+    """
+    kernel, right = "searchsorted_i64", "searchsorted_right_i64"
+    for side in INT_SEARCH_SIDES:
+        yield from _int_search_grid_cases(*side)
+
+    n, count = ORDINARY_N, SPELLING_NEEDLES
+    arguments = partial(_search_arguments, n, "random", count, "random", "i64")
+    spellings = (
+        ("a.searchsorted(v)", lambda a, v: a.searchsorted(v), kernel),
+        ("np.searchsorted(a, v, 'left')", lambda a, v: np.searchsorted(a, v, "left"), kernel),
+        ("np.searchsorted(a, v, side='left', sorter=None)", lambda a, v: np.searchsorted(a, v, side="left", sorter=None), kernel),
+        ("a.searchsorted(v=v)", lambda a, v: a.searchsorted(v=v), kernel),
+        ("np.searchsorted(a, v, 'right')", lambda a, v: np.searchsorted(a, v, "right"), right),
+        ("a.searchsorted(v, 'right')", lambda a, v: a.searchsorted(v, "right"), right),
+        ("a.searchsorted(v=v, side='right')", lambda a, v: a.searchsorted(v=v, side="right"), right),
+        ("np.searchsorted(a, v, side='right', sorter=None)", lambda a, v: np.searchsorted(a, v, side="right", sorter=None), right),
+        ("np.searchsorted(a, v, sorter=np.arange(len(a)))", lambda a, v: np.searchsorted(a, v, sorter=np.arange(len(a))), None),
+        ("np.searchsorted(a, v, side='right', sorter=np.arange(len(a)))", lambda a, v: np.searchsorted(a, v, side="right", sorter=np.arange(len(a))), None),
+        ("np.searchsorted(a, a)", lambda a, v: np.searchsorted(a, a), kernel),
+        ("np.searchsorted(a, a, side='right')", lambda a, v: np.searchsorted(a, a, side="right"), right),
+        ("np.digitize(v, a)", lambda a, v: np.digitize(v, a), right),
+        ("np.digitize(v, a, right=True)", lambda a, v: np.digitize(v, a, right=True), kernel),
+        ("np.digitize(a, a)", lambda a, v: np.digitize(a, a), right),
+        ("np.digitize(a, a, right=True)", lambda a, v: np.digitize(a, a, right=True), kernel),
+        # One needle. An element of an int64 array is an np.int64, and so is
+        # an np.intp on the platforms the package is built for.
+        ("np.searchsorted(a, v[0])", lambda a, v: np.searchsorted(a, v[0]), kernel),
+        ("np.searchsorted(a, v[0], side='right')", lambda a, v: np.searchsorted(a, v[0], side="right"), right),
+        ("np.searchsorted(a, a[3])", lambda a, v: np.searchsorted(a, a[3]), kernel),
+        ("np.searchsorted(a, a[3], side='right')", lambda a, v: np.searchsorted(a, a[3], side="right"), right),
+        ("a.searchsorted(a[3])", lambda a, v: a.searchsorted(a[3]), kernel),
+        ("np.searchsorted(a, np.intp(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.intp(ONE_NEEDLE)), kernel),
+        ("np.searchsorted(a, ONE_NEEDLE)", lambda a, v: np.searchsorted(a, ONE_NEEDLE), kernel),
+        ("np.searchsorted(a, ONE_NEEDLE, side='right')", lambda a, v: np.searchsorted(a, ONE_NEEDLE, side="right"), right),
+        ("np.searchsorted(a, int(a[3]))", lambda a, v: np.searchsorted(a, int(a[3])), kernel),
+        ("np.searchsorted(a, int(a[3]), side='right')", lambda a, v: np.searchsorted(a, int(a[3]), side="right"), right),
+        ("np.searchsorted(a, INT64_MIN)", lambda a, v: np.searchsorted(a, INT64_MIN), kernel),
+        ("np.searchsorted(a, INT64_MAX)", lambda a, v: np.searchsorted(a, INT64_MAX), kernel),
+        ("np.searchsorted(a, INT64_MIN, side='right')", lambda a, v: np.searchsorted(a, INT64_MIN, side="right"), right),
+        ("np.searchsorted(a, INT64_MAX, side='right')", lambda a, v: np.searchsorted(a, INT64_MAX, side="right"), right),
+        # Needles of every other kind are NumPy's.
+        ("np.searchsorted(a, ABOVE_INT64)", lambda a, v: np.searchsorted(a, ABOVE_INT64), None),
+        ("np.searchsorted(a, BELOW_INT64)", lambda a, v: np.searchsorted(a, BELOW_INT64), None),
+        ("np.searchsorted(a, ABOVE_INT64, side='right')", lambda a, v: np.searchsorted(a, ABOVE_INT64, side="right"), None),
+        ("np.searchsorted(a, True)", lambda a, v: np.searchsorted(a, True), None),
+        ("np.searchsorted(a, np.True_)", lambda a, v: np.searchsorted(a, np.True_), None),
+        ("np.searchsorted(a, 0.5)", lambda a, v: np.searchsorted(a, 0.5), None),
+        ("np.searchsorted(a, float('nan'))", lambda a, v: np.searchsorted(a, float("nan")), None),
+        ("np.searchsorted(a, np.float64(0.5))", lambda a, v: np.searchsorted(a, np.float64(0.5)), None),
+        ("np.searchsorted(a, np.int32(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.int32(ONE_NEEDLE)), None),
+        ("np.searchsorted(a, np.int32(ONE_NEEDLE), side='right')", lambda a, v: np.searchsorted(a, np.int32(ONE_NEEDLE), side="right"), None),
+        ("np.searchsorted(a, np.int16(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.int16(ONE_NEEDLE)), None),
+        ("np.searchsorted(a, np.uint64(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.uint64(ONE_NEEDLE)), None),
+        ("np.searchsorted(a, np.longlong(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.longlong(ONE_NEEDLE)), None),
+        ("np.searchsorted(a, np.array(ONE_NEEDLE))", lambda a, v: np.searchsorted(a, np.array(ONE_NEEDLE)), None),
+        ("np.searchsorted(a, v.tolist())", lambda a, v: np.searchsorted(a, v.tolist()), None),
+        ("np.searchsorted(a, v.astype(np.int32))", lambda a, v: np.searchsorted(a, v.astype(np.int32)), None),
+        ("np.searchsorted(a, v.astype(np.uint64))", lambda a, v: np.searchsorted(a, v.astype(np.uint64)), None),
+        ("np.searchsorted(a, v.astype(np.float64))", lambda a, v: np.searchsorted(a, v.astype(np.float64)), None),
+        ("np.searchsorted(a, v.astype(np.float64), side='right')", lambda a, v: np.searchsorted(a, v.astype(np.float64), side="right"), None),
+        ("np.searchsorted(a, v.astype(bool))", lambda a, v: np.searchsorted(a, v.astype(bool)), None),
+        ("np.searchsorted(a.astype(np.int32), v)", lambda a, v: np.searchsorted(a.astype(np.int32), v), None),
+        ("np.searchsorted(a.astype(np.uint64), v)", lambda a, v: np.searchsorted(a.astype(np.uint64), v), None),
+        ("np.searchsorted(a.astype(np.int32), v[0])", lambda a, v: np.searchsorted(a.astype(np.int32), v[0]), None),
+        ("np.searchsorted(a, v, side='up')", lambda a, v: np.searchsorted(a, v, side="up"), None),
+        ("np.searchsorted(a, v, side=None)", lambda a, v: np.searchsorted(a, v, side=None), None),
+        ("np.searchsorted(a, v[0], side='up')", lambda a, v: np.searchsorted(a, v[0], side="up"), None),
+    )
+    for text, call, expect in spellings:
+        yield Case("searchsorted", f"{text} int64 n={n} needles={count}", arguments, call, expect)
+
+    # One needle of each kind the kernels take, at every length of the array.
+    for size in INT_TABLE_SIZES:
+        arguments = partial(_search_arguments, size, "random", 1, "hits", "i64")
+        yield Case("searchsorted", f"np.searchsorted(a, v[0]) int64 n={size}", arguments,
+                   lambda a, v: np.searchsorted(a, v[0]), kernel)
+        yield Case("searchsorted", f"np.searchsorted(a, v[0], side='right') int64 n={size}", arguments,
+                   lambda a, v: np.searchsorted(a, v[0], side="right"), right)
+        yield Case("searchsorted", f"np.searchsorted(a, int(v[0])) int64 n={size}", arguments,
+                   lambda a, v: np.searchsorted(a, int(v[0])), kernel)
+        yield Case("searchsorted", f"np.searchsorted(a, int(v[0]), side='right') int64 n={size}", arguments,
+                   lambda a, v: np.searchsorted(a, int(v[0]), side="right"), right)
+
+    for (text, search, kernel), size in itertools.product(INT_SEARCH_SIDES, (0, *LAYOUT_SIZES)):
+        for variant in variants_for("i64", size):
+            # A list has no method of its own: NumPy converts it and calls the
+            # method of the array it made.
+            expect = ANY if variant.name == "list" else _search_layout_expectation(kernel, variant, size, any_shape=False)
+            yield Case("searchsorted", f"{text} int64 n={size} needles={count} a layout={variant.name}",
+                       lambda size=size, variant=variant: (variant.build(_table(size, dtype="i64")), values("i64", count, arg="v")),
+                       search, expect)
+            expect = None if variant.name == "list" else _search_layout_expectation(kernel, variant, size, any_shape=True)
+            yield Case("searchsorted", f"{text} int64 n={n} needles={size} v layout={variant.name}",
+                       lambda size=size, variant=variant: (_table(n, dtype="i64"), variant.build(values("i64", size, arg="v"))),
                        search, expect)
 
 

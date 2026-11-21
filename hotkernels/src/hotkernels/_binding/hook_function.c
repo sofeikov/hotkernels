@@ -1249,24 +1249,6 @@ static PyObject *run_clip(PyArrayObject *x, hk_kernel kernel, double lo, double 
 // release the interpreter lock, which the binding does from HK_NOGIL_MIN_N.
 #define CLIP_I64_MAX_N 4096
 
-// Convert a bound for an int64 array: an np.int64 as it is, or a Python int
-// that fits int64. Returns false for anything else, with no exception set.
-static bool clip_bound_i64(PyObject *bound, int64_t *value) {
-    if (Py_IS_TYPE(bound, &PyInt64ArrType_Type)) {
-        *value = PyArrayScalar_VAL(bound, Int64);
-        return true;
-    }
-    if (!PyLong_CheckExact(bound)) return false;
-    int overflow = 0;
-    const long long v = PyLong_AsLongLongAndOverflow(bound, &overflow);
-    if (overflow != 0 || (v == -1 && PyErr_Occurred())) {
-        PyErr_Clear();
-        return false;
-    }
-    *value = (int64_t)v;
-    return true;
-}
-
 // out[i] = min(max(x[i], lo), hi) for the `n` elements at `x`, as NumPy's
 // clip loop computes it for integers. Compiled for the kernels' level, where
 // the compiler makes it a compare and a blend per four elements; for any
@@ -1285,7 +1267,7 @@ static HK_TARGET_KERNEL_LEVEL void clip_i64_loop(const int64_t *restrict x, int6
 static HK_NOINLINE PyObject *try_clip_i64(PyArrayObject *x, PyObject *lo, PyObject *hi) {
     const npy_intp n = PyArray_SIZE(x);
     int64_t lo64, hi64;
-    if (n > CLIP_I64_MAX_N || !clip_bound_i64(lo, &lo64) || !clip_bound_i64(hi, &hi64) || lo64 > hi64) return NULL;
+    if (n > CLIP_I64_MAX_N || !hk_as_int64(lo, &lo64) || !hk_as_int64(hi, &hi64) || lo64 > hi64) return NULL;
     PyObject *result = PyArray_SimpleNew(PyArray_NDIM(x), PyArray_DIMS(x), NPY_INT64);
     if (result == NULL) {
         PyErr_Clear();

@@ -22,7 +22,7 @@ np.argmax(x)       <span class="c"># 7x faster</span></code></pre>
 </section>
 
 <div class="stats">
-<div><b>38</b><span>kernels for 23 NumPy operations, all of them bound to NumPy</span></div>
+<div><b>40</b><span>kernels for 23 NumPy operations, all of them bound to NumPy</span></div>
 <div><b>5x+</b><span>faster than NumPy for 17 of the 22 in the results table, at a million elements</span></div>
 <div><b>21 / 23</b><span>return NumPy's result bit for bit; the other two are opt-in</span></div>
 <div><b>~1 ns</b><span>added to a call that no kernel takes</span></div>
@@ -39,7 +39,7 @@ Each bar is one NumPy call on an array of 1,048,576 elements, timed as a native 
 
 ## What stands behind the numbers
 
-- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Thirty-six of the 38 match bit for bit. The two float `cumsum` kernels regroup the additions, which is where their speed comes from; they stay inside a declared error bound and are installed only on request.
+- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Thirty-eight of the 40 match bit for bit. The two float `cumsum` kernels regroup the additions, which is where their speed comes from; they stay inside a declared error bound and are installed only on request.
 - **Memory-safe by test.** Each kernel is run with its buffers pressed against pages the process may not touch. Reading or writing one byte outside a buffer crashes the check.
 - **Assembly only where it wins.** A kernel keeps its assembly only if it is measurably faster than the compiled C. Where it is not, the C ships.
 - **Nothing breaks when a kernel does not apply.** A strided array, another element type, an argument a kernel does not implement: the call goes to NumPy exactly as written. With hotkernels installed, NumPy's own test suite gives the same outcome for each of its 47,234 tests.
