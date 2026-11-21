@@ -9,7 +9,7 @@ hotkernels.install()
 
 Kernels are written by coding agents iterating against a judge. The judge checks every kernel against NumPy and times it against NumPy and naive `clang -O3` C.
 
-**On an Apple M1 Pro, the 40 kernels measured there are all faster than NumPy at every size measured. At a million elements, 17 of the 22 in the first table below are more than 5x faster and the best is 76x. Thirty-eight return NumPy's result bit for bit.**
+**On an Apple M1 Pro, the 41 kernels measured there are all faster than NumPy at every size measured. At a million elements, 17 of the 22 in the first table below are more than 5x faster and the best is 76x. Thirty-nine return NumPy's result bit for bit.**
 
 The kernels exist for two architectures, written separately against the same specs: ARM64 NEON for Apple Silicon, and x86-64 AVX2 for Linux on processors of the x86-64-v3 level. The tables below are the ARM64 kernels on an Apple M1 Pro. The x86-64 kernels' figures on an Intel Core i5-14600KF are in [docs/kernel-findings.md](docs/kernel-findings.md#x86-64) from the judge, with the reports in [`results/`](results), and in [delivery/results/intel-r-core-tm-i5-14600kf.md](delivery/results/intel-r-core-tm-i5-14600kf.md) from Python; NumPy is a different opponent there, with vector loops of its own for several of these calls, so the two sets of figures are not expected to agree. The plan the x86-64 kernels were written to is [docs/x86-64-design.md](docs/x86-64-design.md).
 
@@ -115,7 +115,16 @@ One `uv run judge run <kernel> --record --unlocked` per kernel, one after the ot
 
 One `uv run judge run <kernel> --record` per kernel, `--unlocked` because their specs are not yet on `main`, on 20 November 2026 on a quiet machine (load average 1.5 and 2.3). The report is in [`results/`](results). The clang loop is NumPy's order written in C; it is 2.8x to 3.0x behind from 1,024 to 16,384 elements, where the data fits the first-level cache. From Python, at a load average of 2.2 to 2.3, `np.sum(x)` on float32 is about 23x faster than NumPy at 16 elements, 11x at 4,096 and 3.1x at a million; on float64 about 23x, 6.5x and 1.9x ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-floats-in-numpys-order)).
 
-`any_cols_bool`, for `m.any(axis=0)` on a two-dimensional boolean array, was added for the same pipeline, which reduces masks of 30 rows by 31 columns. It has assembly on x86-64 and ships as its C on ARM64, so it is not in the tables above either and nothing was measured on the Apple M1 Pro. On the Intel Core i5-14600KF it is 5.7x over the C across the judge's sizes and four row widths, 8.5x on rows of 31 and 1.7x to 2.0x on rows of 256. From Python there, `m.any(axis=0)` on a mask of 30 by 31 takes 95 ns against NumPy's 840 ns, and on rows of 31 it is 18x faster than NumPy at 4,096 elements and 37x at 1,048,576.
+`any_cols_bool`, for `m.any(axis=0)` on a two-dimensional boolean array, was added for the same pipeline, which reduces masks of 30 rows by 31 columns. It has assembly on both architectures. On the Apple M1 Pro, at 1,048,576 elements:
+
+| Call | Elements | vs NumPy | vs `clang -O3` |
+|---|---|---|---|
+| `m.any(axis=0)`, rows of 31 | bool | 40.5x | 18.0x |
+| `m.any(axis=0)`, rows of 8 | bool | 99.3x – 99.6x | 37.3x |
+| `m.any(axis=0)`, rows of 64 | bool | 19.1x | 4.66x |
+| `m.any(axis=0)`, rows of 256 | bool | 5.13x | 2.16x – 2.19x |
+
+One `uv run judge run any_cols_bool --unlocked --record`, `--unlocked` because its spec was not yet on `main` when it was taken, at a load average of 2.1 to 2.3: 8.77x over the C and 73.6x over NumPy across the judge's sizes, four widths and two distributions. From Python, on 20 November 2026 at a load average of 1.8 to 1.9, `m.any(axis=0)` on rows of 31 is 40x faster than NumPy at 1,048,576 elements and 15x at 4,096; with the C it replaces it was 2.3x and 2.9x. On the Intel Core i5-14600KF it is 5.7x over the C across the judge's sizes and four row widths, 8.5x on rows of 31 and 1.7x to 2.0x on rows of 256. From Python there, `m.any(axis=0)` on a mask of 30 by 31 takes 95 ns against NumPy's 840 ns, and on rows of 31 it is 18x faster than NumPy at 4,096 elements and 37x at 1,048,576.
 
 `sum_f32` has assembly of its own on x86-64, for the same pipeline, which sums float32 slices of 16 to 65,536 elements in a loop; it makes the same additions in NumPy's order. On the Intel Core i5-14600KF it is 2.77x over the C across the judge's sizes: 1.6x at 16 elements, 5.9x at 4,096, 3.3x at 262,144 and 1.3x to 1.7x from 1,048,576, where it waits for memory. From Python there, `x.sum()` is 7.9x faster than NumPy at 16 elements (302 ns to 38 ns), 8.1x at 4,096 and 2.6x at 1,048,576, and `np.sum(x)` 24x, 14x and 2.6x ([docs/kernel-findings.md](docs/kernel-findings.md#npsum-on-float32)).
 
@@ -212,7 +221,7 @@ At 16 elements most of the gain is NumPy's own call path being skipped, not the 
 - **The judge** (`judge/`): checks a kernel for correctness and memory safety, and reports how fast it is. It runs on macOS ARM64 and on Linux x86-64.
 - **Fixture kernels** (`judge/fixtures/`): `argmax_f32`, `compress_f32`, `compress_scratch_f32`, `tally_u8` and `rank_u8`, used to test the judge itself, each with an ARM64 and an x86-64 version.
 - **The survey** (`survey/`): measures NumPy against naive C per operation, to decide which kernels are worth writing. It runs on macOS ARM64 and on Linux x86-64. Recorded results for both are in `survey/results/`.
-- **Kernels** (`kernels/`): 49 kernels for 23 NumPy operations and four functions of bottleneck, each with a spec, a naive C reference and, where assembly beats the C, an assembly version per architecture: 36 for ARM64 and 42 for x86-64. Each kernel's `attempts.md` lists every optimisation tried, kept or not.
+- **Kernels** (`kernels/`): 49 kernels for 23 NumPy operations and four functions of bottleneck, each with a spec, a naive C reference and, where assembly beats the C, an assembly version per architecture: 37 for ARM64 and 42 for x86-64. Each kernel's `attempts.md` lists every optimisation tried, kept or not.
 - **The package** (`hotkernels/`): what a user installs. A C extension points NumPy at the kernels, and `install()`, `uninstall()`, `enabled()` and `report()` control it. `install()` installs the 43 kernels that return NumPy's result bit for bit, and the 4 that return bottleneck's for its `nanmean`, `nanstd`, `nanmin` and `nanmax` once bottleneck is imported (pandas and empyrical call them instead of NumPy's); `install(inexact=True)` the other two.
 - **The delivery tool** (`delivery/`): tests and times the package from Python. Recorded timings are in `delivery/results/`.
 - **An example** (`examples/workload.py`): a NumPy program written without hotkernels in mind, used to show the effect of the one line.
