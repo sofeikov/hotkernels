@@ -138,16 +138,13 @@ static PyObject *method_sum(PyObject *self, PyObject *const *args, Py_ssize_t na
 // ----------------------------------------------------------------- nonzero
 
 // mask.nonzero() for a contiguous one-dimensional boolean array: a tuple
-// holding one int64 array of the positions that are True. Shared with the
-// function hook for np.where(mask).
+// holding one int64 array of the positions that are True.
 //
 // The kernel's output is scratch: it needs room for n indices and may write
 // anywhere in it, whatever it reports. So it runs on a buffer of the
 // binding's own, and the reported indices are copied into an array of
 // exactly that size.
-HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
-    if (!hk_is_flat_1d(self, NPY_BOOL)) return NULL;
-    PyArrayObject *mask = (PyArrayObject *)self;
+static HK_NOINLINE PyObject *try_nonzero_1d(PyArrayObject *mask) {
     const npy_intp n = PyArray_SIZE(mask);
     const size_t bytes = (size_t)n * sizeof(int64_t);
     int64_t on_stack[HK_STACK_SCRATCH_BYTES / sizeof(int64_t)];
@@ -176,6 +173,102 @@ HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
     }
     hk_take(HK_NONZERO_BOOL);
     return result;
+}
+
+// The dimensions of a boolean matrix whose nonzero the binding builds: a row
+// index and a column index per True element.
+#define NONZERO_2D_DIMENSIONS 2
+
+// The tuple NumPy's nonzero returns for `pairs`, a new (count, 2) int64 array
+// of (row, column) pairs: two one-dimensional views of it, of its first and
+// its second column, with a stride of one pair. This is how NumPy builds it
+// (PyArray_Nonzero): the views have `pairs` as their base and its flags, and
+// when there are no pairs both start at its first byte. Steals `pairs`.
+static PyObject *pair_views(PyObject *pairs) {
+    PyArrayObject *base = (PyArrayObject *)pairs;
+    npy_intp count = PyArray_DIM(base, 0);
+    npy_intp stride = NONZERO_2D_DIMENSIONS * (npy_intp)sizeof(npy_intp);
+    PyObject *result = PyTuple_New(NONZERO_2D_DIMENSIONS);
+    for (int i = 0; result != NULL && i < NONZERO_2D_DIMENSIONS; i++) {
+        const npy_intp offset = count == 0 ? 0 : i * (npy_intp)sizeof(npy_intp);
+        PyObject *view = PyArray_NewFromDescr(&PyArray_Type, PyArray_DescrFromType(NPY_INTP), 1, &count, &stride,
+                                              PyArray_BYTES(base) + offset, PyArray_FLAGS(base), NULL);
+        if (view == NULL) {
+            Py_CLEAR(result);
+            break;
+        }
+        Py_INCREF(pairs);
+        if (PyArray_SetBaseObject((PyArrayObject *)view, pairs) < 0) {
+            Py_DECREF(view);
+            Py_CLEAR(result);
+            break;
+        }
+        PyTuple_SET_ITEM(result, i, view);
+    }
+    Py_DECREF(pairs);
+    return result;
+}
+
+// mask.nonzero() for a C-contiguous two-dimensional boolean array: the
+// nonzero_2d_bool kernel writes the (row, column) pair of each True element
+// in C order, which is the array NumPy builds and returns two views of.
+//
+// As for one dimension, the kernel's output is scratch, with room for two
+// int64 per element: it runs on a buffer of the binding's own and the
+// reported pairs are copied into an array of exactly their size. A matrix
+// with no elements is not given to the kernel, which needs a width of at
+// least 1.
+//
+// The copy is not free. Timed in C on the Apple M1 Pro, a million elements in
+// rows of 22, half True: the kernel alone 0.31 ms, with the copy 0.44 ms
+// (with 5% True, 0.081 and 0.097 ms). Running the kernel on an array of n
+// pairs and shrinking it with realloc took 0.91 ms, since macOS moves a
+// block that large. Running it straight into an array of the final size,
+// counted first, would need the kernel to promise how far past the reported
+// pairs it writes, and its spec gives it the whole 2n.
+static HK_NOINLINE PyObject *try_nonzero_2d(PyArrayObject *mask) {
+    const npy_intp n = PyArray_SIZE(mask);
+    const size_t bytes = (size_t)n * NONZERO_2D_DIMENSIONS * sizeof(int64_t);
+    int64_t on_stack[HK_STACK_SCRATCH_BYTES / sizeof(int64_t)];
+    int64_t *scratch = bytes <= sizeof on_stack ? on_stack : malloc(bytes);
+    if (scratch == NULL) return NULL;
+
+    npy_intp count = -1;
+    {
+        HK_BEGIN_NOGIL(n)
+        if (n == 0) {
+            count = 0;
+        } else if (hk_mask_is_clean(PyArray_DATA(mask), (size_t)n)) {
+            const size_t width = (size_t)PyArray_DIM(mask, 1);
+            count = (npy_intp)(nonzero_2d_bool(PyArray_DATA(mask), scratch, (size_t)n, width) /
+                               NONZERO_2D_DIMENSIONS);
+        }
+        HK_END_NOGIL
+    }
+    npy_intp shape[NONZERO_2D_DIMENSIONS] = {count, NONZERO_2D_DIMENSIONS};
+    PyObject *pairs = count >= 0 ? PyArray_SimpleNew(NONZERO_2D_DIMENSIONS, shape, NPY_INTP) : NULL;
+    PyObject *result = NULL;
+    if (pairs != NULL) {
+        memcpy(PyArray_DATA((PyArrayObject *)pairs), scratch, (size_t)count * NONZERO_2D_DIMENSIONS * sizeof(int64_t));
+        result = pair_views(pairs);
+    }
+    if (scratch != on_stack) free(scratch);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    hk_take(HK_NONZERO_2D_BOOL);
+    return result;
+}
+
+// mask.nonzero() for a contiguous boolean array of one dimension or two. Shared with the function hook for np.where(mask). Any other
+// array is left to NumPy.
+HK_NOINLINE PyObject *hk_try_nonzero(PyObject *self) {
+    if (!hk_is_flat(self, NPY_BOOL)) return NULL;
+    PyArrayObject *mask = (PyArrayObject *)self;
+    if (PyArray_NDIM(mask) == 1) return try_nonzero_1d(mask);
+    if (PyArray_NDIM(mask) == NONZERO_2D_DIMENSIONS) return try_nonzero_2d(mask);
+    return NULL;
 }
 
 // Called with a tuple of positional arguments (METH_VARARGS).
@@ -349,9 +442,76 @@ static PyObject *searchsorted_scalar(PyArrayObject *a, PyObject *needle, hk_kern
     return hk_scalar(NPY_INTP, &position);
 }
 
+// Number of float32 needles searchsorted_f32_needles converts to float64 at a
+// time: 4 KB of stack, and a multiple of the 128 needles the float64 kernels
+// search in step.
+#define SEARCH_F32_CHUNK 512
+// The bits of a float32 with the sign cleared, from which the bits of a
+// signalling NaN lie in [SIGNALLING_NAN_FIRST, SIGNALLING_NAN_FIRST +
+// SIGNALLING_NAN_SPAN): the exponent all ones, the quiet bit (bit 22) clear,
+// and some other bit of the fraction set.
+#define SIGNALLING_NAN_FIRST 0x7f800001u
+#define SIGNALLING_NAN_SPAN 0x003fffffu
+// Mask that clears the sign bit of a float32.
+#define F32_ABS_BITS 0x7fffffffu
+
+// a.searchsorted(v) for a float64 array `a` and a contiguous float32 array of
+// needles `v`, with one of the two float64 kernels. NumPy converts both to
+// their common type, float64, and searches that. Every float32 is exactly a
+// float64, a quiet NaN included, which sorts last as any float64 NaN does, so
+// converting the needles and running the float64 kernel gives NumPy's answer.
+// The needles are converted a chunk at a time into a buffer on the stack.
+//
+// Returns NULL with no exception set if a needle is a signalling NaN: NumPy's
+// cast of one warns "invalid value encountered in cast", or raises under
+// np.errstate(invalid='raise'), so the call is passed on and NumPy does that.
+// A chunk is tested before it is converted, so no floating-point flag is left
+// raised. The chunks before it have been searched and are thrown away.
+static PyObject *searchsorted_f32_needles(PyArrayObject *a, PyArrayObject *v, hk_kernel kernel) {
+    PyObject *result = PyArray_SimpleNew(PyArray_NDIM(v), PyArray_DIMS(v), NPY_INTP);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    // Needles are not required to be aligned: each is copied out by memcpy,
+    // which the compiler turns into a plain load.
+    const char *needles = PyArray_DATA(v);
+    int64_t *out = PyArray_DATA((PyArrayObject *)result);
+    const size_t count = (size_t)PyArray_SIZE(v), n = (size_t)PyArray_SIZE(a);
+    // True when a needle is a signalling NaN and the call is passed on.
+    bool signalling = false;
+    {
+        HK_BEGIN_NOGIL(count)
+        double chunk[SEARCH_F32_CHUNK];
+        for (size_t start = 0; start < count; start += SEARCH_F32_CHUNK) {
+            const size_t m = count - start < SEARCH_F32_CHUNK ? count - start : SEARCH_F32_CHUNK;
+            for (size_t i = 0; i < m; i++) {
+                uint32_t bits;
+                memcpy(&bits, needles + (start + i) * sizeof(float), sizeof bits);
+                signalling |= ((bits & F32_ABS_BITS) - SIGNALLING_NAN_FIRST) < SIGNALLING_NAN_SPAN;
+            }
+            if (signalling) break;
+            for (size_t i = 0; i < m; i++) {
+                float needle;
+                memcpy(&needle, needles + (start + i) * sizeof(float), sizeof needle);
+                chunk[i] = (double)needle;
+            }
+            run_search(kernel, PyArray_DATA(a), chunk, out + start, n, m);
+        }
+        HK_END_NOGIL
+    }
+    if (signalling) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
 // a.searchsorted(v) for a one-dimensional contiguous float64 or int64 array
 // `a` and needles of the same element type: a contiguous array of any shape,
 // whose shape the result takes, or one number (see searchsorted_scalar).
+// A float64 array also takes a contiguous float32 array of needles of any
+// shape (see searchsorted_f32_needles).
 // `side` must be absent, 'left' or 'right'; each side has its own kernel.
 // There must be no `sorter`. Needles of another type are NumPy's: it converts
 // them and `a` to a common type by its own rules.
@@ -388,6 +548,9 @@ static HK_NOINLINE PyObject *try_searchsorted(PyObject *self, PyObject *const *a
         run_search(kernel, PyArray_DATA(a), PyArray_DATA(v), PyArray_DATA((PyArrayObject *)result),
                    (size_t)PyArray_SIZE(a), (size_t)needles);
         HK_END_NOGIL
+    } else if (PyArray_TYPE(a) == NPY_DOUBLE && hk_is_flat(bound[V], NPY_FLOAT)) {
+        result = searchsorted_f32_needles(a, (PyArrayObject *)bound[V], kernel);
+        if (result == NULL) return NULL;
     } else {
         result = searchsorted_scalar(a, bound[V], kernel);
         if (result == NULL) return NULL;
@@ -1588,8 +1751,38 @@ static HK_TARGET_KERNEL_LEVEL void round_loop(const double *restrict x, double *
     }
 }
 
+// Round the `n` elements at `x` into `out` to `places` decimals with
+// round_loop, between clearing the floating-point flags and reading them.
+// Returns false if a flag NumPy reports was raised: `out` is then not to be
+// used. The flags are left clear either way.
+static bool round_values(const double *x, double *out, size_t n, long places) {
+    hk_clear_float_flags();
+    round_loop(x, out, n, ROUND_POWERS[places]);
+    const bool raised = hk_float_flags_reported();
+    hk_clear_float_flags();
+    return !raised;
+}
+
+HK_NOINLINE PyObject *hk_try_round_number(double value, PyObject *decimals) {
+    long places;
+    if (!round_decimals(decimals, &places)) return NULL;
+    double rounded;
+    if (!round_values(&value, &rounded, 1, places)) return NULL;
+    PyObject *result = hk_scalar(NPY_DOUBLE, &rounded);
+    if (result != NULL) hk_take(HK_ROUND_F64);
+    return result;
+}
+
 HK_NOINLINE PyObject *hk_try_round(PyObject *array, PyObject *decimals) {
     PyArrayObject *x = (PyArrayObject *)array;
+    // NumPy rounds a zero-dimensional array to an np.float64, not to an
+    // array. Its data need not be aligned: memcpy, not a load through a
+    // double pointer.
+    if (PyArray_NDIM(x) == 0) {
+        double value;
+        memcpy(&value, PyArray_DATA(x), sizeof value);
+        return hk_try_round_number(value, decimals);
+    }
     const npy_intp n = PyArray_SIZE(x);
     long places;
     // NumPy returns an empty array without computing anything.
@@ -1599,11 +1792,7 @@ HK_NOINLINE PyObject *hk_try_round(PyObject *array, PyObject *decimals) {
         PyErr_Clear();
         return NULL;
     }
-    hk_clear_float_flags();
-    round_loop(PyArray_DATA(x), PyArray_DATA((PyArrayObject *)result), (size_t)n, ROUND_POWERS[places]);
-    const bool raised = hk_float_flags_reported();
-    hk_clear_float_flags();
-    if (raised) {
+    if (!round_values(PyArray_DATA(x), PyArray_DATA((PyArrayObject *)result), (size_t)n, places)) {
         Py_DECREF(result);
         return NULL;
     }
@@ -1636,13 +1825,16 @@ static HK_NOINLINE PyObject *try_round(PyObject *self, PyObject *args, PyObject 
     return hk_try_round(self, bound[DECIMALS]);
 }
 
-// x.round(decimals) on a contiguous float64 array. np.round(x, decimals) and
-// np.around call the method as x.round(decimals=d, out=o) when their own
-// hooks pass a call on, and NumPy converts a list or a scalar to an array and
-// calls its method; all of them that are not taken are counted here, once.
+// x.round(decimals) on a contiguous float64 array, zero-dimensional included.
+// np.round(x, decimals) and np.around call the method as
+// x.round(decimals=d, out=o) when their own hooks pass a call on, and NumPy
+// converts a list or a scalar to an array and calls its method (an
+// np.float64's own round method does, so `s.round(1)` arrives here as a
+// zero-dimensional array); all of them that are not taken are counted here,
+// once.
 // Called with a tuple and a dictionary (METH_VARARGS | METH_KEYWORDS).
 static PyObject *method_round(PyObject *self, PyObject *args, PyObject *kwargs) {
-    if (hk_is_flat(self, NPY_DOUBLE)) {
+    if (hk_is_flat_or_0d(self, NPY_DOUBLE)) {
         PyObject *result = try_round(self, args, kwargs);
         if (result != NULL) return result;
     }

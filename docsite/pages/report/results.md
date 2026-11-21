@@ -20,6 +20,7 @@ These are the figures that matter to someone running NumPy code: one Python stat
 | `x[mask]`, half selected | float64 | 2.53x | 16.3x |
 | `x[mask] = 0.0`, half selected | float64 | 5.19x | 20.7x |
 | `np.nonzero(mask)`, few selected | bool | 1.25x | 13.4x |
+| `np.nonzero(m)`, rows of 22, few True | bool | 1.27x | 26.9x |
 | `np.cumsum(x)` | int64 | 1.94x | 12.3x |
 | `x.astype(np.float32)` | uint8 | 1.90x | 5.15x |
 | `np.sum(x)` | uint8 | 29.4x | 15.6x |
@@ -40,7 +41,7 @@ These are the figures that matter to someone running NumPy code: one Python stat
 | `np.bincount(x)`, codes 0 to 63 | int64 | 2.71x | 4.26x |
 | `np.where(c, a, b)`, half true | float64 | 4.79x | 1.60x |
 
-The search and `np.interp` rows are timed with as many needles as elements, and `np.digitize` with 1,000 bin edges. The run started at a load average of 2.2, on a machine that also runs other work.
+The search and `np.interp` rows are timed with as many needles as elements, and `np.digitize` with 1,000 bin edges. The run started at a load average of 2.2, on a machine that also runs other work. The `np.nonzero(m)` row, on a matrix and on Apple Silicon only, is from a later run, on 20 November 2026 at a load average of 1.6.
 
 Read the two columns as two different stories. At a million elements the number is the kernel. At 16 elements it is mostly NumPy's own call path being skipped: `np.sum` on 16 bytes is 29x faster because a 1.2 µs wrapper was replaced by a 40 ns call, not because of how the bytes are added, and `np.clip` is 11x faster because the kernel is called before NumPy's wrapper and ufunc machinery run.
 
@@ -125,7 +126,7 @@ The pattern is consistent: the judge verifies what its generated inputs exercise
 
 - **`np.digitize` with decreasing bins.** It searches the bins reversed, as a view no kernel takes.
 - **`np.interp` with `left`, `right` or `period`**, and with more than 64 sample points per query, where reading the sample points for NaN would cost more than the kernel saves.
-- **One or two element types per operation.** `np.argmax` on int32, `x[mask]` on int32, `np.sum` on float64: all go to NumPy. (NumPy is already fast on several of those.)
+- **One or two element types per operation.** `np.argmax` on int32, `x[mask]` on float16, `np.sum` on int64: all go to NumPy. (NumPy is already fast on several of those.)
 - **Plain arrays only.** Subclasses reaching the function, method and indexing hooks go to NumPy.
 - **`np.compress` with `axis` or `out`.** The compress kernels write past the elements they keep, so they never run on a buffer the caller owns.
 - **In-place `clip`.** `np.clip(x, 0, 1, out=x)` goes to NumPy.

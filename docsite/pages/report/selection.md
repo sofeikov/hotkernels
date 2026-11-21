@@ -44,7 +44,7 @@ On data without a NaN the kernel's speed does not depend on the data at all: asc
 
 ## Boolean masks without a branch
 
-`x[mask]` is the largest gap the survey found that a compiler does not close. Three kernels share the technique: `compress` for float32 and float64, and `nonzero`, which emits the indices instead of the elements.
+`x[mask]` is the largest gap the survey found that a compiler does not close. Three kernels share the technique: `compress` for float32 and float64, and `nonzero`, which emits the indices instead of the elements. Two siblings for 8- and 16-bit elements, `compress_u8` and `compress_i16`, were added later for x86-64, where a byte shuffle compacts eight elements ([kernel-findings](https://github.com/sofeikov/hotkernels/blob/main/docs/kernel-findings.md#xmask-on-8--and-16-bit-elements)); on ARM64 they are the compiled C.
 
 **Step one: no branch.** As [chapter 1]([[ root ]]report/numpy/#the-mask-surprise) showed, most of the cost of the obvious loop is a mispredicted branch per element. The fix is to store every element at the current output position and advance the position by the mask value. An unselected element is simply overwritten by the next store. That loop is the *baseline* here: it is the naive C these kernels have to beat.
 
@@ -97,6 +97,8 @@ The NumPy column is so large because it combines both steps: removing the branch
 The switch between the two plans is itself a branch, and near 10% density it is mispredicted. Measured outside the judge, `nonzero_bool` costs 0.127 ns per element at 10% density, against 0.045 at 5% and 0.110 at 20%. The judge times 5% and 50%, so this dip is real but does not appear in the tables.
 :::
 
+**On a matrix,** `np.nonzero(m)` needs a row and a column for each True element, and NumPy returns them as two views of one array of (row, column) pairs. `nonzero_2d_bool`, on ARM64, writes those pairs. Its sparse plan is `nonzero_bool`'s, with each position turned into a row by a multiplication instead of a division; its dense plan works a row at a time, in chunks that never cross the end of a row, and rows narrower than 8 are taken several at once with a small table of the row and column of each byte. At a million elements in rows of 22 it is 14.0x faster than the branch-free C with one in twenty True and 3.7x with half, and 36x and 22x faster than NumPy.
+
 ## Masked assignment: write what you did not change
 
 `x[mask] = v` looks like the mirror image of selection, and the naive loop has the same problem: `if (mask[i]) x[i] = v;` is a branch per element that a random mask makes unpredictable. Both NumPy and naive C cost 3.4 to 3.9 ns per element at half density.
@@ -117,7 +119,7 @@ The speedup over naive C leaps from about 3.5x to 19x between 16,384 and 65,536 
 
 ## `isin`: membership as a table lookup
 
-`np.isin(x, test)` with a handful of test values is slow in NumPy for reasons that are mostly fixed cost (it is a Python-level function that sorts and searches). The kernel handles the case of up to eight test values over int64 data.
+`np.isin(x, test)` with a handful of test values is slow in NumPy for reasons that are mostly fixed cost (it is a Python-level function that sorts and searches). The kernel handles the case of up to eight test values over int64 data. A sibling for int32 data, `isin_i32`, was added later for x86-64, where it narrows with a saturating pack in the same spirit ([kernel-findings](https://github.com/sofeikov/hotkernels/blob/main/docs/kernel-findings.md#npisin-on-int32)); on ARM64 it is the compiled C.
 
 The straightforward vector method compares each element with all eight test values. At 64 bits there are two elements per vector, so that is eight compares per two elements. The compiler already emits exactly this, and it cannot be improved: there is no wider compare on this hardware.
 
@@ -188,6 +190,14 @@ These kernels were first written with one length for the sorted array and the ne
 
 ::: note Any along the other axis
 `any_cols_bool` serves `m.any(axis=0)`, the call beside `m.any(axis=1)`: whether each column of a boolean matrix holds a True. It keeps the results in vector registers for the whole call and makes them 0 or 1 once at the end, where a compiled loop or's each row into memory. It was written for x86-64 first and has its own assembly on ARM64. On an Intel Core i5-14600KF a mask of 30 rows by 31 columns takes about 95 ns from Python against NumPy's 840 ns; on an Apple M1 Pro a matrix of 31 columns is about 40 times faster than NumPy at a million elements.
+:::
+
+::: note A float sum in NumPy's order
+`sum_f32` serves `np.sum(x)` and `x.sum()` on float32 with NumPy's bits. NumPy adds in blocks of up to 128 elements, each with eight running sums, and combines the blocks as a tree; its loop waits on each addition. The kernel makes the same additions but steps up to eight blocks side by side, each in a register of its own, so it waits on loads instead. It has assembly for both architectures, written separately. On an Intel Core i5-14600KF it is 5.9x over that C at 4,096 elements, and `x.sum()` from Python is about 8x faster than NumPy at 4,096 elements and 2.6x at a million. `sum_f64` does the same for float64, a block's eight running sums in two registers: on the same machine 3.8x over its C at 4,096 elements, and `x.sum()` from Python 5.7x faster than NumPy there and 1.6x at a million.
+:::
+
+::: note `nonzero` on a matrix
+`np.nonzero(m)` on a boolean matrix needs a row and a column for each True element, and NumPy returns them as two views of one array of (row, column) pairs. `nonzero_2d_bool` writes those pairs. It carries the row and column of each block of 32 elements from block to block, so no position is divided by the width; a sparse block takes its few positions out of a mask word, and a dense one turns eight mask bytes at a time into pairs through tables, with a table of the row and column of each byte for rows of up to 64. It has assembly for both architectures, written separately. On an Intel Core i5-14600KF it is 3.95x over that C across the four widths the judge times, 7.4x to 8.5x with one in twenty True and about 2x with half, and from Python `np.nonzero(m)` on 40 rows of 22 is about 5x faster than NumPy, and 24x at a million elements.
 :::
 
 ::: note The search on int64
