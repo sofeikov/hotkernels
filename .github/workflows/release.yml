@@ -160,6 +160,11 @@ jobs:
   test:
     needs: [build, runner]
     runs-on: ${{ needs.runner.outputs.runner }}
+    env:
+      # Worker processes of `delivery check`. On a pull request the four jobs
+      # can share the maintainer's Mac with other runners; a hosted macOS
+      # runner has three cores.
+      DELIVERY_JOBS: 3
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +189,7 @@ jobs:
           uv sync --python "$PYTHON"
           # Replace the package built from the checkout with the release wheel.
           uv pip install --reinstall dist/hotkernels-*-"$WHEEL_TAG"-"$WHEEL_TAG"-*.whl
-          uv run --no-sync delivery check
+          uv run --no-sync delivery check --jobs "$DELIVERY_JOBS"
           # NumPy's own test suite, both ways, against the same wheel.
           uv run --no-sync delivery numpy-tests
 

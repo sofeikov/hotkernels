@@ -280,13 +280,14 @@ uv run survey report survey/results/apple-m1-pro.json   # regenerate a report
 ## Using the delivery tool
 
 ```bash
-uv run delivery check         # every hooked call, with and without hotkernels; about a minute
+uv run delivery check         # every hooked call, with and without hotkernels; one process per core, about a minute
+uv run delivery check --jobs 1   # the same in one process, for a crash in a kernel; about 4.5 minutes
 uv run delivery demo          # run examples/workload.py both ways and compare
 uv run delivery time          # time statements from Python; add --record to keep the result
 uv run --group workloads delivery workloads   # library and benchmark-suite code, both ways
 uv run --group workloads delivery workloads --size M,L --history DIR   # also keep the run under DIR/history/
 uv run delivery history       # the kept runs of this machine, from the perf-history branch
-uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two, and CI runs it
+uv run delivery numpy-tests   # NumPy's own test suite, both ways at once; about a minute, and CI runs it
 uv run --group apps delivery apps --profile   # five whole applications at two sizes, both ways, and where their time goes
 uv run --group apps delivery apps --set second --profile   # five more, recorded apart
 ```

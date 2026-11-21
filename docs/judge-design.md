@@ -23,7 +23,7 @@ All commands run through `uv`, so there is nothing to set up beyond cloning the 
 | `uv run judge bench <kernel>` | Timing report only | About 1 minute |
 | `uv run judge run <kernel>` | Correctness, then the timing report | About 1.5 minutes |
 | `uv run judge compare <kernel> --against <git-ref>` | Is the working copy faster than an earlier version of the same kernel? | About 1 minute |
-| `uv run judge selftest` | Proves the judge catches known-bad kernels | About 1 minute |
+| `uv run judge selftest` | Proves the judge catches known-bad kernels | About 20 seconds |
 | `uv run judge leaderboard` | Regenerates the results table | Seconds |
 
 The exit code reflects correctness only: 0 if the kernel is correct, non-zero if not. Speed never fails a run. `check` is fast on purpose: agents run it on every edit and run the slower commands only once `check` passes.
@@ -506,7 +506,7 @@ An agent told to make a number go up will sometimes do it the wrong way. The jud
 
 ## Testing the judge
 
-`judge selftest` runs the judge against fixture kernels that are wrong in known ways and confirms each one is caught for the right reason. This is the exit criterion for phase 1.
+`judge selftest` runs the judge against fixture kernels that are wrong in known ways and confirms each one is caught for the right reason. This is the exit criterion for phase 1. The fixtures are checked at the same time, one thread each; a fixture's own checks run one after another, since each rebuilds its naive reference and harness into the same files. The two steps that build a fixture outside its thread, the timing buffers and the slow variant, run after the threads, so the slow variant is timed with nothing else running.
 
 There are two fixture kernels, matching the two spec examples above: `argmax_f32` (returns a value) and `compress_f32` (writes variable-length output). Each has a correct, deliberately simple assembly version, plus broken variants:
 
