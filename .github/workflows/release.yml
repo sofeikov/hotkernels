@@ -19,6 +19,9 @@ on:
   push:
     tags: ["v*"]
   # A change that could break a wheel builds and tests one before it merges.
+  # A later pattern overrides an earlier one: Markdown builds into no wheel
+  # (an attempts log, a kernel's README), except the package's README, which
+  # is its page on PyPI.
   pull_request:
     paths:
       - "hotkernels/**"
@@ -28,6 +31,8 @@ on:
       - "release/**"
       - ".github/workflows/release.yml"
       - ".github/workflows/pick-runner.yml"
+      - "!**/*.md"
+      - "hotkernels/README.md"
   # A rehearsal: build, test and upload to TestPyPI.
   workflow_dispatch:
 
