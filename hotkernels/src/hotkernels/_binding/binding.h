@@ -69,6 +69,8 @@ typedef enum {
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
     HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64, HK_ANY_COLS_BOOL, HK_SUM_F32,
     HK_NONZERO_2D_BOOL,
+    // Taken on ARM64 only (docs/coverage-gaps-arm64.md); the counters exist everywhere.
+    HK_SUM_F64,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.

@@ -1,0 +1,73 @@
+# Coverage gaps on a real workload, on ARM64
+
+[Issue 160](https://github.com/sofeikov/hotkernels/issues/160) lists the NumPy calls of a production pipeline that hotkernels passed to NumPy because their element type, axis or dimension had no kernel. This document is the ARM64 side of the answer: what each call costs on an Apple M1 Pro, which calls got a kernel with ARM64 assembly, and which did not and why.
+
+Every figure here is ARM64's, measured on an Apple M1 Pro with NumPy 2.5.5 and Apple clang 21. The issue's own figures are x86-64's.
+
+## Summary
+
+- **Five calls have room for a kernel on ARM64:** `np.searchsorted` on int64 (both sides), `np.sum` on float32 and on float64 with NumPy's bits, `m.any(axis=0)` on a boolean matrix, and `np.nonzero` on a boolean matrix.
+- **Three of the issue's calls get no kernel,** because the compiler's loop is already NumPy's speed: `astype` between float64, float32, int16 and int64, and `np.sum` on int64. What they would gain is the fixed cost of a call on a short array, which is a loop inside the binding and not a kernel. `np.round` on a single number is the same case. They are recorded under [What is not built](#what-is-not-built).
+- **`np.sum` on floats can be exact.** NumPy adds in a fixed order, eight running sums over blocks of up to 128 elements with the blocks added in pairs, and a plain C loop that adds in the same order gives the same bits 2.0x faster than NumPy on float32 and 1.6x on float64. The blocks do not depend on each other, which no compiler uses and assembly can.
+- **The issue's workload is short arrays in Python loops.** There a kernel's own time is a few nanoseconds of a call of 500 to 800, so most of the gain for that workload is the hook, and the assembly is for the long arrays of other callers.
+
+## NumPy against naive C
+
+The survey's method ([survey-design.md](survey-design.md)): the NumPy statement against the simplest correct C loop, compiled with the judge's flags, timed inside C. The candidates are the group `coverage gaps` in `survey/candidates.py`, and the recorded run is [apple-m1-pro-coverage-gaps.md](../survey/results/apple-m1-pro-coverage-gaps.md), taken at a load average of about 2.3. Each ratio is NumPy's time over the C's; the last column is NumPy's time for one call on one element, which is its fixed cost.
+
+| Call | Naive C | 16 | 4,096 | 1,048,576 | NumPy, one element |
+|---|---|---|---|---|---|
+| `np.searchsorted(a, key)` on int64, one needle | binary search | 205x | 53.9x | 21.8x | 640 ns |
+| `np.searchsorted(a, v)` on int64, as many needles as elements | binary search | 8.90x | 0.66x | 0.46x | 536 ns |
+| `np.nonzero(m)`, 22 columns, 5% True | two stores per True element | 14.7x | 5.04x | 3.91x | 452 ns |
+| `np.nonzero(m)`, 22 columns, half True | the same | 15.6x | 5.55x | 2.09x | 474 ns |
+| `m.any(axis=0)`, 31 columns | each row or'ed into the result | 21.2x | 3.06x | 2.30x | 570 ns |
+| `m.any(axis=0)`, 30 rows | the same | 20.3x | 6.53x | 1.13x | 571 ns |
+| `np.sum(x)` on float32 | NumPy's order of additions | 244x | 4.58x | 2.00x | 841 ns |
+| `np.sum(x)` on float64 | NumPy's order of additions | 243x | 4.47x | 1.63x | 826 ns |
+| `np.sum(x)` on int64 | one running sum | 413x | 3.78x | 1.03x | 826 ns |
+| `x.astype(np.float32)` on float64 | one conversion per element | 8.99x | 1.80x | 1.01x | 177 ns |
+| `x.astype(np.int64)` on int16 | the same | 8.13x | 1.50x | 1.00x | 166 ns |
+
+What the table says:
+
+- **Every call is far behind at 16 elements.** That is NumPy's call path, 170 to 840 ns, against a loop of a few nanoseconds. The issue's workload lives in this column.
+- **Four calls are behind where the call path no longer matters:** `np.nonzero` on a matrix (2.1x to 3.9x at a million elements), `m.any(axis=0)` on a narrow matrix (2.3x), and `np.sum` on float32 and float64 (2.0x and 1.6x).
+- **Two are level:** the casts and `np.sum` on int64. Clang turns each loop into NEON at full width and so, in effect, does NumPy.
+- **One is ahead of the naive C:** a search with many needles on int64. NumPy's int64 comparison compiles to a conditional select, and the naive loop's branch is mispredicted half the time. So an int64 search kernel must not ship as its C on ARM64: it needs assembly that keeps many searches in step, as the float64 kernels do, before a hook serves arrays of int64 needles here.
+
+## Built on ARM64
+
+One entry per kernel, added by the pull request that builds it: what was built and what the judge measured.
+
+- **`sum_f32`** (`kernels/sum_f32/`): `np.sum(x)` and `x.sum()` on float32 with NumPy's result bit for bit, by making NumPy's additions in NumPy's pairwise order, several of its blocks at a time; checked against NumPy 2.3.0, 2.4.0 and 2.5.5 on every length from 0 to 5,000 and thousands of lengths to 6,000,000. The kernel, what was tried and the figures are in [kernel-findings.md](kernel-findings.md#npsum-on-floats-in-numpys-order).
+  - **The kernel returns its sum in a register** (`returns="f32"`); no output buffer. The spec's domain, finite sums, is stated by `prepare`: an array whose sum is not finite has its NaNs and infinities replaced by `+0.0` and is halved until its sum is finite; signed zeros, denormals and the largest values stay in.
+  - **ARM64 only, when built.** The binding served the call on ARM64 (`#if defined(__aarch64__)`); on x86-64 it stayed with NumPy and nothing was built or run there. The x86-64 kernel came later, with the binding's condition removed: [coverage-gaps-design.md](coverage-gaps-design.md#what-changed-in-the-building).
+  - **Taken:** `np.sum(x)` and `x.sum()` with no other argument on a contiguous, aligned, one-dimensional float32 array; an explicit `axis=None` or `axis=0` goes to NumPy, as for `uint8`, and so does a matrix. A result that is not finite is thrown away and the call passed on, so NaN bits and overflow warnings are NumPy's.
+  - **An array not aligned to its elements goes to NumPy.** NumPy sums a contiguous float32 array whose address is not a multiple of 4 differently: it copies it in blocks of its buffer size, 8,192 elements, sums each block in the pairwise order and adds the blocks' sums one after another. `delivery check` found it at 20,000 elements.
+  - **Flags.** After its `np.sum` NumPy leaves the inexact flag as its additions left it and clears invalid, divide by zero, overflow and underflow, even when they were set before the call. The kernel makes the same additions, so the binding clears those four and leaves the inexact flag; `delivery check` compares the flags.
+  - **Figures** (Apple M1 Pro, recorded on 20 November 2026 on a quiet machine). `uv run judge run sum_f32 --unlocked --record` at a load average of 1.5: 2.11x [2.10 – 2.11] over the naive C and 18.7x over NumPy across the eleven sizes; 2.75x over the C at 16 elements, 2.88x at 4,096, 1.64x at 1,048,576, 1.32x at 16,777,216, no size slower than the C. `uv run delivery time --only sum` at a load average of 2.3: `np.sum(x)` 22.8x faster than NumPy at 16 elements, 10.8x at 4,096 and 3.14x at 1,048,576; `x.sum()` 5.85x, 5.85x and 3.07x.
+- **`sum_f64`** (`kernels/sum_f64/`): the same for float64, a sibling the issue does not name (its sums are on float32 and int64), built and bound as `sum_f32` with the same departures (register return, ARM64 only, aligned arrays only, the flags). A block of eight float64 is four NEON registers, so at most four blocks run side by side. The kernel was slower than its naive C from 65,536 to 1,048,576 elements until its walk of the tree stopped mispredicting, and is now 1.10x over it there ([kernel-findings.md](kernel-findings.md#sum_f64-on-arm64)). Recorded on 20 November 2026 on a quiet machine: `uv run judge run sum_f64 --unlocked --record` at a load average of 2.3, 1.31x [1.31 – 1.32] over the naive C and 10.6x over NumPy, no size slower than the C; `uv run delivery time --only sum` at a load average of 2.2, `np.sum(x)` 22.6x faster than NumPy at 16 elements, 6.46x at 4,096 and 1.86x at 1,048,576.
+- **`nonzero_2d_bool`** (`kernels/nonzero_2d_bool/`): `np.nonzero(m)`, `m.nonzero()` and `np.where(m)` on a C-ordered boolean matrix, and `np.argwhere(m)` and `np.transpose(np.nonzero(m))`, which reach the hook through `np.nonzero`. The kernel is `nonzero_2d_bool(m, out, n, width)`: the matrix as `n` elements in rows of `width`, the (row, column) pair of each True element, in C order, into one int64 output with room for two per element; it returns the number of int64 written. What the kernel does and what was tried is in [kernel-findings.md](kernel-findings.md#nonzero-on-a-matrix-on-arm64).
+  - **The pair layout is NumPy's own.** For a matrix NumPy fills one (count, 2) int64 array of pairs and returns two views of its columns, with a stride of 16 bytes. The binding returns the same: two views of one (count, 2) array, with NumPy's strides, base and flags, which `delivery check` compares on NumPy 2.5.5 and 2.3.0 beside the values. The judge takes one output per kernel, and this layout needs only one.
+  - **The output is scratch,** as `nonzero_bool`'s is: the kernel may write anywhere in its 2n int64 and only the reported pairs count. Its dense step stores eight pairs per 8 mask bytes whatever it keeps. So the binding runs it on a buffer of its own and copies the pairs into the (count, 2) array; it does not count first. Measured in C at a million elements in rows of 22, half True: the kernel 0.31 ms, with the copy 0.44 ms; shrinking an array of n pairs with `realloc` instead took 0.91 ms on macOS.
+  - **A partial last row is a row like the others:** element `i` is at row `i // width` and column `i % width`, so the oracle is built from flat indices and equals `np.argwhere(m).ravel()` for whole rows. The binding passes whole rows only.
+  - **Every mask byte must be 0 or 1,** as for `nonzero_bool`: the kernel sums the bytes by multiplication, and a larger byte would write outside its buffer. The binding reads the mask first and leaves one with other bytes to NumPy.
+  - **ARM64 only, when built.** The binding served the call on ARM64 (`#if defined(__aarch64__)`); on x86-64 it stayed with NumPy and nothing was built or run there. The x86-64 kernel came later, with the binding's condition removed: [coverage-gaps-design.md](coverage-gaps-design.md#what-changed-in-the-building).
+  - **Figures** (Apple M1 Pro, on a quiet machine on 20 November 2026, load average 1.6). `uv run judge run nonzero_2d_bool --unlocked --record`: 6.50x [6.49 – 6.53] over the naive C and 37.5x over NumPy across the four timed widths (3, 22, 32 and 1,000) and two shares of True (5% and half); at a million elements in rows of 22, 14.0x and 3.67x over the C and 35.7x and 22.5x over NumPy. From Python (`uv run delivery time --only nonzero`): a matrix of 40 rows of 22 is 4.9x faster than NumPy with 5% True and 3.3x with half (2.67 and 2.6 µs to 544 and 784 ns), a million elements 26.9x and 15.4x.
+
+## What is not built
+
+Recorded so the question is not asked again without new figures. "Level" means the NumPy call is within a tenth of the naive C from 65,536 elements up, on the Apple M1 Pro.
+
+| Call | Finding | What would help instead |
+|---|---|---|
+| `x.astype(np.float32)` on float64 | Level: 1.02x. Clang's loop is NEON at full width, 0.11 ns per element, and so is NumPy's | A loop in the binding for short contiguous arrays: NumPy takes 177 ns for one element, the C with its allocation 20 ns |
+| `x.astype(np.int64)` on int16 | Level: 1.01x | The same |
+| `x.astype(np.intp)` on int64, `x.astype(np.float32)` on float32 | A copy; nothing to compute | The same |
+| `astype` on a strided source (`ctx[..., idx].astype("float32")`) | Not measured: the kernels take contiguous buffers, and a strided one would be copied first, which is the cast's own cost | Nothing here |
+| `np.sum(x)` on int64 | Level: 1.07x, and 1.03x at a million elements. Assembly could use more running sums than clang's four, a gain inside the first-level cache only | The `sum` hooks could take short int64 arrays with a C loop: NumPy's 826 ns for one element is all call path |
+| `np.around(x, 1)` on one float64 number | Not a loop | The `round` hooks taking a 0-d array or an `np.float64`, with the arithmetic they already do |
+| A count per reason in `report()` | Not a kernel | A change to the binding's counters and the report; it would have attributed the calls the issue could not (`x[mask]`, `x[mask] = v`, `np.median`, `np.argmax`, `np.isin`) |
+
+The first five rows are one piece of work: loops inside the binding for short arrays, as [the second shortlist's decision 4](second-shortlist-design.md) settled for `np.clip` on int64, `np.round` and `np.median`. It is not done here, since no kernel comes of it.
