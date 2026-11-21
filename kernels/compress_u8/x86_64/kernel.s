@@ -23,11 +23,8 @@
 #   8..31       one table step per 8, the mask bits from an 8-byte load
 #   1..7        one element at a time, as the reference does it
 
-# Offset of a table entry is 8 times the mask byte. The mask word is shifted
-# left by this once per block, so that a group's offset is one `and` away.
-.set ENTRY_SHIFT, 3
-# The bits of the shifted mask word that hold one group's offset.
-.set ENTRY_BITS, 0xff << ENTRY_SHIFT
+# Bytes per table entry: an entry's address is the mask byte scaled by this.
+.set ENTRY_SCALE, 8
 
 # One entry of the shuffle table: for mask byte \m, the indices of its set bits
 # in ascending order, one byte each. The bytes past the count are zero: they
@@ -56,15 +53,15 @@
     # last entry's are this padding. Their bytes only shape lanes not stored.
     .fill 8, 1, 0
 
-# One table step: compact the eight elements at \src by the group whose table
-# offset is in r8, store them at byte r9 of the output and advance r9 by the
+# One table step: compact the eight elements at \src by the group whose mask
+# byte is in ecx, store them at byte r9 of the output and advance r9 by the
 # number selected.
 .macro STEP src
     vmovq   xmm2, \src
-    vpshufb xmm2, xmm2, [r10 + r8]
+    vpshufb xmm2, xmm2, [r10 + rcx * ENTRY_SCALE]
     vmovq   [rdx + r9], xmm2
-    popcnt  r8d, r8d
-    add     r9, r8
+    popcnt  ecx, ecx
+    add     r9, rcx
 .endm
 
 .text
@@ -77,54 +74,50 @@ compress_u8:
     vpxor   xmm0, xmm0, xmm0
     mov     r11, rcx
     shr     r11, 5                      # blocks of 32
+    mov     r8d, ecx
+    and     r8d, 31                     # elements after the blocks
+    test    r11, r11
     jz      .Lgroups
 .p2align 6
 .Lblock:
     vpcmpeqb ymm1, ymm0, [rsi]          # 0xff where the mask byte is zero
     vpmovmskb eax, ymm1
     not     eax                         # one bit per selected element
-    shl     rax, ENTRY_SHIFT
-    mov     r8d, eax
-    and     r8d, ENTRY_BITS
+    # Each group's byte is one `movzx` away: al and ah, then the same after a
+    # shift. ah can only be read into a register without a REX prefix, which
+    # is why the group's byte goes to ecx.
+    movzx   ecx, al
     STEP    [rdi]
-    rorx    r8, rax, 8
-    and     r8d, ENTRY_BITS
+    movzx   ecx, ah
     STEP    [rdi + 8]
-    rorx    r8, rax, 16
-    and     r8d, ENTRY_BITS
+    shr     eax, 16
+    movzx   ecx, al
     STEP    [rdi + 16]
-    shr     rax, 24
-    and     eax, ENTRY_BITS
-    vmovq   xmm2, [rdi + 24]
-    vpshufb xmm2, xmm2, [r10 + rax]
-    vmovq   [rdx + r9], xmm2
-    popcnt  eax, eax
-    add     r9, rax
+    movzx   ecx, ah
+    STEP    [rdi + 24]
     add     rsi, 32
     add     rdi, 32
     dec     r11
     jnz     .Lblock
 
 .Lgroups:
-    and     ecx, 31
-    cmp     ecx, 8
+    cmp     r8d, 8
     jb      .Ltail
 .Lgroup:
     vmovq   xmm1, [rsi]
     vpcmpeqb xmm1, xmm1, xmm0
     vpmovmskb eax, xmm1
     not     eax
-    movzx   r8d, al
-    shl     r8d, ENTRY_SHIFT
+    movzx   ecx, al
     STEP    [rdi]
     add     rsi, 8
     add     rdi, 8
-    sub     ecx, 8
-    cmp     ecx, 8
+    sub     r8d, 8
+    cmp     r8d, 8
     jae     .Lgroup
 
 .Ltail:
-    test    ecx, ecx
+    test    r8d, r8d
     jz      .Ldone
 .Lone:
     movzx   eax, byte ptr [rdi]
@@ -135,7 +128,7 @@ compress_u8:
     add     r9, rax
     inc     rdi
     inc     rsi
-    dec     ecx
+    dec     r8d
     jnz     .Lone
 .Ldone:
     mov     rax, r9
