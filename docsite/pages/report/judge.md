@@ -212,7 +212,7 @@ A test suite that has never failed proves little. So the judge ships with delibe
 | Uses the register the platform reserves | lint |
 | Is correct but slower than naive C | reported as significantly slower |
 
-The self-test is the gate for any change to the judge, and it runs in continuous integration on every pull request.
+The self-test is the gate for any change to the judge, and it runs in continuous integration on every pull request that changes more than documentation.
 
 ## What the judge had to learn
 

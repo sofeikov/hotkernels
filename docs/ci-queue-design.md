@@ -2,6 +2,8 @@
 
 How `ci.yml` decides which of its jobs a push needs, so that the macOS jobs spend the maintainer's runners only on work whose result someone will read. It changes when jobs run and which ones; it does not change what any job does or how long it takes.
 
+This began as a proposal and is now implemented: the `concurrency` block and the `scope` job of [`ci.yml`](../.github/workflows/ci.yml), and [`.github/scripts/ci-scope.sh`](../.github/scripts/ci-scope.sh). The building follows the design.
+
 ## Summary
 
 - **The wait is in the queue, not in the jobs.** A run of `ci.yml` takes about ten minutes once it has its runners. Its two macOS jobs, `judge` and `numpy-range`, run on the four self-hosted runners on the maintainer's Mac (`.github/runners/setup.sh 4`), about ten minutes each. When pushes come together, the jobs queue behind each other: ten merges to `main` within two minutes on 21 November asked for twenty macOS jobs, and the last run finished 100 minutes after its push.
