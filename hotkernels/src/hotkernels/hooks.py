@@ -50,10 +50,6 @@ ON_ARM64 = platform.machine() in ARM64_MACHINES
 INPLACE = "inplace"
 # Why the in-place loops are not installed on another architecture.
 INPLACE_ARM64_ONLY = "ARM64 only: see docs/gradient-step-findings.md"
-# Why the kernels of docs/coverage-gaps-arm64.md are not installed on
-# another architecture: their calls stay with NumPy there until each kernel
-# is measured on it.
-COVERAGE_GAPS_ARM64_ONLY = "ARM64 only until measured on x86-64: see docs/coverage-gaps-arm64.md"
 # Element count of the in-place probes: the fewest the loops take
 # (INPLACE_MIN_N in hook_loop.c).
 PROBE_INPLACE_N = 131072
@@ -1014,7 +1010,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.sum", FUNCTION, (
         Probe("sum_u8", _sum_function),
         Probe("sum_f32", partial(_sum_float, np.float32, np.sum)),
-        *((Probe("sum_f64", partial(_sum_float, np.float64, np.sum)),) if ON_ARM64 else ()),
+        Probe("sum_f64", partial(_sum_float, np.float64, np.sum)),
     )),
     Hook("function.histogram", FUNCTION, (Probe("histogram_f64", _histogram),)),
     Hook("function.bincount", FUNCTION, (
@@ -1056,7 +1052,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("method.sum", METHOD, (
         Probe("sum_u8", _sum_method),
         Probe("sum_f32", partial(_sum_float, np.float32, _sum_method_of)),
-        *((Probe("sum_f64", partial(_sum_float, np.float64, _sum_method_of)),) if ON_ARM64 else ()),
+        Probe("sum_f64", partial(_sum_float, np.float64, _sum_method_of)),
     )),
     Hook("method.nonzero", METHOD, (
         Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),
@@ -1164,9 +1160,7 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("cast_u8_f32", "x.astype(float32)", "uint8", "astype", ("method.astype",)),
     KernelInfo("sum_u8", "np.sum", "uint8", "sum", ("function.sum", "method.sum")),
     KernelInfo("sum_f32", "np.sum", "float32", "sum", ("function.sum", "method.sum")),
-    # On ARM64 only, until written for x86-64.
-    KernelInfo("sum_f64", "np.sum", "float64", "sum", ("function.sum", "method.sum"),
-               unbound_reason=None if ON_ARM64 else COVERAGE_GAPS_ARM64_ONLY),
+    KernelInfo("sum_f64", "np.sum", "float64", "sum", ("function.sum", "method.sum")),
     KernelInfo("count_nonzero_i64", "np.count_nonzero", "int64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("count_nonzero_f64", "np.count_nonzero", "float64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("histogram_f64", "np.histogram", "float64", "histogram", ("function.histogram",)),
