@@ -63,6 +63,7 @@ The names are provisional. One recording runs at a time; entering a second raise
 | `gather` | `x.gather()` or `hotkernels.gather(...)` | `gather` |
 | `at once` | A call outside the deferred set needed its operands | `np.argmax` |
 | `write` | A write into a lazy array computed everything pending first | `x[index] = v`, `x += y` |
+| `needed` | Something needed values and `gather()` was not called | `float()`, `Conversion to an ndarray`, `np.add` |
 | `limit` | Too many nodes were pending | `the limit of pending nodes` |
 | `pending` | Nothing did: the nodes were not computed. The last graph of a recording, and every `x.graph()` | `still pending when the block ended` |
 
@@ -71,7 +72,7 @@ Each graph also has the file and line of the trigger and the text of that line.
 This unit is chosen for two reasons.
 
 - **It is what an evaluator is handed.** Whatever computes a graph differently later, by fusing or otherwise, receives exactly these nodes at once and no others. A graph of a recording is the input such an evaluator would have had.
-- **Every trigger is a cut.** A program's operations form one large graph only on paper; in fact the graph is cut wherever a value is needed. Seeing the cuts, with the line that made each, is what tells a user why their graph is in forty pieces.
+- **Every trigger is a cut.** A program's operations form one large graph only on paper; in fact the graph is cut wherever a value is needed. Seeing the cuts, with the line that made each, is what tells a user why their graph is in forty pieces. The `needed` ones matter most: nobody wrote `gather()` there, so the code does not show them ([lazy-design.md](lazy-design.md#what-is-computed-without-gather)).
 
 The graphs are disjoint, and they say how they connect: a node one graph computed and a later graph reads appears in the later one as an input of kind `earlier`, with the index of the graph it came from.
 
@@ -176,9 +177,10 @@ The tree is best effort, and it cannot lose anything: the nodes are all in `node
 
 ## What was verified
 
-On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 11 tests:
+On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 12 tests:
 
 - **One graph per computation:** a gather, a call made at once, a write and what is left pending give four graphs in order, each with its trigger, its line and the text of the line.
+- **A value needed without `gather()`:** a `float()` is a graph of the two operations it needed; an array handed to `np.asarray` is a graph of everything that was pending.
 - **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray` and the result of a call made at once; and `earlier` with the graph's index.
 - **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a generator expression as a line of its function.
 - **Alike:** a loop that gathers at each step gives one graph per step with one signature from the second on.

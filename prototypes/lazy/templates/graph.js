@@ -35,6 +35,7 @@
     'gather': call => `computed by ${call}`,
     'at once': call => `computed because ${call} was made at once`,
     'write': call => `computed before the write ${call}`,
+    'needed': call => `computed without gather(): ${call} needed values`,
     'limit': call => `computed at ${call}`,
     'pending': call => `not computed: ${call}`,
   };
@@ -713,6 +714,8 @@
       const entry = html('button', here ? 'entry current' : 'entry');
       const top = html('div', 'top');
       top.append(html('span', 'muted', `${graph.index + 1}`), html('span', 'call', graph.call));
+      // A computation nobody asked for by name is the kind a reader is looking for.
+      if (graph.trigger === 'needed') top.append(html('span', 'unasked', 'no gather'));
       if (family.members.length > 1) top.append(html('span', 'alike', `× ${family.members.length} alike`));
       const operations = graph.nodes.filter(node => node.kind === 'operation').length;
       entry.append(top, html('div', 'sub', `${graph.where || 'no line'} · ${plural(operations, 'operation')}`));

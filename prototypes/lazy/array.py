@@ -10,13 +10,15 @@ functions). Each call then takes one of three paths:
   a lazy array that already has its values;
 - a write: everything pending is computed first, then NumPy writes.
 
-Values leave only through `gather()`. Everything else that would need them
-raises `NotGathered`.
+`gather()` is the way to ask for values. Anything else that needs them
+(`float(x)`, `if x > 0:`, `np.asarray(x)`, a library) gets them too: they are
+computed on the spot and the log says so, once per line. An array made by a
+strict stand-in raises `NotGathered` there instead.
 """
 from __future__ import annotations
 
 import operator
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import numpy as np
 
@@ -33,7 +35,7 @@ WRITING_METHODS = frozenset({"sort", "fill", "put", "partition", "resize", "item
 WRITING_UFUNC_METHOD = "at"
 
 
-def wrap(value: Any, source: str = "array") -> "LazyArray":
+def wrap(value: Any, source: str = "array", strict: bool = False) -> "LazyArray":
     """Make a lazy array of something that already has values.
 
     Args:
@@ -42,6 +44,8 @@ def wrap(value: Any, source: str = "array") -> "LazyArray":
             `np.asarray` accepts.
         source: What made the array, for a recording: "array", or the name
             of the stand-in's function, such as "np.zeros".
+        strict: Whether the new array refuses to give its values without
+            `gather()`. A lazy array that is passed in keeps what it has.
 
     Returns:
         A lazy array on a computed node.
@@ -50,7 +54,7 @@ def wrap(value: Any, source: str = "array") -> "LazyArray":
         return value
     if not isinstance(value, (np.ndarray, np.generic)):
         value = np.asarray(value)
-    return LazyArray(graph.leaf(value, source))
+    return LazyArray(graph.leaf(value, source, strict=strict))
 
 
 def gather(*arrays: Any) -> tuple:
@@ -120,6 +124,47 @@ def _valued(obj: Any) -> Any:
     return obj
 
 
+def _strict(*arguments: Any) -> bool:
+    """Say whether a call involves a strict lazy array.
+
+    Args:
+        *arguments: Arguments of the call, or collections of them.
+
+    Returns:
+        True when any lazy array among them is strict. What is computed from
+        a strict array is strict.
+    """
+    return any(lazy._node.strict for lazy in _lazies_in(arguments))
+
+
+def _hand_out(call: str, strict: bool, everything: bool, nodes: list[Node], refusal: str) -> None:
+    """Let values leave without `gather()`: refuse for a strict array, otherwise compute and say so.
+
+    Args:
+        call: What needs the values, as the log and a recording name it.
+        strict: Whether a strict array is involved.
+        everything: True when an array itself is handed out, or an `ndarray`
+            is about to be written. Everything pending is then computed
+            first: the receiver may write into memory that a pending
+            operation still reads, and once nothing is pending the program is
+            in the state the eager program would be in. False when only a
+            number, a truth value or a string leaves.
+        nodes: The nodes whose values are needed.
+        refusal: What `NotGathered` says for a strict array.
+
+    Raises:
+        NotGathered: For a strict array.
+        Exception: What computing raised.
+    """
+    if strict:
+        raise NotGathered(refusal)
+    graph.fallback(graph.NEEDED, call)
+    trigger = Trigger(graph.NEEDED, call)
+    if everything:
+        evaluate.compute_pending(trigger)
+    evaluate.compute(nodes, trigger)
+
+
 def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
                ruled_as: Callable[..., Any] | None = None) -> "LazyArray | None":
     """Add a call to the graph if the rules allow it.
@@ -146,7 +191,8 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
         return None
     if graph.pending_count() >= graph.PENDING_LIMIT:
         evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
-    return LazyArray(graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype, signature.kind))
+    return LazyArray(graph.deferred(operation, name, unwrapped, kwargs, signature.shape, signature.dtype, signature.kind,
+                                    _strict(args, kwargs)))
 
 
 def _defer_or_call(operation: Callable[..., Any], name: str, call: str, args: tuple) -> Any:
@@ -162,7 +208,7 @@ def _defer_or_call(operation: Callable[..., Any], name: str, call: str, args: tu
         A pending lazy array, or the result made at once.
     """
     deferred = _try_defer(operation, name, args, {})
-    # Not `deferred or ...`: a truth test of a lazy array is refused.
+    # Not `deferred or ...`: a truth test of a lazy array would compute it.
     return deferred if deferred is not None else _at_once(operation, call, args, {})
 
 
@@ -177,40 +223,48 @@ def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
 
     Returns:
         The result with every array in it made lazy, so that what is computed
-        from a lazy array is a lazy array.
+        from a lazy array is a lazy array. A plain Python value (a bool, a
+        list of numbers) is returned as it is.
 
     Raises:
-        NotGathered: When NumPy answers with a plain Python value, which
-            would be a value leaving without `gather()`.
+        NotGathered: When NumPy answers with a plain Python value and a
+            strict array is among the arguments.
     """
-    graph.COUNTS.at_once[name] = graph.COUNTS.at_once.get(name, 0) + 1
+    graph.fallback(graph.AT_ONCE, name)
+    strict = _strict(args, kwargs)
     evaluate.compute([lazy._node for lazy in _lazies_in((args, kwargs))], Trigger(graph.AT_ONCE, name))
-    return _made_lazy(operation(*_valued(args), **_valued(kwargs)), name)
+    return _made_lazy(operation(*_valued(args), **_valued(kwargs)), name, strict)
 
 
-def _made_lazy(result: Any, name: str) -> Any:
+def _made_lazy(result: Any, name: str, strict: bool) -> Any:
     """Turn the result of a call made at once into lazy arrays.
 
     Args:
         result: What NumPy returned.
-        name: The call's name, for the message.
+        name: The call's name, for messages and the log.
+        strict: Whether a strict array was among the call's arguments.
 
     Returns:
         A lazy array for an array or a NumPy scalar; the same kind of tuple
-        or list for a tuple or list of those; None for None.
+        or list for a tuple or list of those; None for None. Anything else
+        (a Python bool, float, list of numbers) is values leaving without
+        `gather()`: it is returned as it is, and the log says so.
 
     Raises:
-        NotGathered: For anything else: a Python bool, float, list of numbers.
+        NotGathered: For such a value when a strict array was involved.
     """
     if isinstance(result, (np.ndarray, np.generic)):
-        return LazyArray(graph.leaf(result, name, graph.AT_ONCE))
+        return LazyArray(graph.leaf(result, name, graph.AT_ONCE, strict))
     if result is None:
         return None
     if isinstance(result, (list, tuple)) and all(isinstance(item, (np.ndarray, np.generic)) for item in result):
-        items = [LazyArray(graph.leaf(item, name, graph.AT_ONCE)) for item in result]
+        items = [LazyArray(graph.leaf(item, name, graph.AT_ONCE, strict)) for item in result]
         return type(result)(*items) if hasattr(result, "_fields") else type(result)(items)
-    raise NotGathered(f"{name} gives a plain Python value ({type(result).__name__}) and its arguments are lazy: "
-                      "call .gather() on them first")
+    if strict:
+        raise NotGathered(f"{name} gives a plain Python value ({type(result).__name__}) and its arguments are lazy: "
+                          "call .gather() on them first")
+    graph.fallback(graph.NEEDED, name)
+    return result
 
 
 def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, targets: tuple) -> None:
@@ -224,15 +278,17 @@ def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, 
         targets: The arrays the call writes into.
 
     Raises:
-        NotGathered: When a target is not a lazy array. Writing lazy values
-            into an `ndarray` is a way out of the lazy world, and `gather()`
-            is the only one.
+        NotGathered: When a target is a plain `ndarray` and a strict array is
+            among the arguments: lazy values would leave without `gather()`.
     """
-    if not all(isinstance(target, LazyArray) for target in targets):
-        raise NotGathered(f"{name} would write the values of a lazy array into an ndarray: "
-                          "call .gather() on the lazy array first")
-    graph.COUNTS.at_once[name] = graph.COUNTS.at_once.get(name, 0) + 1
-    evaluate.compute_pending(Trigger(graph.WRITE, name))
+    if all(isinstance(target, LazyArray) for target in targets):
+        graph.fallback(graph.WRITE, name)
+        evaluate.compute_pending(Trigger(graph.WRITE, name))
+    else:
+        # Lazy values are written into an `ndarray`. Something pending may
+        # read that `ndarray`, so everything pending is computed before it changes.
+        _hand_out(name, _strict(args, kwargs), True, [lazy._node for lazy in _lazies_in((args, kwargs))],
+                  f"{name} would write the values of a lazy array into an ndarray: call .gather() on the lazy array first")
     operation(*_valued(args), **_valued(kwargs))
 
 
@@ -253,19 +309,40 @@ def _method(name: str) -> Callable[..., Any]:
     return call
 
 
-def _refusal(what: str) -> Callable[..., Any]:
-    """Build a method that refuses to give up values.
+def _leaving(what: str, convert: Callable[..., Any], everything: bool = False) -> Callable[..., Any]:
+    """Build a method through which values leave without `gather()`.
 
     Args:
-        what: What asked for the values, as the message should name it.
+        what: What asks for the values, as messages, the log and a recording name it.
+        convert: Turns the computed value, and any further arguments of the
+            method, into what was asked for.
+        everything: True when the array itself is handed out; see `_hand_out`.
 
     Returns:
-        A method that raises `NotGathered` whatever it is called with.
+        A method that computes the array, says so in the log, and returns
+        what was asked for; and that raises `NotGathered` for a strict array.
     """
-    def refuse(self, *args, **kwargs):
-        """Raise `NotGathered`: values leave a lazy array only through `gather()`."""
-        raise NotGathered(f"{what} needs the values of a lazy array: call .gather() first")
-    return refuse
+    def leave(self, *args, **kwargs):
+        """Give what was asked for, computing first; refuse for a strict array."""
+        _hand_out(what, self._node.strict, everything, [self._node],
+                  f"{what} needs the values of a lazy array: call .gather() first")
+        return convert(self._node.value, *args, **kwargs)
+    return leave
+
+
+def _as_array(value: Any, dtype: Any = None, copy: bool | None = None) -> np.ndarray:
+    """Answer NumPy's `__array__`: an `ndarray` of a computed value.
+
+    Args:
+        value: The computed `ndarray` or NumPy scalar.
+        dtype: The element type NumPy asks for, or None for the value's own.
+        copy: True when NumPy asks for a copy; None or False when it does not.
+
+    Returns:
+        The array itself when no copy and no other type is asked for, as
+        `gather()` returns it; otherwise what NumPy makes of it.
+    """
+    return np.array(value, dtype=dtype, copy=True) if copy else np.asarray(value, dtype=dtype)
 
 
 def _binary(ufunc: np.ufunc, reflected: bool = False) -> Callable[..., Any]:
@@ -315,13 +392,13 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str) -> Callable[..., An
     """
     def write(self, other):
         """Apply the in-place operator with NumPy's meaning."""
-        graph.COUNTS.at_once[symbol] = graph.COUNTS.at_once.get(symbol, 0) + 1
+        graph.fallback(graph.WRITE, symbol)
         trigger = Trigger(graph.WRITE, symbol)
         evaluate.compute_pending(trigger)
         evaluate.compute([self._node], trigger)
         value = self._node.value
         result = apply(value, _valued(other))
-        return self if result is value else LazyArray(graph.leaf(result, symbol, graph.AT_ONCE))
+        return self if result is value else LazyArray(graph.leaf(result, symbol, graph.AT_ONCE, self._node.strict))
     return write
 
 
@@ -433,7 +510,7 @@ class LazyArray:
         """
         return record.graph_of(self._node)
 
-    # ---- The one way out.
+    # ---- The way to ask for values.
 
     def gather(self) -> Any:
         """Compute the array.
@@ -450,33 +527,49 @@ class LazyArray:
         evaluate.compute([self._node], Trigger(graph.GATHER, "gather"))
         return self._node.value
 
-    # ---- Everything else that would need the values refuses.
+    # ---- Everything else that needs values: computed and logged, or refused for a strict array.
 
-    __float__ = _refusal("float()")
-    __int__ = _refusal("int()")
-    __complex__ = _refusal("complex()")
-    __bool__ = _refusal("A truth test (if, while, and, or, not)")
-    __index__ = _refusal("Use as an index or in range()")
-    __iter__ = _refusal("Iteration")
-    __contains__ = _refusal("The in operator")
-    # np.asarray(x), ndarray[i] = x, and every library that asks NumPy for an array.
-    __array__ = _refusal("Conversion to an ndarray")
+    __float__ = _leaving("float()", float)
+    __int__ = _leaving("int()", int)
+    __complex__ = _leaving("complex()", complex)
+    __bool__ = _leaving("A truth test (if, while, and, or, not)", bool)
+    __index__ = _leaving("Use as an index or in range()", operator.index)
+    __contains__ = _leaving("The in operator", operator.contains)
+    # np.asarray(x), ndarray[i] = x, and every library that asks NumPy for an
+    # array. The receiver holds the array and may write: everything pending first.
+    __array__ = _leaving("Conversion to an ndarray", _as_array, everything=True)
+
+    def __iter__(self) -> Iterator["LazyArray"]:
+        """Iterate over the first dimension. No value is needed: each item is a lazy view.
+
+        Returns:
+            An iterator of `self[0]`, `self[1]`, ..., each deferred.
+
+        Raises:
+            TypeError: For an array without dimensions, as NumPy raises.
+        """
+        if not self._node.shape:
+            raise TypeError("iteration over a 0-d array")
+        return (self[position] for position in range(self._node.shape[0]))
 
     def __format__(self, spec: str) -> str:
-        """Format the description; a format of values is refused.
+        """Format the description, or with a specification the value.
 
         Args:
             spec: The format specification. Empty for `f"{x}"`.
 
         Returns:
-            The description, as `print(x)` shows it.
+            The description, as `print(x)` shows it, for an empty
+            specification. For one such as `.3f`, the value formatted with it.
 
         Raises:
-            NotGathered: For a specification such as `.3f`, which formats a value.
+            NotGathered: For a specification, on a strict array.
         """
-        if spec:
-            raise NotGathered(f"Formatting with '{spec}' needs the values of a lazy array: call .gather() first")
-        return repr(self)
+        if not spec:
+            return repr(self)
+        what = f"Formatting with '{spec}'"
+        _hand_out(what, self._node.strict, False, [self._node], f"{what} needs the values of a lazy array: call .gather() first")
+        return format(self._node.value, spec)
 
     def __getattr__(self, name: str) -> Any:
         """Answer a method this class does not define with `ndarray`'s, made at once.
@@ -494,14 +587,18 @@ class LazyArray:
                 double-underscore name. NumPy looks for `__array_interface__`
                 and `__array_struct__` before it calls `__array__`; answering
                 those would hand it the memory without the layer noticing.
-            NotGathered: For an attribute that is not a method (`x.flat`,
-                `x.real`, `x.data`), which would be the values themselves.
+            NotGathered: On a strict array, for an attribute that is not a
+                method (`x.flat`, `x.real`, `x.data`): those are the values
+                themselves. Otherwise the array is computed, with everything
+                else pending, and the attribute of the result is returned.
         """
         if name.startswith("__"):
             raise AttributeError(name)
         attribute = getattr(np.ndarray, name)
         if not callable(attribute):
-            raise NotGathered(f"The attribute .{name} needs the values of a lazy array: call .gather() first")
+            what = f"The attribute .{name}"
+            _hand_out(what, self._node.strict, True, [self._node], f"{what} needs the values of a lazy array: call .gather() first")
+            return getattr(self._node.value, name)
         method, call = _method(name), f"ndarray.{name}"
         if name in WRITING_METHODS:
             return lambda *args, **kwargs: _write(method, call, (self,) + args, kwargs, (self,))

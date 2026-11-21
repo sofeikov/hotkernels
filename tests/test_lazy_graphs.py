@@ -83,6 +83,19 @@ def test_one_graph_per_computation_with_what_triggered_it():
     assert type(top) is LazyArray and left._node.pending
 
 
+def test_a_value_needed_without_gather_is_a_graph_of_its_own():
+    """float() computes what it needs; an array handed to NumPy takes everything pending with it. Both are recorded."""
+    with record_graphs() as recording:
+        x = lazy.arange(4.0)
+        other = x * 3
+        total = float((x + 1).sum())
+        handed = numpy.asarray(x * 2)
+    assert total == 10.0 and handed.tolist() == [0.0, 2.0, 4.0, 6.0] and not other._node.pending
+    assert [(each.trigger, each.call) for each in recording.graphs] == [
+        (graph.NEEDED, "float()"), (graph.NEEDED, "Conversion to an ndarray")]
+    assert [[node.name for node in operations(each)] for each in recording.graphs] == [["add", "sum"], ["multiply", "multiply"]]
+
+
 def test_a_node_is_plain_data_and_says_where_it_came_from():
     """Operations carry their line, code, operands and arguments as written; inputs say what made them."""
     weights = numpy.arange(3.0)
