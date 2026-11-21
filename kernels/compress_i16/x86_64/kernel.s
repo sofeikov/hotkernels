@@ -28,6 +28,9 @@
 .set ENTRY_SHIFT, 4
 # The bits of the shifted mask word that hold one group's offset.
 .set ENTRY_BITS, 0xff << ENTRY_SHIFT
+# The `pdep` mask that moves the four bytes of a block's mask word into the
+# four 16-bit fields of a register, each shifted left by ENTRY_SHIFT.
+.set SPREAD, 0x0ff00ff00ff00ff0
 
 # One entry of the shuffle table: for mask byte \m, the indices of its set bits
 # in ascending order, as the two byte indices of each 16-bit element. The
@@ -73,25 +76,26 @@ compress_i16:
     lea     r10, [rip + .Lperm]
     vpxor   xmm0, xmm0, xmm0
     mov     r11, rcx
-    shr     r11, 5                      # blocks of 32
-    jz      .Lgroups
+    sub     r11, 32                     # elements left after this block
+    jb      .Lrest
+    mov     rcx, SPREAD
 .p2align 6
 .Lblock:
     vpcmpeqb ymm1, ymm0, [rsi]          # 0xff where the mask byte is zero
     vpmovmskb eax, ymm1
     not     eax                         # one bit per selected element
-    shl     rax, ENTRY_SHIFT
-    mov     r8d, eax
-    and     r8d, ENTRY_BITS
+    # Each group's byte to its own 16-bit field, already scaled to its table
+    # offset, so that a group is one `movzx` or one shift away.
+    pdep    rax, rax, rcx
+    movzx   r8d, ax
     STEP    [rdi]
-    rorx    r8, rax, 8
-    and     r8d, ENTRY_BITS
+    mov     r8d, eax
+    shr     r8d, 16
     STEP    [rdi + 16]
-    rorx    r8, rax, 16
-    and     r8d, ENTRY_BITS
+    rorx    r8, rax, 32
+    movzx   r8d, r8w
     STEP    [rdi + 32]
-    shr     rax, 24
-    and     eax, ENTRY_BITS
+    shr     rax, 48
     vmovdqu xmm2, [rdi + 48]
     vpshufb xmm2, xmm2, [r10 + rax]
     vmovdqu [rdx + r9 * 2], xmm2
@@ -99,11 +103,12 @@ compress_i16:
     add     r9, rax
     add     rsi, 32
     add     rdi, 64
-    dec     r11
-    jnz     .Lblock
+    sub     r11, 32
+    jae     .Lblock
+.Lrest:
+    lea     ecx, [r11 + 32]             # 0..31 elements after the blocks
 
 .Lgroups:
-    and     ecx, 31
     cmp     ecx, 8
     jb      .Ltail
 .Lgroup:
