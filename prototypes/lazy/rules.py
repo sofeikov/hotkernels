@@ -55,6 +55,8 @@ class Signature:
     shape: tuple[int, ...]
     # Element type of the result.
     dtype: np.dtype
+    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION or VIEW.
+    kind: str
 
 
 def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
@@ -79,7 +81,7 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
     except Exception:
         _let_numpy_raise(operation, args, kwargs)
         return None  # NumPy accepts what the rule refused: the rule is wrong, so do not defer.
-    return Signature(shape, _element_type(kind, operation, args, kwargs))
+    return Signature(shape, _element_type(kind, operation, args, kwargs), kind)
 
 
 def is_basic_index(index: Any) -> bool:

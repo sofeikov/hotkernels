@@ -31,12 +31,33 @@ Try it from the repository's root with `uv run python`.
 | [array.py](array.py) | `LazyArray`: operators, NumPy's two protocols, the refusals, `gather()` |
 | [namespace.py](namespace.py) | The stand-in for the `numpy` module |
 | [explain.py](explain.py) | The text of a pending graph |
-| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests |
+| [record.py](record.py) | The graph as an object, and the mode that records the graphs a block of code produced |
+| [view.py](view.py), [templates/](templates) | The page that draws recorded graphs: `graph.html.j2`, `graph.js`, `graph.css` |
+| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; and `pages.py`, which writes the page of all three |
+
+## Looking at its graphs
+
+```bash
+uv run python -m prototypes.lazy.programs.pages --out lazy-graphs.html --show
+```
+
+Runs the three example programs in one recorded block and opens the page of their graphs. The page loads its layout library from a CDN, so it needs a network connection. In your own code:
+
+```python
+from prototypes.lazy import get_lazy, record_graphs
+
+np = get_lazy()
+with record_graphs() as recording:
+    ...                       # NumPy code on lazy arrays
+recording.show()              # or recording.save("graphs.html"), recording.to_json()
+```
+
+The design of the two is in [docs/lazy-recording-design.md](../../docs/lazy-recording-design.md) and [docs/lazy-graph-page-design.md](../../docs/lazy-graph-page-design.md).
 
 ## Testing it
 
 ```bash
-uv run --group dev pytest tests/test_lazy_prototype.py
+uv run --group dev pytest tests/test_lazy_prototype.py tests/test_lazy_graphs.py
 ```
 
 Each test holds one rule of the design to what the real `numpy` module gives for the same lines.
