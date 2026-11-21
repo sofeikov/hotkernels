@@ -137,6 +137,7 @@ A graph of a loop is too large to read node by node: 954 operations for 50 steps
 | `block` | The whole graph. The root | `the recorded block` |
 | `call` | The operations one call of a function wrote | `softmax()` |
 | `line` | The operations one run of one line wrote, when there are several | The line's text |
+| `lines` | A stretch of a long call: members that follow each other | `lines 71 to 78` |
 | `repeat` | Runs that are alike and follow each other: the steps of a loop | `× 50` |
 | `step` | One of those runs, when it has more than one member | `step 3 of 50` |
 | `rest` | The steps of a long repeat that are not listed singly | `steps 3 to 49` |
@@ -162,6 +163,7 @@ How the tree is found:
 - **One call is told from the next by the frame object.** A loop that calls `step(w)` fifty times makes fifty frames of the same function at the same line. The recording keeps a reference to the frames of the last node made, so the next call cannot be handed the same object, and compares by identity.
 - **A line is a run.** Consecutive operations written on the same line under the same call are one `line` group. A line that calls a function in its middle is two runs with the call between them, in the order things happened.
 - **A repeat is found by comparing signatures.** Each operation has a signature of its name, type, shape and line, and each group one of its members' signatures. Where the same run of members comes three times or more in a row, it is a `repeat`. The longest run looked for is 64 members.
+- **A long call is cut into stretches.** A function of a hundred lines that are not alike has a hundred members and no group large enough to fold. Above 16 members a call's members are put in `lines` groups of 8 that follow each other, and in groups of those when there are still too many.
 - **A long repeat lists its ends.** Above 12 steps it lists the first two and the last, and holds the others in a `rest` group, itself split into groups of 50 when there are more, so that unfolding one never puts thousands of boxes on the page.
 
 The tree is best effort, and it cannot lose anything: the nodes are all in `nodes` whatever the tree says. A wrong grouping costs a reader a click.
@@ -177,12 +179,12 @@ The tree is best effort, and it cannot lose anything: the nodes are all in `node
 
 ## What was verified
 
-On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 12 tests:
+On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev pytest tests/test_lazy_graphs.py` runs 13 tests:
 
 - **One graph per computation:** a gather, a call made at once, a write and what is left pending give four graphs in order, each with its trigger, its line and the text of the line.
 - **A value needed without `gather()`:** a `float()` is a graph of the two operations it needed; an array handed to `np.asarray` is a graph of everything that was pending.
 - **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray` and the result of a call made at once; and `earlier` with the graph's index.
-- **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a generator expression as a line of its function.
+- **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a call of twenty lines as three stretches; a generator expression as a line of its function.
 - **Alike:** a loop that gathers at each step gives one graph per step with one signature from the second on.
 - **No result changes,** and after the block the recording holds no frame.
 - **A failure** is in its graph with the state `failed`.
@@ -204,7 +206,7 @@ Not measured: what recording costs in time. No speed is claimed anywhere in this
 
 - **What one recorded graph is.** Proposed: one per computation. The other reading is the connected pieces of everything the block wrote. Both can be had from the same records; the question is which the page opens on.
 - **A whole script without editing it.** An environment variable that records from start to end and writes the page on exit would need no `with`. It can be added beside the block.
-- **The constants.** Fold above 5 operations, a repeat from 3 runs, a run of at most 64 members, 12 steps listed. They were chosen by looking at three programs.
+- **The constants.** Fold above 5 operations, a repeat from 3 runs, a run of at most 64 members, 12 steps listed, a call cut into stretches above 16 members. They were chosen by looking at three programs.
 - **The names** `x.graph()` and `hotkernels.record_graphs()`.
 - **Whether `explain()` should be the text form of this object.** Today it walks the live nodes on its own.
 

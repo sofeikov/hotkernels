@@ -51,6 +51,10 @@ SHOWN_STEPS, HEAD_STEPS, TAIL_STEPS = 12, 2, 1
 # The most members a group of left-out steps holds; beyond it, it is split
 # into groups of groups, so that unfolding one never shows thousands of nodes.
 REST_BLOCK = 50
+# A call that wrote more members than MOST_MEMBERS, a function of a hundred
+# lines for instance, has them cut into blocks of BLOCK_MEMBERS that follow
+# each other, so that it does not open as a hundred boxes at once.
+MOST_MEMBERS, BLOCK_MEMBERS = 16, 8
 # Longest text of one argument kept in a record, in characters.
 ARGUMENT_LENGTH = 60
 # Characters of a digest kept as a signature. Twelve hex digits: 48 bits.
@@ -70,7 +74,7 @@ ARRAY = "array"
 # The states of a node in a graph.
 PENDING, COMPUTED, FAILED = "pending", "computed", "failed"
 # The kinds of group.
-BLOCK, CALL, LINE, REPEAT, STEP, REST = "block", "call", "line", "repeat", "step", "rest"
+BLOCK, CALL, LINE, LINES, REPEAT, STEP, REST = "block", "call", "line", "lines", "repeat", "step", "rest"
 # What the root group of a recorded graph and of `x.graph()` is called.
 BLOCK_LABEL, PENDING_LABEL = "the recorded block", "pending under this array"
 # The index of a graph that is not part of a recording.
@@ -146,7 +150,8 @@ class Group:
     """Some operations of a graph that belong together, for a reader and for folding."""
 
     # BLOCK for the whole graph; CALL for one call of a function; LINE for the
-    # operations one run of one line wrote; REPEAT for runs that are alike and
+    # operations one run of one line wrote; LINES for a stretch of a long call,
+    # several lines that follow each other; REPEAT for runs that are alike and
     # follow each other, the steps of a loop; STEP for one of them; REST for
     # the steps of a long repeat that are not listed singly.
     kind: str
@@ -883,7 +888,33 @@ class _Tree:
                     continue
                 label = code if len(code) <= LABEL_LENGTH else code[:LABEL_LENGTH - 1] + "…"
                 members.append(self.group(LINE, label or f"{file}:{line}", inner, file, (line, line), code))
-        return self._repeats(members)
+        return self._stretches(self._repeats(members))
+
+    def _stretches(self, members: list[Group | int]) -> list[Group | int]:
+        """Cut a long list of members into LINES groups of members that follow each other.
+
+        Args:
+            members: The members of one call, in order.
+
+        Returns:
+            The members as they are when there are at most MOST_MEMBERS.
+            Otherwise blocks of BLOCK_MEMBERS, and blocks of blocks when that
+            is still too many, each named by the lines it covers.
+        """
+        if len(members) <= MOST_MEMBERS:
+            return members
+        size = BLOCK_MEMBERS
+        while len(members) > size * MOST_MEMBERS:
+            size *= BLOCK_MEMBERS
+        stretches: list[Group | int] = []
+        for start in range(0, len(members), size):
+            stretch = members[start:start + size]
+            if len(stretch) == 1:
+                stretches.append(stretch[0])
+                continue
+            file, lines = self._span(stretch)
+            stretches.append(self.group(LINES, f"lines {lines[0]} to {lines[1]}", self._stretches(stretch), file, lines))
+        return stretches
 
     def _repeats(self, members: list[Group | int]) -> list[Group | int]:
         """Replace runs of members that are alike and follow each other by REPEAT groups.
