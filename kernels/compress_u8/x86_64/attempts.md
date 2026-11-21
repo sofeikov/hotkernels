@@ -90,7 +90,7 @@ No stall: the write position falls behind the read position as elements are drop
 What holds it at each size:
 
 - **16:** the call and the scalar loop of the last 1 to 7 elements, as for `compress_f32`.
-- **64 to 4,194,304:** the instruction count, 0.04 ns per element. Unlike `compress_f32`, the output and the input are a quarter as many bytes per element, so the cache-line traffic of the output does not hold it before memory does.
+- **64 to 4,194,304:** the instruction count, 0.04 ns per element from 256 up (0.05 at 64). Unlike `compress_f32`, the output and the input are a quarter as many bytes per element, so the cache-line traffic of the output does not hold it before memory does.
 - **16,777,216:** memory. 1.23 ms for 16 MB of data and 16 MB of mask with half selected, 2.7x over the naive C.
 
 The candidates the design lists for this family (`docs/x86-64-design.md`), where they differ from `compress_f32`:

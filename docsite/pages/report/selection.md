@@ -44,7 +44,7 @@ On data without a NaN the kernel's speed does not depend on the data at all: asc
 
 ## Boolean masks without a branch
 
-`x[mask]` is the largest gap the survey found that a compiler does not close. Three kernels share the technique: `compress` for float32 and float64, and `nonzero`, which emits the indices instead of the elements.
+`x[mask]` is the largest gap the survey found that a compiler does not close. Three kernels share the technique: `compress` for float32 and float64, and `nonzero`, which emits the indices instead of the elements. Two siblings for 8- and 16-bit elements, `compress_u8` and `compress_i16`, were added later for x86-64, where a byte shuffle compacts eight elements ([kernel-findings](https://github.com/sofeikov/hotkernels/blob/main/docs/kernel-findings.md#xmask-on-8--and-16-bit-elements)); on ARM64 they are the compiled C.
 
 **Step one: no branch.** As [chapter 1]([[ root ]]report/numpy/#the-mask-surprise) showed, most of the cost of the obvious loop is a mispredicted branch per element. The fix is to store every element at the current output position and advance the position by the mask value. An unselected element is simply overwritten by the next store. That loop is the *baseline* here: it is the naive C these kernels have to beat.
 
