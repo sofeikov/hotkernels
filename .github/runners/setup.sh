@@ -7,7 +7,9 @@
 #   .github/runners/setup.sh remove    remove every runner this script installed
 #
 # A runner takes one job at a time, so COUNT is how many jobs run at once.
-# Running it again is safe: an installed runner is registered afresh.
+# Running it again is safe: a runner already installed is left as it is, and
+# started if it is not running, so a larger COUNT adds runners. To reinstall
+# one, remove them all first.
 #
 # Before the first run, create the account the runners run as: a standard,
 # non-admin user, so that a job cannot change the machine.
@@ -47,13 +49,25 @@ install_runner() {
     plist="/Library/LaunchDaemons/${service}.plist"
     archive="actions-runner-osx-arm64-${version}.tar.gz"
     url="https://github.com/actions/runner/releases/download/v${version}/${archive}"
-    # Valid for one hour.
-    token="$(gh api -X POST "repos/${REPO}/actions/runners/registration-token" --jq .token)"
 
     echo "Runner ${number}: ${dir}"
-    # Stop a running copy before its files are replaced.
-    sudo launchctl bootout "system/${service}" 2>/dev/null || true
-    sudo -u "${RUNNER_USER}" -H bash -euo pipefail <<INNER
+    # A runner that is configured and running is not touched: stopping it would
+    # kill the job it is running.
+    if sudo test -e "${dir}/.runner" && sudo launchctl print "system/${service}" >/dev/null 2>&1; then
+        echo "  already installed and running"
+        return
+    fi
+    # config.sh writes .runner when it configures a directory, and refuses to
+    # configure that directory again, whatever --replace says (that flag only
+    # replaces a registration of the same name on GitHub). A configured runner
+    # that is not running only needs its service.
+    if ! sudo test -e "${dir}/.runner"; then
+        # A service left loaded on an unconfigured directory runs nothing
+        # useful; stop it so the bootstrap below can load it afresh.
+        sudo launchctl bootout "system/${service}" 2>/dev/null || true
+        # Valid for one hour.
+        token="$(gh api -X POST "repos/${REPO}/actions/runners/registration-token" --jq .token)"
+        sudo -u "${RUNNER_USER}" -H bash -euo pipefail <<INNER
 mkdir -p "${dir}"
 cd "${dir}"
 if [ ! -x ./config.sh ]; then
@@ -65,6 +79,7 @@ fi
     --url "https://github.com/${REPO}" --token "${token}" \
     --name "\$(hostname -s)${tail}" --labels "${LABEL}"
 INNER
+    fi
 
     sudo tee "${plist}" >/dev/null <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

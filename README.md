@@ -318,6 +318,7 @@ To set the runners up on a Mac with Apple Silicon:
 ```bash
 sudo sysadminctl -addUser ci-runner -fullName "CI Runner" -password -   # once: a standard account for the jobs
 .github/runners/setup.sh 4        # install four runners, so four jobs run at once
+.github/runners/setup.sh 6        # run again with a larger count to add runners; installed ones are left running
 .github/runners/setup.sh remove   # remove them again
 ```
 
