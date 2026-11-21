@@ -59,9 +59,18 @@ TIMED_COLUMNS = 4
 # Columns of the timed boolean matrices of any(axis=1): the width its kernel
 # was timed for by the judge.
 ANY_COLUMNS = 22
+# Columns of the timed boolean matrices of any(axis=0): the width of the
+# masks its kernel was asked for.
+ANY_COLS_COLUMNS = 31
+# Rows of the boolean matrices of the workload np.nonzero on a matrix was
+# asked for: 30 to 50 rows of ANY_COLUMNS columns.
+NONZERO_ROWS = 40
 # Share of a mask that is True in the two mask distributions.
 HALF = 0.5
 FEW = 0.05
+# Ends (exclusive) of the values of timed uint8 and bool data.
+UINT8_END = 256
+BOOL_END = 2
 # Share of a condition that is True in the timed np.where with a scalar.
 MOSTLY = 0.95
 # Bounds, bin count and range used by the timed clip and histogram calls.
@@ -96,6 +105,9 @@ ROUND_F64_MAX_N = 4096
 # Decimals of the timed np.round: the commonest in the program the second
 # shortlist came from.
 DECIMALS = 2
+# The element count a statement on one number is timed at: it takes one
+# number whatever the count, and is shown at 1.
+ONE_NUMBER = (1,)
 # Most rows of the timed matrices accumulated along their first axis: about a
 # year of trading days, as in empyrical's rolling windows. A matrix of n
 # elements has min(ROWS_WINDOW, isqrt(n)) rows: 4 x 4, 64 x 64 and 256 x 4,096.
@@ -140,6 +152,9 @@ class Timed:
     # no limit. The loops built into the binding for short arrays have one;
     # above it the statement is measured as one left to NumPy.
     max_n: int | None = None
+    # Element counts to time the statement at, when they are not SIZES: for a
+    # shape that a workload has and the usual sizes do not.
+    sizes: tuple[int, ...] | None = None
 
     def kernel_at(self, n: int) -> str | None:
         """Return the kernel that takes the call at `n` elements, or None."""
@@ -185,6 +200,19 @@ def _rng(n: int) -> np.random.Generator:
 def _floats(dtype: type, n: int) -> tuple:
     """Build normally distributed floats."""
     return (_rng(n).standard_normal(n).astype(dtype),)
+
+
+def _one_float(build: Callable[[float], object], n: int) -> tuple:
+    """Build one float64 number, as np.round on a single value receives it.
+
+    Args:
+        build: Makes the number from a Python float: np.float64 or np.array.
+        n: Ignored; the statement takes one number. Timed at ONE_NUMBER only.
+
+    Returns:
+        (the number,).
+    """
+    return (build(_rng(ONE_NUMBER[0]).standard_normal()),)
 
 
 def _ints(dtype: type, n: int) -> tuple:
@@ -274,6 +302,22 @@ def _masked(dtype: type, share: float, n: int) -> tuple:
     return (rng.standard_normal(n).astype(dtype), rng.random(n) < share)
 
 
+def _masked_bytes(dtype: type, share: float, n: int) -> tuple:
+    """Build uint8 or bool data, every value of the type equally likely, and a mask that selects `share` of it.
+
+    Args:
+        dtype: np.uint8 or np.bool_.
+        share: Probability that a mask element is True, from 0 to 1.
+        n: Element count.
+
+    Returns:
+        (x, mask).
+    """
+    rng = _rng(n)
+    end = BOOL_END if dtype is np.bool_ else UINT8_END
+    return (rng.integers(0, end, n).astype(dtype), rng.random(n) < share)
+
+
 def _masked_rows(dtype: type, share: float, n: int) -> tuple:
     """Build two-dimensional data of TIMED_COLUMNS columns and a mask of its shape that selects `share` of it."""
     x, mask = _masked(dtype, share, n)
@@ -286,25 +330,41 @@ def _selected(dtype: type, share: float, n: int) -> tuple:
     return (rng.random(n) < share, rng.standard_normal(n).astype(dtype), rng.standard_normal(n).astype(dtype))
 
 
+def _fortran_matrix(share: float, n: int) -> tuple:
+    """Build the matrix of `_matrix` in Fortran order, which the binding leaves to NumPy.
+
+    Args:
+        share: Probability that an element is True, from 0 to 1.
+        n: Element count asked for, as for `_matrix`, but at least two
+            rows: a matrix of one row is in C order as well.
+
+    Returns:
+        (matrix,).
+    """
+    (m,) = _matrix(share, max(n, 2 * ANY_COLUMNS))
+    return (np.asfortranarray(m),)
+
+
 def _mask(share: float, n: int) -> tuple:
     """Build a mask that is True for `share` of its elements."""
     return (_rng(n).random(n) < share,)
 
 
-def _matrix(share: float, n: int) -> tuple:
-    """Build a boolean matrix of ANY_COLUMNS columns that is True for `share` of its elements.
+def _matrix(share: float, n: int, columns: int = ANY_COLUMNS) -> tuple:
+    """Build a boolean matrix of `columns` columns that is True for `share` of its elements.
 
     Args:
         share: Probability that an element is True, from 0 to 1.
-        n: Element count asked for. The matrix has `n // ANY_COLUMNS` rows,
-            and one when that is none, so it holds about `n` elements, and
-            ANY_COLUMNS at the smallest size.
+        n: Element count asked for. The matrix has `n // columns` rows, and
+            one when that is none, so it holds about `n` elements, and
+            `columns` at the smallest size.
+        columns: Elements per row, at least 1.
 
     Returns:
         (matrix,), C-ordered.
     """
-    rows = max(n // ANY_COLUMNS, 1)
-    return (_rng(n).random((rows, ANY_COLUMNS)) < share,)
+    rows = max(n // columns, 1)
+    return (_rng(n).random((rows, columns)) < share,)
 
 
 def _window(n: int, center: float = 0.0, spread: float = 1.0) -> tuple:
@@ -323,9 +383,17 @@ def _window(n: int, center: float = 0.0, spread: float = 1.0) -> tuple:
     return (center + spread * _rng(n).standard_normal((rows, n // rows)),)
 
 
-def _narrow_ints(n: int) -> tuple:
-    """Build int64 values close together, where isin's test values match often."""
-    return (_rng(n).integers(0, ISIN_SPAN, n),)
+def _narrow_ints(n: int, dtype: type = np.int64) -> tuple:
+    """Build integers close together, where isin's test values match often.
+
+    Args:
+        n: Element count.
+        dtype: Element type, np.int64 or np.int32.
+
+    Returns:
+        (x,), `n` values of `dtype` from 0 to ISIN_SPAN - 1.
+    """
+    return (_rng(n).integers(0, ISIN_SPAN, n).astype(dtype),)
 
 
 def _search(table: int | None, n: int) -> tuple:
@@ -340,6 +408,20 @@ def _search(table: int | None, n: int) -> tuple:
     """
     rng = _rng(n)
     return (np.sort(rng.standard_normal(table or n)), rng.standard_normal(n))
+
+
+def _search_f32_needles(table: int | None, n: int) -> tuple:
+    """Build a sorted float64 array and `n` float32 needles for `np.searchsorted`.
+
+    Args:
+        table: Length of the sorted array, or None for as many elements as needles.
+        n: Number of needles.
+
+    Returns:
+        (sorted float64 array, float32 needles).
+    """
+    a, v = _search(table, n)
+    return (a, v.astype(np.float32))
 
 
 def _int_search(table: int | None, n: int) -> tuple:
@@ -388,19 +470,6 @@ def _int_search_int32_needles(n: int) -> tuple:
     return (table, _rng(n).integers(info.min, info.max, n, dtype=np.int32, endpoint=True))
 
 
-def _search_float32_needles(n: int) -> tuple:
-    """Build a sorted float64 array and `n` float32 needles, which no search kernel takes.
-
-    Args:
-        n: Number of elements, and of needles.
-
-    Returns:
-        (sorted float64 array, float32 needles).
-    """
-    table, needles = _search(None, n)
-    return (table, needles.astype(np.float32))
-
-
 def _search_right(a: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Call `np.searchsorted(a, v, side='right')`.
 
@@ -442,7 +511,7 @@ def _interp(points: int | None, n: int) -> tuple:
     return (rng.standard_normal(n), np.sort(rng.standard_normal(count)), rng.standard_normal(count))
 
 
-def _assign(value: float, x: np.ndarray, mask: np.ndarray) -> None:
+def _assign(value: object, x: np.ndarray, mask: np.ndarray) -> None:
     """Run `x[mask] = value`. Running it twice changes nothing more."""
     x[mask] = value
 
@@ -548,6 +617,10 @@ TAKEN: tuple[Timed, ...] = (
           max_n=ROUND_F64_MAX_N),
     Timed("round", "np.round(x)", "float64", partial(_floats, np.float64), np.round, "round_f64",
           max_n=ROUND_F64_MAX_N),
+    Timed("round", "np.around(x, 1)", "one np.float64", partial(_one_float, np.float64), lambda x: np.around(x, 1),
+          "round_f64", sizes=ONE_NUMBER),
+    Timed("round", "np.around(x, 1)", "zero-dimensional float64", partial(_one_float, np.array), lambda x: np.around(x, 1),
+          "round_f64", sizes=ONE_NUMBER),
     Timed("inplace", "w -= b", "float64", _two_floats, _subtract_in_place, SUBTRACT_IN_PLACE,
           min_n=INPLACE_MIN_N),
     Timed("inplace", "w += b", "float64", _two_floats, _add_in_place, ADD_IN_PLACE, min_n=INPLACE_MIN_N),
@@ -556,7 +629,18 @@ TAKEN: tuple[Timed, ...] = (
     Timed("compress", "x[mask]", "float64, half selected", partial(_masked, np.float64, HALF), lambda x, m: x[m], "compress_f64"),
     Timed("compress", "x[mask]", "float64, few selected", partial(_masked, np.float64, FEW), lambda x, m: x[m], "compress_f64"),
     Timed("compress", "x[mask]", "int64, half selected", partial(_masked, np.int64, HALF), lambda x, m: x[m], "compress_f64"),
+    Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], "compress_f32"),
+    Timed("compress", "x[mask]", "int32, few selected", partial(_masked, np.int32, FEW), lambda x, m: x[m], "compress_f32"),
+    Timed("compress", "x[mask]", "uint8, half selected", partial(_masked_bytes, np.uint8, HALF), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "uint8, few selected", partial(_masked_bytes, np.uint8, FEW), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "bool, half selected", partial(_masked_bytes, np.bool_, HALF), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "int16, half selected", partial(_masked, np.int16, HALF), lambda x, m: x[m], "compress_i16"),
+    Timed("compress", "x[mask]", "int16, few selected", partial(_masked, np.int16, FEW), lambda x, m: x[m], "compress_i16"),
     Timed("maskfill", "x[mask] = 0.0", "float64, half selected", partial(_masked, np.float64, HALF), partial(_assign, 0.0), "maskfill_f64"),
+    Timed("maskfill", "x[mask] = 0.0", "float32, half selected", partial(_masked, np.float32, HALF), partial(_assign, 0.0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0.0", "float32, few selected", partial(_masked, np.float32, FEW), partial(_assign, 0.0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0", "int32, half selected", partial(_masked, np.int32, HALF), partial(_assign, 0), "maskfill_f32"),
+    Timed("maskfill", "x[mask] = 0", "int64, half selected", partial(_masked, np.int64, HALF), partial(_assign, 0), "maskfill_f64"),
     Timed("compress", "np.compress(mask, x)", "float64, half selected", partial(_masked, np.float64, HALF), _compress, "compress_f64"),
     Timed("compress", "np.extract(mask, x)", "float64, half selected", partial(_masked, np.float64, HALF), _extract, "compress_f64"),
     Timed("maskfill", "x[mask] = 0.0", "float64, few selected", partial(_masked, np.float64, FEW), partial(_assign, 0.0), "maskfill_f64"),
@@ -567,6 +651,16 @@ TAKEN: tuple[Timed, ...] = (
     Timed("nonzero", "np.nonzero(mask)", "bool, half selected", partial(_mask, HALF), np.nonzero, "nonzero_bool"),
     Timed("nonzero", "np.nonzero(mask)", "bool, few selected", partial(_mask, FEW), np.nonzero, "nonzero_bool"),
     Timed("nonzero", "np.where(mask)", "bool, half selected", partial(_mask, HALF), np.where, "nonzero_bool"),
+    *(Timed("nonzero", "np.nonzero(m)", f"bool, {ANY_COLUMNS} columns, {name}", partial(_matrix, share), np.nonzero,
+            "nonzero_2d_bool", sizes=sizes)
+      for sizes in ((NONZERO_ROWS * ANY_COLUMNS,), None)
+      for name, share in (("few True", FEW), ("half True", HALF))),
+    Timed("nonzero", "m.nonzero()", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW),
+          lambda m: m.nonzero(), "nonzero_2d_bool"),
+    Timed("nonzero", "np.where(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.where,
+          "nonzero_2d_bool"),
+    Timed("nonzero", "np.argwhere(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.argwhere,
+          "nonzero_2d_bool"),
     Timed("where", "np.where(mask, a, b)", "float64, half true", partial(_selected, np.float64, HALF), np.where, "where_f64"),
     Timed("where", "np.where(mask, a, np.nan)", "float64, mostly true", partial(_selected, np.float64, MOSTLY),
           lambda m, a, b: np.where(m, a, np.nan), "where_f64"),
@@ -588,6 +682,10 @@ TAKEN: tuple[Timed, ...] = (
           lambda m: m.any(axis=1), "any_rows_bool"),
     Timed("any", "np.any(m, axis=1)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW),
           lambda m: np.any(m, axis=1), "any_rows_bool"),
+    Timed("any", "m.any(axis=0)", f"bool, {ANY_COLS_COLUMNS} columns, few True",
+          partial(_matrix, FEW, columns=ANY_COLS_COLUMNS), lambda m: m.any(axis=0), "any_cols_bool"),
+    Timed("any", "np.any(m, axis=0)", f"bool, {ANY_COLS_COLUMNS} columns, few True",
+          partial(_matrix, FEW, columns=ANY_COLS_COLUMNS), lambda m: np.any(m, axis=0), "any_cols_bool"),
     Timed("cumsum", "np.cumsum(x)", "float32", partial(_floats, np.float32), np.cumsum, "cumsum_f32", inexact=True),
     Timed("cumsum", "np.cumsum(x)", "float64", partial(_floats, np.float64), np.cumsum, "cumsum_f64", inexact=True),
     Timed("astype", "x.astype(np.float32)", "uint8", _bytes, lambda x: x.astype(np.float32), "cast_u8_f32"),
@@ -595,6 +693,10 @@ TAKEN: tuple[Timed, ...] = (
     Timed("sum", "x.sum()", "uint8", _bytes, lambda x: x.sum(), "sum_u8"),
     Timed("sum", "np.sum(mask)", "bool, half selected", partial(_mask, HALF), np.sum, "sum_u8"),
     Timed("sum", "mask.sum()", "bool, half selected", partial(_mask, HALF), lambda m: m.sum(), "sum_u8"),
+    Timed("sum", "np.sum(x)", "float32", partial(_floats, np.float32), np.sum, "sum_f32"),
+    Timed("sum", "x.sum()", "float32", partial(_floats, np.float32), lambda x: x.sum(), "sum_f32"),
+    Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, "sum_f64"),
+    Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), "sum_f64"),
     Timed("count_nonzero", "np.count_nonzero(x)", "int64", partial(_ints, np.int64), np.count_nonzero, "count_nonzero_i64"),
     Timed("count_nonzero", "np.count_nonzero(x)", "float64", partial(_ints, np.float64), np.count_nonzero, "count_nonzero_f64"),
     Timed("histogram", "np.histogram(x, 50, (-3.0, 3.0))", "float64", partial(_floats, np.float64), lambda x: np.histogram(x, BINS, RANGE), "histogram_f64"),
@@ -606,11 +708,17 @@ TAKEN: tuple[Timed, ...] = (
     *(Timed("unique", "np.unique(x)", f"int64, {classes} values", partial(_labels, classes), np.unique, "unique_i64")
       for classes in UNIQUE_LABELS),
     Timed("isin", "np.isin(x, eight_values)", "int64, values close together", _narrow_ints, lambda x: np.isin(x, ISIN_TEST), "isin_i64"),
+    Timed("isin", "np.isin(x, eight_values)", "int32, values close together", partial(_narrow_ints, dtype=np.int32),
+          lambda x: np.isin(x, ISIN_TEST), "isin_i32"),
     Timed("searchsorted", "np.searchsorted(a, v)", "float64, as many needles as elements", partial(_search, None), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, v)", "float64, 1,000 elements", partial(_search, SMALL_TABLE), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, v, side='right')", "float64, as many needles as elements", partial(_search, None), _search_right, "searchsorted_right_f64"),
     Timed("searchsorted", "np.searchsorted(a, v, side='right')", "float64, 1,000 elements", partial(_search, SMALL_TABLE), _search_right, "searchsorted_right_f64"),
     Timed("searchsorted", "np.digitize(x, bins)", "float64, 1,000 bin edges", partial(_search, SMALL_TABLE), _digitize, "searchsorted_right_f64"),
+    Timed("searchsorted", "np.searchsorted(a, v)", "float64, float32 needles, as many needles as elements",
+          partial(_search_f32_needles, None), np.searchsorted, "searchsorted_f64"),
+    Timed("searchsorted", "np.searchsorted(a, v)", "float64, float32 needles, 1,000 elements",
+          partial(_search_f32_needles, SMALL_TABLE), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, f)", "int64, one np.int64 needle", _int_search_one, np.searchsorted, "searchsorted_i64"),
     Timed("searchsorted", "np.searchsorted(a, f, side='right')", "int64, one np.int64 needle", _int_search_one, _search_right, "searchsorted_right_i64"),
     Timed("searchsorted", "np.searchsorted(a, v)", "int64, as many needles as elements", partial(_int_search, None), np.searchsorted, "searchsorted_i64"),
@@ -651,31 +759,33 @@ LEFT: tuple[Timed, ...] = (
     Timed("inplace", "w -= b", "float32", lambda n: tuple(a.astype(np.float32) for a in _two_floats(n)),
           _subtract_in_place, None),
     Timed("astype", "x.astype(np.float64)", "uint8", _bytes, lambda x: x.astype(np.float64), None),
-    Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, None),
-    Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), None),
+    Timed("sum", "np.sum(x)", "int64", partial(_ints, np.int64), np.sum, None),
+    Timed("sum", "np.sum(x[::2])", "float32, strided", partial(_floats, np.float32), lambda x: np.sum(x[::2]), None),
     Timed("count_nonzero", "np.count_nonzero(x)", "int32", partial(_ints, np.int32), np.count_nonzero, None),
     Timed("cumsum", "np.cumsum(x)", "float64, exact kernels only", partial(_floats, np.float64), np.cumsum, None),
     Timed("accumulate", "np.add.accumulate(x)", "int64", partial(_ints, np.int64), np.add.accumulate, None),
     Timed("accumulate", "np.maximum.accumulate(x)", "float64", partial(_floats, np.float64), np.maximum.accumulate,
           None),
     Timed("any", "m.any()", "bool, one-dimensional", partial(_mask, HALF), lambda m: m.any(), None),
-    Timed("any", "m.any(axis=0)", f"bool, {ANY_COLUMNS} columns", partial(_matrix, FEW), lambda m: m.any(axis=0),
-          None),
+    Timed("any", "m.any(axis=0, keepdims=True)", f"bool, {ANY_COLUMNS} columns", partial(_matrix, FEW),
+          lambda m: m.any(axis=0, keepdims=True), None),
     Timed("reduceat", "np.add.reduceat(x, starts)", f"float64, runs of {REDUCEAT_RUN}",
           partial(_runs, nan=0.0), np.add.reduceat, None),
     Timed("histogram", "np.histogram(x, 50, (-3.0, 3.0), density=False)", "float64", partial(_floats, np.float64), lambda x: np.histogram(x, BINS, RANGE, density=False), None),
     Timed("bincount", "np.bincount(x)", "int32", partial(_ints, np.int32), np.bincount, None),
     Timed("unique", "np.unique(x)", "int64, wide range", partial(_labels, UNIQUE_WIDE), np.unique, None),
     Timed("isin", "np.isin(x, nine_values)", "int64", _narrow_ints, lambda x: np.isin(x, ISIN_TEST + [3]), None),
-    Timed("searchsorted", "np.searchsorted(a, v)", "float64 array, float32 needles", _search_float32_needles, np.searchsorted, None),
     Timed("searchsorted", "np.searchsorted(a, v)", "int64 array, int32 needles", _int_search_int32_needles, np.searchsorted, None),
     Timed("interp", "np.interp(x, xp, fp, left=0.0)", "float64", partial(_interp, None), lambda x, xp, fp: np.interp(x, xp, fp, left=0.0), None),
     Timed("nonzero", "x.nonzero()", "int64", partial(_ints, np.int64), lambda x: x.nonzero(), None),
+    Timed("nonzero", "np.nonzero(m)", f"bool, {ANY_COLUMNS} columns, Fortran order", partial(_fortran_matrix, FEW),
+          np.nonzero, None),
     Timed("compress", "x[3]", "float64", partial(_floats, np.float64), lambda x: x[3], None),
     Timed("compress", "x[1:5]", "float64", partial(_floats, np.float64), lambda x: x[1:5], None),
-    Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], None),
+    Timed("compress", "x[mask]", "float16, half selected", partial(_masked, np.float16, HALF), lambda x, m: x[m], None),
     Timed("maskfill", "x[3] = 1.0", "float64", partial(_floats, np.float64), _set_element, None),
-    Timed("maskfill", "x[mask] = 0.0", "float32, half selected", partial(_masked, np.float32, HALF), partial(_assign, 0.0), None),
+    Timed("maskfill", "x[mask] = 0.0", "float32, value an np.float64", partial(_masked, np.float32, HALF),
+          partial(_assign, np.float64(0.0)), None),
     Timed("maskfill", "np.copyto(x, 0.0)", "float64", partial(_floats, np.float64), lambda x: np.copyto(x, 0.0), None),
     Timed("where", "np.where(mask, 1.0, 0.0)", "bool, half selected", partial(_mask, HALF), lambda m: np.where(m, 1.0, 0.0), None),
     Timed("where", "np.where(mask, a, b)", "float32, half true", partial(_selected, np.float32, HALF), np.where, None),
@@ -760,7 +870,7 @@ def measure(entry: Timed, n: int) -> Measurement:
 
 def run(entries: Iterable[Timed], sizes: tuple[int, ...] = SIZES) -> list[Measurement]:
     """Time every entry at every size."""
-    return [measure(entry, n) for entry in entries for n in sizes]
+    return [measure(entry, n) for entry in entries for n in (entry.sizes or sizes)]
 
 
 def _output_of(command: list[str]) -> str:

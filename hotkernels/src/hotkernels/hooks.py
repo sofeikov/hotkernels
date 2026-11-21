@@ -82,8 +82,10 @@ PROBE_BINS = 4
 PROBE_RANGE = (0.0, 4.0)
 # Byte value the bincount, sum and astype probes fill their array with.
 PROBE_BYTE = 7
-# Value the masked-assignment probe writes.
+# Value the masked-assignment probe writes into a float array.
 PROBE_FILL = 2.5
+# Value the masked-assignment probe writes into an integer array.
+PROBE_INT_FILL = 7
 
 # Length of the runs the reduceat probe cuts its array into: the length the
 # kernel was timed for.
@@ -93,9 +95,13 @@ PROBE_RUN = 16
 # rows the binding gives to the kernels, so its own loop takes them.
 PROBE_ROWS_COLS = 3
 
-# Columns of the matrix the any(axis=1) probes reduce: the width the kernel
-# was timed for. PROBE_N is a whole number of such rows' worth or more.
+# Columns of the matrix the any(axis=1) and any(axis=0) probes reduce: the
+# width the first kernel was timed for. PROBE_N is a whole number of such
+# rows' worth or more.
 PROBE_COLS = 22
+# A byte other than 1 that one True of the any(axis=0) probe is stored as.
+# Its top bit is set, so a kernel that compared bytes as signed fails.
+PROBE_TRUE_BYTE = 0x80
 
 # Number of distinct codes the int16 and int64 bincount probes count: their
 # element i is i modulo it. PROBE_N is not a multiple of it, so the first
@@ -115,6 +121,24 @@ PROBE_FACTOR = 3
 # elements, which a sort that is not stable would put in another order.
 PROBE_SORT_STEP = 617
 PROBE_SORT_TIES = 4
+
+# The float sum probes add the values ((i * PROBE_SORT_STEP) mod
+# PROBE_SUM_N - PROBE_SUM_N // 2) / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET.
+# PROBE_SUM_N is more than one leaf of NumPy's pairwise summation (128
+# elements) and not a multiple of 8, so the sum goes through splits, the
+# leaves' eight running sums and the elements left over. With these values
+# the float32 and the float64 sum in NumPy's order each differ from the sum
+# added one after another, from a tree split at n / 2 not rounded to a
+# multiple of 8, from leaves of 64 or 256 elements, and from leaves whose
+# running sums are added in turn: a kernel that adds in any of those orders
+# fails the probe.
+PROBE_SUM_N = 1003
+PROBE_SUM_DIVISOR = 7
+PROBE_SUM_OFFSET = 0.1
+# Leaves of NumPy's pairwise summation: up to PAIRWISE_LEAF elements, added
+# into PAIRWISE_LANES running sums.
+PAIRWISE_LEAF = 128
+PAIRWISE_LANES = 8
 
 # Element count of the sorted array the search probes look in. It differs
 # from PROBE_N so that a kernel which confused its two lengths would fail.
@@ -337,19 +361,25 @@ def _round_with(round_: Callable[[np.ndarray, int], np.ndarray]) -> bool:
 
     The expected values are computed in plain Python: `round` of a float to
     an int goes to the even neighbour on a tie, as `rint` does, and the
-    products are exact.
+    products are exact. Each value is also rounded alone, as an np.float64
+    and as a zero-dimensional array, both of which give an np.float64.
 
     Args:
         round_: Rounds its first argument to the number of decimals given by
             the second.
 
     Returns:
-        Whether the result is float64 and holds the rounded values.
+        Whether the results are float64 and hold the rounded values.
     """
     scale = 10.0 ** PROBE_DECIMALS
     x = (np.arange(SMALL_PROBE_N) - SMALL_PROBE_N // 2) * PROBE_ROUND_STEP / scale
+    expected = [round(v * scale) / scale for v in x.tolist()]
     result = round_(x, PROBE_DECIMALS)
-    return result.dtype == np.float64 and result.tolist() == [round(v * scale) / scale for v in x.tolist()]
+    if result.dtype != np.float64 or result.tolist() != expected:
+        return False
+    alone = [round_(number, PROBE_DECIMALS) for v in x for number in (v, np.array(v))]
+    return all(type(r) is np.float64 for r in alone) and [float(r) for r in alone[::2]] == expected \
+        and [float(r) for r in alone[1::2]] == expected
 
 
 def _round_method(x: np.ndarray, decimals: int) -> np.ndarray:
@@ -407,35 +437,38 @@ def _compress_function(dtype: type, function: Callable) -> bool:
     return bool(np.array_equal(function(_stride_mask(), x), x[::PROBE_STRIDE]))
 
 
-def _assign(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `x[mask] = PROBE_FILL`."""
-    x[mask] = PROBE_FILL
+def _assign(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `x[mask] = fill`."""
+    x[mask] = fill
 
 
-def _putmask(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `np.putmask(x, mask, PROBE_FILL)`."""
-    np.putmask(x, mask, PROBE_FILL)
+def _putmask(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `np.putmask(x, mask, fill)`."""
+    np.putmask(x, mask, fill)
 
 
-def _copyto(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `np.copyto(x, PROBE_FILL, where=mask)`."""
-    np.copyto(x, PROBE_FILL, where=mask)
+def _copyto(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `np.copyto(x, fill, where=mask)`."""
+    np.copyto(x, fill, where=mask)
 
 
-def _maskfill(assign: Callable[[np.ndarray, np.ndarray], None]) -> bool:
+def _maskfill(assign: Callable[[np.ndarray, np.ndarray, object], None], dtype: type = np.float64,
+              fill: object = PROBE_FILL) -> bool:
     """Probe a masked assignment: `x[mask] = value` or one of its function forms.
 
     Args:
         assign: Sets the elements of its first argument where its second is
-            True to PROBE_FILL, in place.
+            True to its third, in place.
+        dtype: Element type of the probe array.
+        fill: The value written, of a kind the binding takes for `dtype`.
 
     Returns:
         Whether exactly the selected elements were set.
     """
-    x = np.arange(PROBE_N, dtype=np.float64)
+    x = np.arange(PROBE_N).astype(dtype)
     expected = x.copy()
-    expected[::PROBE_STRIDE] = PROBE_FILL
-    assign(x, _stride_mask())
+    expected[::PROBE_STRIDE] = fill
+    assign(x, _stride_mask(), fill)
     return bool(np.array_equal(x, expected))
 
 
@@ -455,6 +488,24 @@ def _nonzero(function: Callable[[np.ndarray], tuple]) -> bool:
     """
     (indices,) = function(_stride_mask())
     return bool(np.array_equal(indices, np.arange(0, PROBE_N, PROBE_STRIDE)))
+
+
+def _nonzero_2d(function: Callable[[np.ndarray], tuple]) -> bool:
+    """Probe `mask.nonzero()` or `np.where(mask)` on a boolean matrix.
+
+    The mask is the stride mask of PROBE_N elements in PROBE_ROWS rows.
+
+    Args:
+        function: Takes the mask and returns NumPy's tuple of index arrays.
+
+    Returns:
+        Whether the two index arrays hold the row and the column of every
+        PROBE_STRIDE-th element.
+    """
+    mask = _stride_mask().reshape(PROBE_ROWS, -1)
+    rows, cols = function(mask)
+    expected_rows, expected_cols = np.divmod(np.arange(0, PROBE_N, PROBE_STRIDE), mask.shape[1])
+    return bool(np.array_equal(rows, expected_rows) and np.array_equal(cols, expected_cols))
 
 
 def _where() -> bool:
@@ -651,6 +702,42 @@ def _any_function(m: np.ndarray) -> np.ndarray:
     return np.any(m, axis=1)
 
 
+def _any_cols(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
+    """Probe an any(axis=0) hook on a boolean matrix of PROBE_COLS columns.
+
+    Every PROBE_STRIDE-th column holds one True, at a row that moves from
+    column to column; the others hold none. The first of them is stored as
+    the byte PROBE_TRUE_BYTE rather than 1, which NumPy takes as True and
+    answers with a 1. A kernel that reduced the wrong elements or along the
+    wrong axis, or that passed such a byte on, fails.
+
+    Args:
+        reduce: Takes the matrix and returns NumPy's `m.any(axis=0)` for it.
+
+    Returns:
+        Whether the result is a one-dimensional boolean array of bytes 0 and
+        1 with True at exactly the columns that hold one.
+    """
+    rows = PROBE_N // PROBE_COLS
+    m = np.zeros((rows, PROBE_COLS), np.bool_)
+    marked = np.arange(0, PROBE_COLS, PROBE_STRIDE)
+    m[(marked * PROBE_STRIDE) % rows, marked] = True
+    m.view(np.uint8)[0, 0] = PROBE_TRUE_BYTE
+    result = reduce(m)
+    return (result.dtype == np.bool_ and bool(result.view(np.uint8).max() == 1)
+            and bool(np.array_equal(result, np.arange(PROBE_COLS) % PROBE_STRIDE == 0)))
+
+
+def _any_cols_method(m: np.ndarray) -> np.ndarray:
+    """Return `m.any(axis=0)`."""
+    return m.any(axis=0)
+
+
+def _any_cols_function(m: np.ndarray) -> np.ndarray:
+    """Return `np.any(m, axis=0)`."""
+    return np.any(m, axis=0)
+
+
 def _astype() -> bool:
     """Probe the method hook: `x.astype(np.float32)` on bytes."""
     result = np.full(PROBE_N, PROBE_BYTE, np.uint8).astype(np.float32)
@@ -665,6 +752,66 @@ def _sum_method() -> bool:
 def _sum_function() -> bool:
     """Probe the function hook: `np.sum(x)` on bytes."""
     return int(np.sum(np.full(PROBE_N, PROBE_BYTE, np.uint8))) == PROBE_N * PROBE_BYTE
+
+
+def _pairwise(values: list) -> np.generic:
+    """Add NumPy scalars in the order of NumPy's pairwise summation, in plain Python.
+
+    The order of `pairwise_sum` in NumPy's `loops_utils.h.src`: fewer than
+    PAIRWISE_LANES values one after another from zero; up to PAIRWISE_LEAF
+    into PAIRWISE_LANES running sums, value i into sum i mod PAIRWISE_LANES,
+    combined in pairs and then the values left over one after another; more
+    split at half the count rounded down to a multiple of PAIRWISE_LANES.
+
+    Args:
+        values: The elements as NumPy scalars of one float type, whose own
+            arithmetic rounds each addition to that type.
+
+    Returns:
+        The sum, a scalar of the same type.
+    """
+    n = len(values)
+    if n < PAIRWISE_LANES:
+        # +0.0 of the values' type: NumPy's sum of negative zeros is +0.0.
+        total = type(values[0])(0) if values else 0
+        for value in values:
+            total = total + value
+        return total
+    if n <= PAIRWISE_LEAF:
+        sums = list(values[:PAIRWISE_LANES])
+        whole = n - n % PAIRWISE_LANES
+        for start in range(PAIRWISE_LANES, whole, PAIRWISE_LANES):
+            sums = [a + b for a, b in zip(sums, values[start:start + PAIRWISE_LANES])]
+        total = ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]))
+        for value in values[whole:]:
+            total = total + value
+        return total
+    half = n // 2
+    half -= half % PAIRWISE_LANES
+    return _pairwise(values[:half]) + _pairwise(values[half:])
+
+
+def _sum_float(dtype: type, call: Callable[[np.ndarray], object]) -> bool:
+    """Probe `np.sum(x)` or `x.sum()` on floats whose sum depends on the order of the additions.
+
+    Args:
+        dtype: np.float32 or np.float64.
+        call: Makes the call on the array.
+
+    Returns:
+        Whether the result is a scalar of `dtype` with the bits of the sum in
+        NumPy's pairwise order, worked out here one addition at a time.
+    """
+    steps = (np.arange(PROBE_SUM_N) * PROBE_SORT_STEP) % PROBE_SUM_N - PROBE_SUM_N // 2
+    x = (steps / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET).astype(dtype)
+    expected = dtype(0) + _pairwise([dtype(value) for value in x.tolist()])
+    result = call(x)
+    return type(result) is dtype and result.tobytes() == expected.tobytes()
+
+
+def _sum_method_of(x: np.ndarray) -> object:
+    """Return `x.sum()`."""
+    return x.sum()
 
 
 def _count_nonzero(dtype: type) -> bool:
@@ -714,31 +861,44 @@ def _unique() -> bool:
     return result.dtype == np.int64 and result.tolist() == [-3, 0, 7]
 
 
-def _isin() -> bool:
-    """Probe the function hook: `np.isin` with two test values."""
-    x = np.arange(PROBE_N, dtype=np.int64)
+def _isin(dtype: type = np.int64) -> bool:
+    """Probe the function hook: `np.isin` with two test values.
+
+    Args:
+        dtype: Element type of the array searched, np.int64 or np.int32.
+
+    Returns:
+        Whether exactly the two elements equal to the test values were found.
+    """
+    x = np.arange(PROBE_N, dtype=dtype)
     result = np.isin(x, [PROBE_INDEX, SMALL_PROBE_INDEX])
     return int(result.sum()) == 2 and bool(result[PROBE_INDEX]) and bool(result[SMALL_PROBE_INDEX])
 
 
 def _searchsorted() -> bool:
-    """Probe the method hook: `np.searchsorted` for needles between whole numbers."""
+    """Probe the method hook: `np.searchsorted` for needles between whole numbers.
+
+    The needles are searched as float64 and as float32, which the float64
+    kernel takes converted.
+    """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N) + 0.5
     expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return bool(np.array_equal(np.searchsorted(table, needles), expected))
+    return all(bool(np.array_equal(np.searchsorted(table, v), expected)) for v in (needles, needles.astype(np.float32)))
 
 
 def _searchsorted_right() -> bool:
     """Probe the method hook: `np.searchsorted` with `side='right'` for needles that are elements.
 
     Every needle equals one element, so the left side's answer is one less at
-    each of them: a call that reached the wrong kernel fails.
+    each of them: a call that reached the wrong kernel fails. The needles are
+    searched as float64 and as float32.
     """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N).astype(np.float64)
     expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return bool(np.array_equal(np.searchsorted(table, needles, side="right"), expected))
+    return all(bool(np.array_equal(np.searchsorted(table, v, side="right"), expected))
+               for v in (needles, needles.astype(np.float32)))
 
 
 def _searchsorted_i64(side: str) -> bool:
@@ -871,27 +1031,45 @@ HOOKS: tuple[Hook, ...] = (
         Probe("count_nonzero_i64", partial(_count_nonzero, np.int64)),
         Probe("count_nonzero_f64", partial(_count_nonzero, np.float64)),
     )),
-    Hook("function.sum", FUNCTION, (Probe("sum_u8", _sum_function),)),
+    Hook("function.sum", FUNCTION, (
+        Probe("sum_u8", _sum_function),
+        Probe("sum_f32", partial(_sum_float, np.float32, np.sum)),
+        Probe("sum_f64", partial(_sum_float, np.float64, np.sum)),
+    )),
     Hook("function.histogram", FUNCTION, (Probe("histogram_f64", _histogram),)),
     Hook("function.bincount", FUNCTION, (
         Probe("bincount_u8", _bincount),
         Probe("bincount_i16", partial(_bincount_codes, np.int16)),
         Probe("bincount_i64", partial(_bincount_codes, np.int64)),
     )),
-    Hook("function.isin", FUNCTION, (Probe("isin_i64", _isin),)),
+    Hook("function.isin", FUNCTION, (
+        Probe("isin_i64", _isin),
+        Probe("isin_i32", partial(_isin, np.int32)),
+    )),
     Hook("function.interp", FUNCTION, (Probe("interp_f64", _interp),)),
     Hook("function.compress", FUNCTION, (
         Probe("compress_f32", partial(_compress_function, np.float32, np.compress)),
         Probe("compress_f64", partial(_compress_function, np.float64, np.compress)),
+        Probe("compress_u8", partial(_compress_function, np.uint8, np.compress)),
+        Probe("compress_i16", partial(_compress_function, np.int16, np.compress)),
     )),
     Hook("function.extract", FUNCTION, (
         Probe("compress_f32", partial(_compress_function, np.float32, np.extract)),
         Probe("compress_f64", partial(_compress_function, np.float64, np.extract)),
+        Probe("compress_u8", partial(_compress_function, np.uint8, np.extract)),
+        Probe("compress_i16", partial(_compress_function, np.int16, np.extract)),
     )),
-    Hook("function.putmask", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _putmask)),)),
-    Hook("function.copyto", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _copyto)),)),
+    Hook("function.putmask", FUNCTION, (
+        Probe("maskfill_f64", partial(_maskfill, _putmask)),
+        Probe("maskfill_f32", partial(_maskfill, _putmask, np.float32)),
+    )),
+    Hook("function.copyto", FUNCTION, (
+        Probe("maskfill_f64", partial(_maskfill, _copyto)),
+        Probe("maskfill_f32", partial(_maskfill, _copyto, np.float32)),
+    )),
     Hook("function.where", FUNCTION, (
         Probe("nonzero_bool", partial(_nonzero, np.where)),
+        Probe("nonzero_2d_bool", partial(_nonzero_2d, np.where)),
         Probe("where_f64", _where),
     )),
     Hook("function.clip", FUNCTION, (
@@ -899,14 +1077,24 @@ HOOKS: tuple[Hook, ...] = (
         Probe("clip_f64", partial(_clip, np.float64)),
         Probe("clip_i64", partial(_clip_i64_with, np.clip)),
     )),
-    Hook("function.any", FUNCTION, (Probe("any_rows_bool", partial(_any_rows, _any_function)),)),
+    Hook("function.any", FUNCTION, (
+        Probe("any_rows_bool", partial(_any_rows, _any_function)),
+        Probe("any_cols_bool", partial(_any_cols, _any_cols_function)),
+    )),
     Hook("function.round", FUNCTION, (Probe("round_f64", partial(_round_with, np.round)),)),
     Hook("function.around", FUNCTION, (Probe("round_f64", partial(_round_with, np.around)),)),
     Hook("function.median", FUNCTION, (Probe("median_f64", _median),)),
     Hook("function.unique", FUNCTION, (Probe("unique_i64", _unique),)),
     Hook("method.astype", METHOD, (Probe("cast_u8_f32", _astype),)),
-    Hook("method.sum", METHOD, (Probe("sum_u8", _sum_method),)),
-    Hook("method.nonzero", METHOD, (Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),)),
+    Hook("method.sum", METHOD, (
+        Probe("sum_u8", _sum_method),
+        Probe("sum_f32", partial(_sum_float, np.float32, _sum_method_of)),
+        Probe("sum_f64", partial(_sum_float, np.float64, _sum_method_of)),
+    )),
+    Hook("method.nonzero", METHOD, (
+        Probe("nonzero_bool", partial(_nonzero, _nonzero_method)),
+        Probe("nonzero_2d_bool", partial(_nonzero_2d, _nonzero_method)),
+    )),
     Hook("method.cumsum", METHOD, (
         Probe("cumsum_i64", partial(_cumsum, np.int64)),
         Probe("cumsum_f32", partial(_cumsum, np.float32), inexact=True),
@@ -947,7 +1135,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("cumfmax_rows_f64", _rows_cumfmax),
     )),
     Hook("ufunc.reduceat", METHOD, (Probe("fmax_reduce_f64", _fmax_reduceat),)),
-    Hook("method.any", METHOD, (Probe("any_rows_bool", partial(_any_rows, _any_method)),)),
+    Hook("method.any", METHOD, (
+        Probe("any_rows_bool", partial(_any_rows, _any_method)),
+        Probe("any_cols_bool", partial(_any_cols, _any_cols_method)),
+    )),
     Hook("method.round", METHOD, (Probe("round_f64", partial(_round_with, _round_method)),)),
     Hook("method.argsort", METHOD, (
         Probe("argsort_f64", partial(_argsort, np.float64)),
@@ -957,8 +1148,21 @@ HOOKS: tuple[Hook, ...] = (
     Hook("index.get", INDEXING, (
         Probe("compress_f32", partial(_compress, np.float32)),
         Probe("compress_f64", partial(_compress, np.float64)),
+        # The kernels move bits, so int32 goes to the float32 one.
+        Probe("compress_f32", partial(_compress, np.int32)),
+        # int8 and bool go to compress_u8, uint16 to compress_i16.
+        Probe("compress_u8", partial(_compress, np.uint8)),
+        Probe("compress_u8", partial(_compress, np.bool_)),
+        Probe("compress_i16", partial(_compress, np.int16)),
     )),
-    Hook("index.set", INDEXING, (Probe("maskfill_f64", partial(_maskfill, _assign)),)),
+    Hook("index.set", INDEXING, (
+        Probe("maskfill_f64", partial(_maskfill, _assign)),
+        Probe("maskfill_f32", partial(_maskfill, _assign, np.float32)),
+        # The kernels move bits: int64 goes to the float64 one, int32 to the
+        # float32 one.
+        Probe("maskfill_f64", partial(_maskfill, _assign, np.int64, PROBE_INT_FILL)),
+        Probe("maskfill_f32", partial(_maskfill, _assign, np.int32, PROBE_INT_FILL)),
+    )),
     # bottleneck's functions, applied only when bottleneck is imported.
     *(Hook(f"bottleneck.{function}", BOTTLENECK,
            (Probe(f"{function}_cols_f64", partial(_bottleneck, function, f"bottleneck.{function}")),),
@@ -992,8 +1196,15 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("clip_i64", "np.clip", "int64", "clip", ("function.clip", "method.clip"), builtin=True),
     KernelInfo("compress_f32", "x[mask]", "float32", "compress", COMPRESS_HOOKS),
     KernelInfo("compress_f64", "x[mask]", "float64", "compress", COMPRESS_HOOKS),
+    # Each also counts the other element types of its width: int8 and bool,
+    # and uint16.
+    KernelInfo("compress_u8", "x[mask]", "uint8", "compress", COMPRESS_HOOKS),
+    KernelInfo("compress_i16", "x[mask]", "int16", "compress", COMPRESS_HOOKS),
+    KernelInfo("maskfill_f32", "x[mask] = v", "float32", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("maskfill_f64", "x[mask] = v", "float64", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("nonzero_bool", "np.nonzero", "bool", "nonzero", ("method.nonzero", "function.where")),
+    # The same call on a C-ordered matrix.
+    KernelInfo("nonzero_2d_bool", "np.nonzero, matrix", "bool", "nonzero", ("method.nonzero", "function.where")),
     KernelInfo("cumsum_i64", "np.cumsum", "int64", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f32", "np.cumsum", "float32", "cumsum", ("method.cumsum",)),
     KernelInfo("cumsum_f64", "np.cumsum", "float64", "cumsum", ("method.cumsum",)),
@@ -1003,6 +1214,8 @@ KERNELS: tuple[KernelInfo, ...] = (
                builtin=True),
     KernelInfo("cast_u8_f32", "x.astype(float32)", "uint8", "astype", ("method.astype",)),
     KernelInfo("sum_u8", "np.sum", "uint8", "sum", ("function.sum", "method.sum")),
+    KernelInfo("sum_f32", "np.sum", "float32", "sum", ("function.sum", "method.sum")),
+    KernelInfo("sum_f64", "np.sum", "float64", "sum", ("function.sum", "method.sum")),
     KernelInfo("count_nonzero_i64", "np.count_nonzero", "int64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("count_nonzero_f64", "np.count_nonzero", "float64", "count_nonzero", ("function.count_nonzero",)),
     KernelInfo("histogram_f64", "np.histogram", "float64", "histogram", ("function.histogram",)),
@@ -1010,6 +1223,7 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("bincount_i16", "np.bincount", "int16", "bincount", ("function.bincount",)),
     KernelInfo("bincount_i64", "np.bincount", "int64", "bincount", ("function.bincount",)),
     KernelInfo("isin_i64", "np.isin", "int64", "isin", ("function.isin",)),
+    KernelInfo("isin_i32", "np.isin", "int32", "isin", ("function.isin",)),
     KernelInfo("searchsorted_f64", "np.searchsorted", "float64", "searchsorted", ("method.searchsorted",)),
     # Indented under the row above: the same call with one argument more, in a
     # column the report keeps to 19 characters.
@@ -1030,6 +1244,7 @@ KERNELS: tuple[KernelInfo, ...] = (
                builtin=True),
     KernelInfo("fmax_reduce_f64", "fmax.reduceat", "float64", "reduceat", ("ufunc.reduceat",)),
     KernelInfo("any_rows_bool", "m.any(axis=1)", "bool", "any", ("method.any", "function.any")),
+    KernelInfo("any_cols_bool", "m.any(axis=0)", "bool", "any", ("method.any", "function.any")),
     KernelInfo("unique_i64", "np.unique", "int64", "unique", ("function.unique",)),
     # The stable kinds only: kind='stable', kind='mergesort' and stable=True.
     KernelInfo("argsort_f64", "np.argsort, stable", "float64", "argsort", ("method.argsort",)),

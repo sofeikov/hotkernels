@@ -215,6 +215,8 @@ VARIANTS: tuple[Variant, ...] = (
     Variant("zero_d", lambda a: np.array(a[0]), plain=False, dims=0, min_n=1),
 )
 CONTIGUOUS = VARIANTS[0]
+# The variant whose elements are not aligned to their size.
+_MISALIGNED = next(variant for variant in VARIANTS if variant.name == "misaligned")
 
 
 def spec(kernel: str) -> Kernel:
@@ -1037,6 +1039,169 @@ def _round_errstate(setting: str, decimals: int, x):
         return np.round(x, decimals)
 
 
+# How one number reaches np.round: (name in a case, builds it from a Python
+# float, whether the binding takes it). A zero-dimensional float64 array and an
+# np.float64 are taken. NumPy converts a Python float, and an np.float64 of a
+# subclass, to a plain zero-dimensional float64 array and calls its method,
+# which takes it. The rest are NumPy's.
+ROUND_NUMBER_KINDS = (
+    ("0-d float64", np.array, True),
+    ("np.float64", np.float64, True),
+    ("float", float, True),
+    ("0-d '>f8'", lambda v: np.array(v, dtype=">f8"), False),
+    ("0-d float32", lambda v: np.array(v, dtype=np.float32), False),
+    ("np.float32", np.float32, False),
+    ("np.longdouble", np.longdouble, False),
+    ("np.float64 subclass", lambda v: _Float64Subclass(v), True),
+    ("0-d float64 subclass", lambda v: np.array(v).view(_ArraySubclass), False),
+)
+# Values one number is rounded from: the signs and ties of the arrays, and
+# every class of value: infinities, a quiet and a negative NaN, the largest
+# finite value, the smallest subnormal and a subnormal rounding flags with.
+ROUND_NUMBERS = (*ROUND_SIGNS, math.inf, -math.inf, math.nan, -math.nan, 1.7976931348623157e308, 5e-324,
+                 ROUND_SUBNORMAL, 123.456, -98765.4321)
+# The ways one number is rounded: (name in a case, the call from (x, decimals)).
+# Python's round() on an np.float64 calls its round method; on a Python float
+# it is Python's, which no hook sees, and is not tried.
+ROUND_NUMBER_CALLS = (
+    ("np.round(x, d)", lambda x, d: np.round(x, d)),
+    ("np.around(x, d)", lambda x, d: np.around(x, d)),
+    ("np.round(x, decimals=d)", lambda x, d: np.round(x, decimals=d)),
+)
+# Methods, for the kinds that have one: x.round(d) and round(x, d). Python's
+# round() on a zero-dimensional array does not call its round method, and is
+# NumPy's.
+ROUND_NUMBER_METHODS = (
+    ("x.round(d)", lambda x, d: x.round(d)),
+    ("round(x, d)", lambda x, d: round(x, d)),
+)
+
+
+class _Float64Subclass(np.float64):
+    """A subclass of np.float64, which the round hooks leave to NumPy."""
+
+
+class _ArraySubclass(np.ndarray):
+    """A subclass of ndarray, which the round hooks leave to NumPy."""
+
+
+def _one_number(build: Callable, value: float) -> tuple:
+    """Build the one argument of a round case: one number of a given kind.
+
+    Args:
+        build: Makes the number from a Python float.
+        value: Its value.
+
+    Returns:
+        (the number,).
+    """
+    return (build(value),)
+
+
+def _round_bits(bits: int) -> tuple:
+    """Build the one argument of a round case: a zero-dimensional float64 array of the given bits.
+
+    Args:
+        bits: The 64 bits of the element, such as those of a signalling NaN.
+
+    Returns:
+        (a zero-dimensional float64 array,).
+    """
+    return (np.array(bits, dtype=np.uint64).view(np.float64),)
+
+
+def _round_number_errstate(setting: str, decimals: int, x):
+    """Call `np.around(x, decimals)` on one number with every floating-point error set to `setting`.
+
+    Args:
+        setting: A value np.errstate takes, such as "raise" or "warn".
+        decimals: The number of decimals.
+        x: The number.
+
+    Returns:
+        The rounded number.
+    """
+    with np.errstate(all=setting):
+        return np.around(x, decimals)
+
+
+def _number_label(value: float) -> str:
+    """Name a float in a case: its repr, with the sign of a NaN, which repr drops.
+
+    Args:
+        value: The float.
+
+    Returns:
+        Its repr, or "-nan" for a NaN whose sign bit is set.
+    """
+    if math.isnan(value) and math.copysign(1.0, value) < 0:
+        return "-nan"
+    return repr(value)
+
+
+def round_number_cases() -> Iterator[Case]:
+    """Yield the cases of `np.round` and `np.around` on one number.
+
+    A zero-dimensional float64 array, an np.float64 and, through NumPy's
+    conversion, a Python float are rounded by the binding's loop and give an
+    np.float64, as NumPy does, under the guards of the arrays: decimals a
+    Python int from 0 to 15, no `out`, no flag NumPy reports. Other kinds of
+    number, and subclasses, are NumPy's.
+    """
+    for (kind, build, taken), value, decimals in itertools.product(ROUND_NUMBER_KINDS, ROUND_NUMBERS, ROUND_DECIMALS):
+        expect = "round_f64" if taken else None
+        # Only a float64 number with an overflowing multiply raises a flag here.
+        if taken and decimals and abs(value) * 10.0**decimals == math.inf and math.isfinite(value):
+            expect = None
+        calls = ROUND_NUMBER_CALLS + (ROUND_NUMBER_METHODS if kind != "float" else ())
+        for text, call in calls:
+            reached = None if text == "round(x, d)" and kind.startswith("0-d") else expect
+            yield Case("round", f"{text} d={decimals} x={kind} {_number_label(value)}", partial(_one_number, build, value),
+                       partial(lambda call, decimals, x: call(x, decimals), call, decimals), reached)
+    for kind, build, taken in ROUND_NUMBER_KINDS[:2]:
+        yield Case("round", f"np.round(x) x={kind}", partial(_one_number, build, 2.5), np.round, "round_f64")
+        for text, arguments, expect in ROUND_NUMBER_SPELLINGS:
+            yield Case("round", f"{text} x={kind}", partial(_one_number, build, 2.345), partial(_spelled_round, arguments),
+                       expect)
+        # The guards: overflow in the multiply, and a signalling NaN.
+        for setting in ("raise", "warn", "ignore"):
+            yield Case("round", f"np.errstate(all={setting!r}) np.around(x, 2) x={kind} {ROUND_OVERFLOWS!r}",
+                       partial(_one_number, build, ROUND_OVERFLOWS), partial(_round_number_errstate, setting, 2), None)
+            yield Case("round", f"np.errstate(all={setting!r}) np.around(x, 2) x={kind} {ROUND_SUBNORMAL!r}",
+                       partial(_one_number, build, ROUND_SUBNORMAL), partial(_round_number_errstate, setting, 2), "round_f64")
+    for bits in ROUND_SIGNALLING_NAN_BITS:
+        for decimals in (0, 2):
+            yield Case("round", f"np.round(x, {decimals}) x=0-d float64 signalling NaN {bits:#x}", partial(_round_bits, bits),
+                       partial(_round_call, decimals), None)
+
+
+# Bits of float64 signalling NaNs, positive and negative.
+ROUND_SIGNALLING_NAN_BITS = (0x7FF0000000000001, 0xFFF0000000000001, 0x7FF7FFFFFFFFFFFF)
+# Arguments besides the number that decide whether the call is taken: (name,
+# keyword arguments of np.round, the kernel or None).
+ROUND_NUMBER_SPELLINGS = (
+    ("np.round(x, 2, None)", {"decimals": 2, "out": None}, "round_f64"),
+    ("np.round(x, 16)", {"decimals": 16}, None),
+    ("np.round(x, -1)", {"decimals": -1}, None),
+    ("np.round(x, np.int64(2))", {"decimals": np.int64(2)}, None),
+    ("np.round(x, 2.0)", {"decimals": 2.0}, None),
+    ("np.round(x, True)", {"decimals": True}, None),
+)
+
+
+def _spelled_round(arguments: dict, x):
+    """Call `np.round(x, **arguments)`.
+
+    Args:
+        arguments: Keyword arguments of np.round.
+        x: The number.
+
+    Returns:
+        What NumPy, or the binding in its place, returns or raises.
+    """
+    return np.round(x, **arguments)
+
+
 def _filled(value: float, n: int) -> tuple:
     """Build the one argument of a unary case: random float64 values with `value` at every third element."""
     x = values("f64", n)
@@ -1049,7 +1214,8 @@ def round_cases() -> Iterator[Case]:
 
     The function hooks of np.round and np.around and the method hook of
     x.round run the binding's own loop for a plain contiguous float64 array
-    of 1 to ROUND_F64_MAX_N elements, decimals absent or a Python int from
+    of 1 to ROUND_F64_MAX_N elements, or one number (see round_number_cases),
+    decimals absent or a Python int from
     0 to 15, and no `out`. A call whose arithmetic raises a flag NumPy
     reports, overflow or underflow in the multiply or a signalling NaN, goes
     to NumPy, which warns or raises. Every other call is NumPy's.
@@ -1133,8 +1299,12 @@ def round_cases() -> Iterator[Case]:
                 # built from. A list has no method of its own.
                 if variant.name == "list" and spelling.text.startswith("np.") and spelling.kind == TAKES:
                     expect = ANY if dtype != "f64" else _round_expect(n)
+                # A zero-dimensional float64 array holds one element, whatever n.
+                if variant.name == "zero_d" and kernel is not None and spelling.kind == TAKES:
+                    expect = kernel
                 yield Case("round", f"{spelling.text} {dtype} n={n} layout={variant.name}",
                            partial(_built, dtype, n, variant), spelling.call, expect)
+    yield from round_number_cases()
 
 
 # ----------------------------------------------------------------- median
@@ -1695,16 +1865,21 @@ def _extract_call(x, mask):
 # Value classes of `x` in the sweep of mask selection over every size and
 # mask: the ones whose bit patterns a kernel that computed on its elements
 # would change.
-_COMPRESS_VALUE_CLASSES = {"f32": ("random", "nan_some"), "f64": ("random", "nan_some"), "i64": ("random", "extremes")}
+_COMPRESS_VALUE_CLASSES = {"f32": ("random", "nan_some"), "f64": ("random", "nan_some"), "i64": ("random", "extremes"),
+                           "i32": ("random", "extremes"), "u8": ("random", "extremes"), "i8": ("random", "extremes"),
+                           "bool": ("random",), "i16": ("random", "extremes"), "u16": ("random", "extremes")}
 
 
 def compress_cases() -> Iterator[Case]:
     """Yield the cases of `x[mask]`, `np.compress(mask, x)` and `np.extract(mask, x)`.
 
     int64 elements are selected by the float64 kernel, which moves 64-bit
-    elements without computing on them.
+    elements without computing on them, and int32 elements by the float32 one.
+    Likewise int8 and bool by compress_u8, and uint16 by compress_i16.
     """
-    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64"}
+    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64", "i32": "compress_f32",
+               "u8": "compress_u8", "i8": "compress_u8", "bool": "compress_u8",
+               "i16": "compress_i16", "u16": "compress_i16"}
     select = Spelling("x[mask]", lambda x, mask: x[mask], any_shape=False)
     functions = (
         Spelling("np.compress(mask, x)", _compress_call),
@@ -1731,7 +1906,7 @@ def compress_cases() -> Iterator[Case]:
                 for spelling in functions:
                     make = partial(_values_and_mask, dtype, n, "random", mask_maker)
                     yield Case("compress", f"{spelling.text} {dtype} n={n} {mask_label}", make, spelling.call, kernel)
-    for dtype in ("f32", "f64", "i64", "u64", "i32", "u8"):
+    for dtype in ("f32", "f64", "i64", "u64", "i32", "u32", "u8", "i8", "bool", "i16", "u16"):
         kernel = kernels.get(dtype)
         for n in (0, *LAYOUT_SIZES):
             plain_mask = partial(values, "bool", n, arg="mask")
@@ -1798,16 +1973,62 @@ def _overlapping(n: int) -> tuple:
     return (x, x.view(np.bool_)[:n])
 
 
-# Values assigned through a mask, with whether the kernel takes them: a
-# Python float, or a Python int that converts to a double.
-_FILL_VALUES: tuple[tuple[str, object, bool], ...] = (
-    ("0.0", 0.0, True), ("1.5", 1.5, True), ("-0.0", -0.0, True), ("nan", float("nan"), True),
-    ("-inf", float("-inf"), True), ("5e-324", 5e-324, True), ("0", 0, True), ("-3", -3, True),
-    ("2**53", 2**53, True), ("2**53 + 1", 2**53 + 1, True), ("2**70", 2**70, True),
-    ("10**400", 10**400, False), ("True", True, False), ("np.float64(2.0)", np.float64(2.0), False),
-    ("np.float32(2.0)", np.float32(2.0), False), ("array", np.array(7.0), False), ("'1.5'", "1.5", False),
-    ("None", None, False), ("1j", 1j, False),
+# Element types of the masked-assignment cases, and the kernel that takes
+# each. The kernels move bits, so int64 goes to the float64 one and int32 to
+# the float32 one. uint8 has none.
+_MASKFILL_KERNELS = {"f64": "maskfill_f64", "f32": "maskfill_f32", "i64": "maskfill_f64", "i32": "maskfill_f32",
+                     "u8": None}
+# The element types that are floats and those that are integers, as the
+# kinds of value each takes are written below.
+_FLOATS = frozenset({"f64", "f32"})
+_INTS = frozenset({"i64", "i32"})
+_F64 = frozenset({"f64"})
+_ALL = _FLOATS | _INTS
+_NONE: frozenset = frozenset()
+# A signalling NaN as a Python float: the conversion to float32 raises the
+# invalid flag, so NumPy keeps it for float32.
+_SIGNALLING_NAN = float(np.array(0x7FF0000000000001, np.uint64).view(np.float64))
+
+# Values assigned through a mask, with the element types whose kernel takes
+# them: float64 takes a Python float, or a Python int that converts to a
+# double; float32 a Python float that is a quiet NaN, an infinity, a zero or
+# rounds to a normal float32, a Python int of at most 2**24 in magnitude, and
+# an np.float32; int64 and int32 a Python int in their range and their own
+# NumPy scalar. Everything else is NumPy's, including its warnings and errors.
+_FILL_VALUES: tuple[tuple[str, object, frozenset], ...] = (
+    ("0.0", 0.0, _FLOATS), ("1.5", 1.5, _FLOATS), ("-0.0", -0.0, _FLOATS), ("nan", float("nan"), _FLOATS),
+    ("-inf", float("-inf"), _FLOATS), ("5e-324", 5e-324, _F64), ("0", 0, _ALL), ("-3", -3, _ALL),
+    ("2**53", 2**53, _F64 | {"i64"}), ("2**53 + 1", 2**53 + 1, _F64 | {"i64"}), ("2**70", 2**70, _F64),
+    ("10**400", 10**400, _NONE), ("True", True, _NONE), ("np.float64(2.0)", np.float64(2.0), _NONE),
+    ("np.float32(2.0)", np.float32(2.0), frozenset({"f32"})), ("array", np.array(7.0), _NONE),
+    ("'1.5'", "1.5", _NONE), ("None", None, _NONE), ("1j", 1j, _NONE),
+    # float32's rounding, overflow and underflow.
+    ("0.1", 0.1, _FLOATS), ("-1e30", -1e30, _FLOATS), ("1e300", 1e300, _F64),
+    ("3.4028235e38", 3.4028235e38, _FLOATS), ("3.4028235677973366e38", 3.4028235677973366e38, _F64),
+    ("1.1754943508222875e-38", 1.1754943508222875e-38, _FLOATS), ("1e-40", 1e-40, _F64),
+    ("1e-50", 1e-50, _F64), ("signalling nan", _SIGNALLING_NAN, _F64), ("np.float32(nan)", np.float32("nan"),
+                                                                        frozenset({"f32"})),
+    ("np.float16(1.5)", np.float16(1.5), _NONE), ("np.longdouble(0.1)", np.longdouble(0.1), _NONE),
+    # Python ints at the edges of float32's exact integers and of int32 and int64.
+    ("2**24", 2**24, _ALL), ("-2**24 - 1", -2**24 - 1, _F64 | _INTS), ("2**31 - 1", 2**31 - 1, _F64 | _INTS),
+    ("-2**31", -2**31, _F64 | _INTS), ("2**31", 2**31, _F64 | {"i64"}), ("-2**31 - 1", -2**31 - 1, _F64 | {"i64"}),
+    ("2**63 - 1", 2**63 - 1, _F64 | {"i64"}), ("-2**63", -2**63, _F64 | {"i64"}), ("2**63", 2**63, _F64),
+    ("-2**63 - 1", -2**63 - 1, _F64),
+    # NumPy integer scalars: each array's own type is taken, the others converted by NumPy.
+    ("np.int64(5)", np.int64(5), frozenset({"i64"})), ("np.int64(-2**40)", np.int64(-2**40), frozenset({"i64"})),
+    ("np.int32(5)", np.int32(5), frozenset({"i32"})), ("np.int32(-2**31)", np.int32(-2**31), frozenset({"i32"})),
+    ("np.uint32(2**32 - 1)", np.uint32(2**32 - 1), _NONE), ("np.int8(-3)", np.int8(-3), _NONE),
+    ("np.True_", np.True_, _NONE), ("2.0", 2.0, _FLOATS),
 )
+# An ordinary value of each element type, for the cases about layouts.
+_ORDINARY_FILL = {"f64": 1.5, "f32": 1.5, "i64": 3, "i32": 3, "u8": 3}
+# Values for the sweep over sizes and masks, by element type.
+_SIZE_FILLS = {
+    "f64": ((("0.0", 0.0), ("1.5", 1.5), ("-0.0", -0.0), ("nan", float("nan")))),
+    "f32": ((("0.0", 0.0), ("1.5", 1.5), ("-0.0", -0.0), ("nan", float("nan")))),
+    "i64": ((("0", 0), ("-3", -3), ("2**40", 2**40))),
+    "i32": ((("0", 0), ("-3", -3), ("2**31 - 1", 2**31 - 1))),
+}
 
 
 def _copyto_casting(value, x, mask):
@@ -1906,30 +2127,35 @@ def _maskfill_shape_cases(dtype: str, takes: str | None) -> Iterator[Case]:
     )
     for text, x_maker, mask_maker, *expects in shapes:
         make = lambda x_maker=x_maker, mask_maker=mask_maker: (x_maker(), mask_maker())
+        fill = _ORDINARY_FILL[dtype]
         for (spelling, function, _), expect in zip(_ASSIGNMENTS[:3], expects):
-            yield Case("maskfill", f"{spelling} with v=1.5 {dtype} {text}", make, partial(function, 1.5), expect)
+            yield Case("maskfill", f"{spelling} with v={fill} {dtype} {text}", make, partial(function, fill), expect)
 
 
 def maskfill_cases() -> Iterator[Case]:
     """Yield the cases of `x[mask] = value`, `np.putmask` and `np.copyto(..., where=mask)`."""
-    kernel = "maskfill_f64"
-    for n in VALUE_SIZES:
-        for mask_label, mask_maker in _mask_makers(n):
-            for text, value, _ in _FILL_VALUES[:4]:
-                yield Case("maskfill", f"x[mask] = {text} f64 n={n} {mask_label}",
-                           partial(_values_and_mask, "f64", n, "random", mask_maker), partial(_assign, value), kernel)
-            for spelling, function, _ in _FUNCTION_ASSIGNMENTS:
-                yield Case("maskfill", f"{spelling} with v=1.5 f64 n={n} {mask_label}",
-                           partial(_values_and_mask, "f64", n, "random", mask_maker), partial(function, 1.5), kernel)
-    for dtype in ("f64", "f32", "i64"):
-        takes = kernel if dtype == "f64" else None
+    for dtype, fills in _SIZE_FILLS.items():
+        kernel = _MASKFILL_KERNELS[dtype]
+        for n in VALUE_SIZES:
+            for mask_label, mask_maker in _mask_makers(n):
+                for text, value in fills:
+                    yield Case("maskfill", f"x[mask] = {text} {dtype} n={n} {mask_label}",
+                               partial(_values_and_mask, dtype, n, "random", mask_maker), partial(_assign, value),
+                               kernel)
+                fill = _ORDINARY_FILL[dtype]
+                for spelling, function, _ in _FUNCTION_ASSIGNMENTS:
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} {mask_label}",
+                               partial(_values_and_mask, dtype, n, "random", mask_maker), partial(function, fill),
+                               kernel)
+    for dtype, takes in _MASKFILL_KERNELS.items():
+        fill = _ORDINARY_FILL[dtype]
         for n in (0, *LAYOUT_SIZES):
             plain_mask = partial(values, "bool", n, arg="mask")
             for spelling, function, by_kernel in _ASSIGNMENTS:
                 for text, value, taken in _FILL_VALUES:
                     yield Case("maskfill", f"{spelling} with v={text} {dtype} n={n}",
                                partial(_x_and_mask, dtype, n, CONTIGUOUS, plain_mask), partial(function, value),
-                               takes if taken and by_kernel else None)
+                               takes if dtype in taken and by_kernel else None)
             for spelling, function, _ in _ASSIGNMENTS[:3]:
                 for variant in variants_for(dtype, n):
                     if variant.dims != 1 or variant.name == "list":
@@ -1937,33 +2163,197 @@ def maskfill_cases() -> Iterator[Case]:
                     expect = takes if variant.plain and variant.writeable else None
                     if takes and (not variant.predictable or (n == 0 and not variant.plain)):
                         expect = ANY
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} x={variant.name}",
-                               partial(_x_and_mask, dtype, n, variant, plain_mask), partial(function, 1.5), expect)
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} x={variant.name}",
+                               partial(_x_and_mask, dtype, n, variant, plain_mask), partial(function, fill), expect)
                 for variant in variants_for("bool", n):
                     if variant.dims != 1:
                         continue
                     expect = takes if variant.plain else (ANY if takes and n == 0 else None)
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask={variant.name}",
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask={variant.name}",
                                partial(_x_and_mask, dtype, n, CONTIGUOUS, partial(_variant_of, "bool", n, variant, "mask")),
-                               partial(function, 1.5), expect)
-                yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask=int64",
-                           partial(_x_and_mask, dtype, n, CONTIGUOUS, _int_mask(plain_mask)), partial(function, 1.5), None)
+                               partial(function, fill), expect)
+                yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask=int64",
+                           partial(_x_and_mask, dtype, n, CONTIGUOUS, _int_mask(plain_mask)), partial(function, fill), None)
                 if n:
                     for byte in BAD_MASK_BYTES:
-                        yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask bytes are {byte}",
+                        yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask bytes are {byte}",
                                    partial(_x_and_mask, dtype, n, CONTIGUOUS, partial(_bad_mask, n, byte)),
-                                   partial(function, 1.5), None)
+                                   partial(function, fill), None)
                     short = partial(values, "bool", n - 1, arg="mask")
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask one short",
-                               partial(_x_and_mask, dtype, n, CONTIGUOUS, short), partial(function, 1.5), None)
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask one short",
+                               partial(_x_and_mask, dtype, n, CONTIGUOUS, short), partial(function, fill), None)
         yield from _maskfill_shape_cases(dtype, takes)
     for spelling, function, _ in _ASSIGNMENTS[:3]:
         yield Case("maskfill", f"{spelling} with v=1.5 where mask is a view of x", partial(_overlapping, ORDINARY_N),
                    partial(function, 1.5), None)
 
 
+# The kernel that takes np.nonzero on a C-ordered boolean matrix.
+NONZERO_2D = "nonzero_2d_bool"
+# Shapes of the boolean matrices of the nonzero cases: no rows or no
+# columns, one of either, either side of the 8 and 16 bytes the kernel reads
+# at a time, the workload's matrices of 30 to 50 rows of 22 columns, and
+# wide rows.
+NONZERO_2D_SHAPES = ((0, 0), (0, 1), (1, 0), (0, 22), (40, 0), (1, 1), (1, 22), (22, 1), (2, 3), (3, 2),
+                     (7, 8), (8, 7), (5, 15), (9, 17), (16, 16), (30, 22), (40, 22), (50, 22), (33, 64),
+                     (12, 65), (64, 100), (20, 1000))
+# Shape of the matrices of the layout cases: more than 64 elements, so that
+# the kernel would take its fast paths, and not square, so that a transposed
+# or Fortran-ordered copy is laid out differently from the plain one.
+NONZERO_2D_LAYOUT_SHAPE = (40, 22)
+# Shape of the three-dimensional mask, which NumPy keeps.
+NONZERO_3D_SHAPE = (4, 10, 22)
+
+
+def _nonzero_structure(result: tuple) -> tuple:
+    """Describe how NumPy's nonzero result for a matrix is laid out in memory.
+
+    For a matrix NumPy fills one (count, 2) int64 array of (row, column)
+    pairs and returns two views of it with a stride of 16 bytes. A caller can
+    observe that, and `describe` does not compare strides or bases, so a case
+    returns this beside the result.
+
+    Args:
+        result: The tuple of index arrays.
+
+    Returns:
+        Each array's strides, whether it owns its data and whether it is
+        aligned; whether they share one base, and that base's shape, strides
+        and flags; and how far in bytes each array starts from the first.
+    """
+    first, *rest = result
+    base = first.base
+    starts = [array.__array_interface__["data"][0] for array in result]
+    return (tuple((array.strides, array.flags.owndata, array.flags.aligned) for array in result),
+            all(array.base is base for array in rest),
+            None if base is None else (base.shape, base.strides, base.flags.owndata, base.flags.c_contiguous),
+            tuple(start - starts[0] for start in starts))
+
+
+def _with_structure(function: Callable[[np.ndarray], tuple], mask: np.ndarray) -> tuple:
+    """Call a nonzero spelling and return its result beside its layout in memory.
+
+    Args:
+        function: Takes the mask and returns NumPy's tuple of index arrays.
+        mask: The mask.
+
+    Returns:
+        (the result, `_nonzero_structure` of it).
+    """
+    result = function(mask)
+    return result, _nonzero_structure(result)
+
+
+def _with_strides(function: Callable[[np.ndarray], np.ndarray], mask: np.ndarray) -> tuple:
+    """Call a spelling that returns np.argwhere's (count, 2) array, and return it with its strides.
+
+    Args:
+        function: Takes the mask and returns an array.
+        mask: The mask.
+
+    Returns:
+        (the result, its strides, whether it owns its data).
+    """
+    result = function(mask)
+    return result, result.strides, result.flags.owndata
+
+
+def _matrix(shape: tuple[int, ...], cls: str, position: int = 0, dtype: str = "bool") -> np.ndarray:
+    """Build a C-ordered array of several dimensions from a judge value class.
+
+    Args:
+        shape: The array's shape.
+        cls: Value class name, such as "sparse".
+        position: Index of the interesting element in C order, for positional classes.
+        dtype: Element type as a spec name.
+
+    Returns:
+        A new C-contiguous array of that shape.
+    """
+    return values(dtype, math.prod(shape), cls, position, arg="mask").reshape(shape)
+
+
+def _bad_matrix(shape: tuple[int, int], byte: int) -> np.ndarray:
+    """Return a boolean matrix whose True elements are stored as `byte`, not 1.
+
+    Args:
+        shape: (rows, columns).
+        byte: The byte that stands for True, other than 1.
+
+    Returns:
+        A new C-contiguous boolean array of that shape.
+    """
+    return _bad_mask(math.prod(shape), byte).reshape(shape)
+
+
+# The ways of writing np.nonzero on a matrix, each returning what a caller can
+# observe: (text, call). The first three reach the binding's nonzero; the
+# last two reach it through np.nonzero in NumPy's Python code.
+NONZERO_2D_SPELLINGS = (
+    ("mask.nonzero()", partial(_with_structure, lambda m: m.nonzero())),
+    ("np.nonzero(mask)", partial(_with_structure, np.nonzero)),
+    ("np.where(mask)", partial(_with_structure, np.where)),
+    ("np.argwhere(mask)", partial(_with_strides, np.argwhere)),
+    ("np.transpose(np.nonzero(mask))", partial(_with_strides, lambda m: np.transpose(np.nonzero(m)))),
+)
+
+
+def _nonzero_2d_layouts() -> Iterator[tuple[str, Callable[[], object], str | None]]:
+    """Yield the masks of two or more dimensions to try every spelling on.
+
+    Yields:
+        (name, function that builds the mask, the kernel expected to take
+        it). A plain C-ordered boolean matrix goes to the kernel; any other
+        layout, a subclass, another element type or another number of
+        dimensions stays with NumPy.
+    """
+    shape = NONZERO_2D_LAYOUT_SHAPE
+    plain = partial(_matrix, shape, judge_cases.RANDOM)
+    yield "contiguous", plain, NONZERO_2D
+    yield "readonly", lambda: _readonly(plain()), NONZERO_2D
+    yield "fortran", lambda: np.asfortranarray(plain()), None
+    yield "transposed", lambda: plain().T, None
+    yield "every second column", lambda: _matrix((shape[0], 2 * shape[1]), judge_cases.RANDOM)[:, ::2], None
+    yield "every second row", lambda: _matrix((2 * shape[0], shape[1]), judge_cases.RANDOM)[::2], None
+    yield "subclass", lambda: plain().view(_Subclass), None
+    yield "three dimensions", partial(_matrix, NONZERO_3D_SHAPE, judge_cases.RANDOM), None
+    for dtype in ("u8", "i64", "f64"):
+        yield dtype, partial(_matrix, shape, judge_cases.RANDOM, dtype=dtype), None
+
+
+def nonzero_2d_cases() -> Iterator[Case]:
+    """Yield the cases of `nonzero` on boolean arrays of two or more dimensions.
+
+    Every spelling is compared on its result and on how the result sits in
+    memory: for np.nonzero, two views of one array of pairs, as NumPy builds
+    it.
+
+    Yields:
+        The cases.
+    """
+    plain, positional = judge_cases.classes("bool")
+    for shape in NONZERO_2D_SHAPES:
+        n = math.prod(shape)
+        for text, call in NONZERO_2D_SPELLINGS:
+            for cls in plain:
+                yield Case("nonzero", f"{text} matrix {shape} mask={cls}",
+                           partial(_made, partial(_matrix, shape, cls)), call, NONZERO_2D)
+            if not n:
+                continue
+            for cls in positional:
+                for position in sorted({0, n // 2, n - 1}):
+                    yield Case("nonzero", f"{text} matrix {shape} mask={cls}@{position}",
+                               partial(_made, partial(_matrix, shape, cls, position)), call, NONZERO_2D)
+            for byte in BAD_MASK_BYTES:
+                yield Case("nonzero", f"{text} matrix {shape} mask bytes are {byte}",
+                           partial(_made, partial(_bad_matrix, shape, byte)), call, None)
+    for name, build, expect in _nonzero_2d_layouts():
+        for text, call in NONZERO_2D_SPELLINGS:
+            yield Case("nonzero", f"{text} matrix layout={name}", partial(_made, build), call, expect)
+
+
 def nonzero_cases() -> Iterator[Case]:
-    """Yield the cases of `nonzero` on booleans."""
+    """Yield the cases of `nonzero` on booleans, of one dimension and of two."""
     spellings = (
         Spelling("mask.nonzero()", lambda m: m.nonzero(), any_shape=False),
         Spelling("np.nonzero(mask)", np.nonzero, any_shape=False, normalises=True),
@@ -1973,15 +2363,20 @@ def nonzero_cases() -> Iterator[Case]:
         Spelling("np.where(mask, 1.0, 0.0)", lambda m: np.where(m, 1.0, 0.0), NEVER),
         Spelling("np.where(mask, mask, mask)", lambda m: np.where(m, m, m), NEVER),
     )
-    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
-    yield from unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings)
     # The spellings that would take the kernel for a clean mask.
     taking = (spellings[0], spellings[1], spellings[4])
+    # Labels of the cases in which one of them meets a C-ordered boolean
+    # matrix, which goes to a kernel of its own.
+    matrix_labels = {f"{spelling.text} bool n={n} layout=rows" for spelling in taking for n in LAYOUT_SIZES}
+    # The kernel is not called for an empty mask's sake: it takes it and returns nothing.
+    for case in unary_cases("nonzero", {"bool": "nonzero_bool"}, ("u8", "f64", "i64"), spellings):
+        yield replace(case, expect=NONZERO_2D) if case.label in matrix_labels else case
     for n in LAYOUT_SIZES:
         for byte in BAD_MASK_BYTES:
             for spelling in taking:
                 yield Case("nonzero", f"{spelling.text} n={n} mask bytes are {byte}",
                            lambda n=n, byte=byte: (_bad_mask(n, byte),), spelling.call, None)
+    yield from nonzero_2d_cases()
 
 
 def cumsum_cases(inexact: bool) -> Iterator[Case]:
@@ -2050,20 +2445,131 @@ def _late_bad_mask(n: int, byte: int) -> np.ndarray:
     return raw.view(np.bool_)
 
 
+# The spellings of sum that no kernel takes, whatever the array: an axis given
+# at all, even None or 0, and every other argument.
+_SUM_LEFT_SPELLINGS = (
+    Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
+    Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
+    Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
+    Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
+    Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
+    Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
+    Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+    Spelling("x.sum(0)", lambda x: x.sum(0), NEVER),
+    Spelling("np.sum(x, where=True)", lambda x: np.sum(x, where=True), NEVER),
+)
+# The float sum kernels, by element type.
+SUM_FLOAT_KERNELS = {"f32": "sum_f32", "f64": "sum_f64"}
+# Element counts at which NumPy's pairwise summation has a shape VALUE_SIZES
+# do not give it: leaves of different lengths, a node of 33 or 65 to 67
+# vectors (whose leaves lie at two depths), a tail of 1 to 7 elements on a
+# tree of several levels, and long arrays that are not a power of two.
+SUM_TREE_SIZES = (130, 136, 263, 264, 271, 520, 527, 528, 536, 544, 1032, 1039, 1088, 2056, 4104,
+                  8200, 65544, 65551, 1048583)
+# Element counts of the arrays of negative zeros, whose sum is +0.0.
+SUM_NEGATIVE_ZERO_SIZES = (1, 7, 8, 9, 16, 129, 1024, 4096)
+# Element count of a misaligned array that NumPy sums in more than two blocks
+# of its buffer size (8,192 elements), each summed in NumPy's pairwise order
+# and the blocks' sums added in turn.
+SUM_BUFFERED_N = 20000
+# Element count of the arrays whose sum overflows, and the share of the
+# largest finite value each of their elements is.
+SUM_OVERFLOW_N = 3
+SUM_OVERFLOW_SHARE = 0.75
+
+
+def _sum_expect(kernel: str, maker: Callable[[], np.ndarray]) -> str | None:
+    """Say whether a float sum kernel takes an array: when its sum is finite.
+
+    The binding passes a call on to NumPy when the kernel's sum is a NaN or an
+    infinity, so that NumPy gives its own NaN and its own warning.
+
+    Args:
+        kernel: The kernel for the array's element type.
+        maker: Builds the array.
+
+    Returns:
+        `kernel` when NumPy's sum of the array is finite, otherwise None.
+    """
+    with np.errstate(all="ignore"):
+        finite = bool(np.isfinite(np.add.reduce(maker())))
+    return kernel if finite else None
+
+
+def _negative_zeros(dtype: str, n: int) -> np.ndarray:
+    """Return `n` negative zeros of a float type."""
+    return np.full(n, -0.0, np_dtype(dtype))
+
+
+def _sum_overflowing(dtype: str) -> np.ndarray:
+    """Return SUM_OVERFLOW_N finite values of a float type whose sum overflows."""
+    return np.full(SUM_OVERFLOW_N, np.finfo(np_dtype(dtype)).max * SUM_OVERFLOW_SHARE, np_dtype(dtype))
+
+
+def _sum_out(x: object) -> object:
+    """Return `np.sum(x, out=o)` for a zero-dimensional `o` of the array's type."""
+    return np.sum(x, out=np.empty((), np.asarray(x).dtype))
+
+
+def _float_sum_cases() -> Iterator[Case]:
+    """Yield the cases of `sum` on float32 and float64.
+
+    A kernel takes `np.sum(x)` and `x.sum()` on a contiguous one-dimensional
+    array with no other argument, and only when the sum is finite; a matrix,
+    a strided array and every other spelling go to NumPy. On x86-64 no kernel
+    takes float64.
+    """
+    spellings = (
+        Spelling("np.sum(x)", np.sum, any_shape=False, sweep_values=False),
+        Spelling("x.sum()", lambda x: x.sum(), any_shape=False, sweep_values=False),
+        *_SUM_LEFT_SPELLINGS,
+        Spelling("np.sum(x, out=o)", _sum_out, NEVER),
+    )
+    neighbours = tuple(dtype for dtype in ("f32", "f64") if dtype not in SUM_FLOAT_KERNELS)
+    for case in unary_cases("sum", SUM_FLOAT_KERNELS, neighbours, spellings):
+        # NumPy sums an array whose elements are not aligned to their size in
+        # blocks of its buffer size, another order, so the binding leaves it
+        # to NumPy.
+        if f"layout={_MISALIGNED.name}" in case.label:
+            case = replace(case, expect=None)
+        yield case
+    for dtype, kernel in SUM_FLOAT_KERNELS.items():
+        for spelling in spellings[:2]:
+            # Every value class: those whose sum is not finite go to NumPy.
+            for n, cls, label, maker in value_arrays(dtype):
+                yield Case("sum", f"{spelling.text} {dtype} {label}", partial(_made, maker), spelling.call,
+                           _sum_expect(kernel, maker))
+            for n in SUM_TREE_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=random",
+                           partial(_made, partial(values, dtype, n)), spelling.call, kernel)
+            for n in SUM_NEGATIVE_ZERO_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=all negative zeros",
+                           partial(_made, partial(_negative_zeros, dtype, n)), spelling.call, kernel)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_BUFFERED_N} layout=misaligned",
+                       partial(_built, dtype, SUM_BUFFERED_N, _MISALIGNED), spelling.call, None)
+            yield Case("sum", f"{spelling.text} {dtype} n={SUM_OVERFLOW_N} x=overflows",
+                       partial(_made, partial(_sum_overflowing, dtype)), spelling.call, None)
+            for n in FEW_SIZES:
+                yield Case("sum", f"{spelling.text} {dtype} n={n} x=signalling and negative NaNs",
+                           partial(_made, partial(unusual_nans, dtype, n)), spelling.call, None)
+                # NumPy clears the four flags it reports and leaves the
+                # inexact flag as its additions leave it: set for random
+                # values, as it was before the call for equal ones.
+                for cls in (judge_cases.RANDOM, "equal"):
+                    yield Case("sum", f"{spelling.text} {dtype} n={n} x={cls} flags after",
+                               partial(_made, partial(values, dtype, n, cls)),
+                               partial(_float_flags_after, spelling.call), kernel)
+
+
 def sum_cases() -> Iterator[Case]:
-    """Yield the cases of `sum` on uint8 and on booleans, which the same kernel serves."""
+    """Yield the cases of `sum`: on uint8 and on booleans, which one kernel serves, and on floats."""
     spellings = (
         Spelling("np.sum(x)", np.sum),
         Spelling("x.sum()", lambda x: x.sum()),
-        Spelling("np.sum(x, axis=0)", lambda x: np.sum(x, axis=0), NEVER),
-        Spelling("np.sum(x, axis=None)", lambda x: np.sum(x, axis=None), NEVER),
-        Spelling("x.sum(dtype=np.uint8)", lambda x: x.sum(dtype=np.uint8), NEVER),
-        Spelling("np.sum(x, initial=5)", lambda x: np.sum(x, initial=5), NEVER),
-        Spelling("np.sum(x, keepdims=True)", lambda x: np.sum(x, keepdims=True), NEVER),
-        Spelling("np.add.reduce(x)", np.add.reduce, NEVER),
-        Spelling("np.sum(a=x)", lambda x: np.sum(a=x), NEVER),
+        *_SUM_LEFT_SPELLINGS,
     )
-    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16", "f64"), spellings)
+    yield from unary_cases("sum", {"u8": "sum_u8", "bool": "sum_u8"}, ("i8", "u16"), spellings)
+    yield from _float_sum_cases()
     # A mask holding a byte other than 0 or 1 counts once per element in NumPy.
     for n, byte, spelling in itertools.product(LAYOUT_SIZES, BAD_MASK_BYTES, spellings[:2]):
         yield Case("sum", f"{spelling.text} bool n={n} mask bytes are {byte}",
@@ -2454,22 +2960,27 @@ def bincount_cases() -> Iterator[Case]:
     yield from _bincount_layout_cases()
 
 
-def _isin_x(spread: str, n: int) -> np.ndarray:
+def _isin_x(spread: str, n: int, dtype: type = np.int64) -> np.ndarray:
     """Build the array searched by an isin case.
 
     Args:
         spread: "narrow" for values from 0 to 1,000, where a small set of test
-            values matches often; "wide" for the whole int64 range.
+            values matches often; "wide" for the whole range of the type;
+            "edges" for the values either side of the 16-bit range and of the
+            windows `isin_i32` narrows to (_ISIN_I32_EDGES).
         n: Element count.
+        dtype: Element type, np.int64 or np.int32.
 
     Returns:
-        A contiguous int64 array.
+        A contiguous array of `dtype`.
     """
     rng = np.random.default_rng([SEED, n])
     if spread == "narrow":
-        return rng.integers(0, 1000, n)
-    info = np.iinfo(np.int64)
-    x = rng.integers(info.min, info.max, n, endpoint=True)
+        return rng.integers(0, 1000, n).astype(dtype)
+    if spread == "edges":
+        return rng.choice(np.array(_ISIN_I32_EDGES, dtype), n)
+    info = np.iinfo(dtype)
+    x = rng.integers(info.min, info.max, n, endpoint=True, dtype=dtype)
     x[::3] = info.max
     x[1::7] = info.min
     return x
@@ -2505,13 +3016,68 @@ _ISIN_TESTS: tuple[tuple[str, Callable[[], object], bool], ...] = (
 )
 
 
+# Values of int32 elements and test values where `isin_i32` changes path:
+# either side of -32,767 and 32,766, the test values that are their own 16-bit
+# keys; of a window 65,533 wide, the widest it narrows; and of the ends of
+# int32, where the subtraction that moves a window wraps.
+_INT32 = np.iinfo(np.int32)
+_ISIN_I32_EDGES = (-32769, -32768, -32767, -32766, 32765, 32766, 32767, 32768, 0, 1, -1,
+                   100000, 165533, 165534, 99999, _INT32.min, _INT32.min + 1, _INT32.max - 1, _INT32.max,
+                   _INT32.min + 65533, _INT32.max - 65533)
+
+# Test values for isin on int32, with whether the kernel takes them: one to
+# eight int32 values, as an int32 array or as a list or tuple of Python ints
+# that fit int32. Test values of another type are left to NumPy.
+_ISIN_I32_TESTS: tuple[tuple[str, Callable[[], object], bool], ...] = (
+    ("[5]", lambda: [5], True),
+    ("[1, 2, 3]", lambda: [1, 2, 3], True),
+    ("(1, 2, 3)", lambda: (1, 2, 3), True),
+    ("[3, 3, 3]", lambda: [3, 3, 3], True),
+    ("eight values", lambda: [1, 50, 999, 0, 7, 500, 501, 2], True),
+    ("eight wide values", lambda: [_INT32.max, _INT32.min, 0, -1, 1, 2**20, -(2**20), 65535], True),
+    ("[-32767, 32766]", lambda: [-32767, 32766], True),
+    ("[-32768, 32765]", lambda: [-32768, 32765], True),
+    ("[-32768, 32766]", lambda: [-32768, 32766], True),
+    ("[-32767, 32767]", lambda: [-32767, 32767], True),
+    ("[100000, 165533, 99999]", lambda: [100000, 165533, 99999], True),
+    ("[100000, 165534]", lambda: [100000, 165534], True),
+    ("[int32 min, int32 min + 65533]", lambda: [_INT32.min, _INT32.min + 65533], True),
+    ("[int32 max - 65533, int32 max]", lambda: [_INT32.max - 65533, _INT32.max], True),
+    ("[30000, 59990, 5, 100, 1000, 20000, 40000, -10]", lambda: [30000, 59990, 5, 100, 1000, 20000, 40000, -10], True),
+    ("int32 array of 2", lambda: np.array([4, 999], np.int32), True),
+    ("int32 array of 8", lambda: np.arange(8, dtype=np.int32) * 100, True),
+    ("int32 array of 9", lambda: np.arange(9, dtype=np.int32) * 100, False),
+    ("nine values", lambda: list(range(9)), False),
+    ("[]", lambda: [], False),
+    ("empty int32 array", lambda: np.array([], np.int32), False),
+    ("[1, 2.5]", lambda: [1, 2.5], False),
+    ("[1, True]", lambda: [1, True], False),
+    ("[2**31]", lambda: [2**31], False),
+    ("[-2**31 - 1]", lambda: [-(2**31) - 1], False),
+    ("[5, 2**40]", lambda: [5, 2**40], False),
+    ("[2**63]", lambda: [2**63], False),
+    ("int64 array", lambda: np.array([1, 2]), False),
+    ("int16 array", lambda: np.array([1, 2], np.int16), False),
+    ("uint32 array", lambda: np.array([1, 2], np.uint32), False),
+    ("strided int32 array", lambda: np.arange(16, dtype=np.int32)[::4], False),
+    ("two-dimensional int32 array", lambda: np.array([[1, 2], [3, 4]], np.int32), False),
+    ("scalar 5", lambda: 5, False),
+    ("set", lambda: {1, 2}, False),
+)
+
+
 def isin_cases() -> Iterator[Case]:
-    """Yield the cases of `isin` on int64."""
-    kernel = "isin_i64"
+    """Yield the cases of `isin` on int64 and int32."""
+    kernel = {"i64": "isin_i64", "i32": "isin_i32"}
     for n, spread in itertools.product(VALUE_SIZES, ("narrow", "wide")):
         for text, test, taken in _ISIN_TESTS:
             yield Case("isin", f"np.isin(x, {text}) n={n} x={spread}", lambda n=n, spread=spread, test=test: (_isin_x(spread, n), test()),
-                       np.isin, kernel if taken else None)
+                       np.isin, kernel["i64"] if taken else None)
+    for n, spread in itertools.product(VALUE_SIZES, ("narrow", "wide", "edges")):
+        for text, test, taken in _ISIN_I32_TESTS:
+            yield Case("isin", f"np.isin(x, {text}) int32 n={n} x={spread}",
+                       lambda n=n, spread=spread, test=test: (_isin_x(spread, n, np.int32), test()),
+                       np.isin, kernel["i32"] if taken else None)
     spellings = (
         Spelling("np.isin(x, [1, 2, 3])", lambda x: np.isin(x, [1, 2, 3])),
         Spelling("np.isin(x, [1, 2, 3], invert=True)", lambda x: np.isin(x, [1, 2, 3], invert=True), NEVER),
@@ -2524,7 +3090,7 @@ def isin_cases() -> Iterator[Case]:
             for variant in variants_for(dtype, n):
                 yield Case("isin", f"{spelling.text} {dtype} n={n} layout={variant.name}",
                            partial(_built, dtype, n, variant), spelling.call,
-                           expectation(kernel if dtype == "i64" else None, spelling, variant, n))
+                           expectation(kernel.get(dtype), spelling, variant, n))
 
 
 # ---------------------------------------------------- searchsorted and interp
@@ -2718,6 +3284,7 @@ def _search_grid_cases(text: str, search: Callable, kernel: str) -> Iterator[Cas
 def searchsorted_cases() -> Iterator[Case]:
     """Yield the cases of `searchsorted`: float64 and then int64, for both sides."""
     yield from searchsorted_float_cases()
+    yield from searchsorted_f32_needle_cases()
     yield from searchsorted_int_cases()
 
 
@@ -2766,7 +3333,7 @@ def searchsorted_float_cases() -> Iterator[Case]:
         ("np.searchsorted(a, np.float64(0.25))", lambda a, v: np.searchsorted(a, np.float64(0.25)), None),
         ("np.searchsorted(a, np.array(0.25))", lambda a, v: np.searchsorted(a, np.array(0.25)), None),
         ("np.searchsorted(a, v.tolist())", lambda a, v: np.searchsorted(a, v.tolist()), None),
-        ("np.searchsorted(a, v.astype(np.float32))", lambda a, v: np.searchsorted(a, v.astype(np.float32)), None),
+        ("np.searchsorted(a, v.astype(np.float32))", lambda a, v: np.searchsorted(a, v.astype(np.float32)), kernel),
         ("np.searchsorted(a, v.astype(np.int64))", lambda a, v: np.searchsorted(a, v.astype(np.int64)), None),
         ("np.searchsorted(a.astype(np.float32), v)", lambda a, v: np.searchsorted(a.astype(np.float32), v), None),
         ("np.searchsorted(a.astype(np.int64), v)", lambda a, v: np.searchsorted(a.astype(np.int64), v), None),
@@ -2789,6 +3356,127 @@ def searchsorted_float_cases() -> Iterator[Case]:
             yield Case("searchsorted", f"{text} n={n} needles={size} v layout={variant.name}",
                        lambda size=size, variant=variant: (_table(n), variant.build(values("f64", size, arg="v"))),
                        search, expect)
+
+
+# Numbers of float32 needles: besides NEEDLE_COUNTS, either side of the 512
+# that the binding converts to float64 at a time, and of twice that.
+F32_NEEDLE_COUNTS = (*NEEDLE_COUNTS, 511, 512, 513, 1023, 1024, 1025)
+# Bits of float32 signalling NaNs, positive and negative: the quiet bit clear
+# and the lowest and the highest bit of the rest of the fraction set.
+F32_SIGNALLING_NANS = (0x7F800001, 0x7FBFFFFF, 0xFF800001, 0xFFBFFFFF)
+# Bits of float32 values next to the signalling NaNs that are not: the
+# infinities, the largest finite values and the first quiet NaNs.
+F32_NOT_SIGNALLING = (0x7F800000, 0x7F7FFFFF, 0x7FC00000, 0xFF800000, 0xFF7FFFFF, 0xFFC00000, 0x7FFFFFFF)
+# Position of the signalling NaN among the needles in the cases that place one:
+# in the first chunk the binding converts, and in a later one.
+F32_SIGNALLING_POSITIONS = (0, SPELLING_NEEDLES - 1, 700)
+
+
+def _f32_search_arguments(n: int, table_class: str, count: int, needle_class: str) -> tuple:
+    """Build a sorted float64 array and float32 needles for a searchsorted case.
+
+    The array's elements are float32 values held as float64, so that needles
+    taken from it ("hits") equal elements after NumPy converts them.
+
+    Args:
+        n: Length of the sorted array.
+        table_class: Value class of the sorted array.
+        count: Number of needles.
+        needle_class: Value class of the needles, or "hits" for needles taken
+            from the array itself.
+
+    Returns:
+        (sorted float64 array, float32 needles).
+    """
+    table = _table(n, table_class).astype(np.float32).astype(np.float64)
+    if needle_class == "hits":
+        return table, _hits(table, count).astype(np.float32)
+    return table, values("f32", count, needle_class, arg="v")
+
+
+def _f32_bits_arguments(bits: tuple, position: int, count: int) -> tuple:
+    """Build a sorted float64 array and float32 needles holding given bit patterns.
+
+    Args:
+        bits: Bit patterns of float32 values to place among random needles.
+        position: Index of the first of them; the rest follow it.
+        count: Number of needles.
+
+    Returns:
+        (sorted float64 array of ORDINARY_N elements, float32 needles).
+    """
+    needles = values("f32", count, arg="v")
+    patterns = np.array(bits, dtype=np.uint32).view(np.float32)
+    needles[position:position + len(patterns)] = patterns
+    return _table(ORDINARY_N), needles
+
+
+def searchsorted_f32_needle_cases() -> Iterator[Case]:
+    """Yield the cases of `searchsorted` on float64 with float32 needles, for both sides."""
+    for text, search, kernel in SEARCH_SIDES:
+        text = text.replace("v)", "v32)")
+        for n, count in itertools.product(TABLE_SIZES, F32_NEEDLE_COUNTS):
+            for needle_class in (*NEEDLE_CLASSES, "hits"):
+                yield Case("searchsorted", f"{text} a=random n={n} v32={needle_class} needles={count}",
+                           partial(_f32_search_arguments, n, "random", count, needle_class), search, kernel)
+            for table_class in TABLE_CLASSES[1:]:
+                yield Case("searchsorted", f"{text} a={table_class} n={n} v32=hits needles={count}",
+                           partial(_f32_search_arguments, n, table_class, count, "hits"), search, kernel)
+        for n in (LARGE_TABLE_N, BEYOND_LARGE_TABLE_N):
+            for count, (table_class, needle_class) in itertools.product(LARGE_TABLE_NEEDLES, LARGE_TABLE_PAIRS):
+                yield Case("searchsorted", f"{text} a={table_class} n={n} v32={needle_class} needles={count}",
+                           partial(_f32_search_arguments, n, table_class, count, needle_class), search, kernel)
+        # Values next to a signalling NaN are searched; a signalling NaN
+        # anywhere among the needles makes NumPy's cast warn, and is NumPy's.
+        yield Case("searchsorted", f"{text} v32=infinities, largest and quiet NaNs needles={SPELLING_NEEDLES}",
+                   partial(_f32_bits_arguments, F32_NOT_SIGNALLING, 1, SPELLING_NEEDLES), search, kernel)
+        for bits, position in itertools.product(F32_SIGNALLING_NANS, F32_SIGNALLING_POSITIONS):
+            count = max(SPELLING_NEEDLES, position + 1)
+            yield Case("searchsorted", f"{text} v32=signalling NaN {bits:#x} at {position} needles={count}",
+                       partial(_f32_bits_arguments, (bits,), position, count), search, None)
+        for size in (0, *LAYOUT_SIZES):
+            for variant in variants_for("f32", size):
+                expect = None if variant.name == "list" else _search_layout_expectation(kernel, variant, size, any_shape=True)
+                yield Case("searchsorted", f"{text} n={ORDINARY_N} needles={size} v32 layout={variant.name}",
+                           lambda size=size, variant=variant: (_table(ORDINARY_N), variant.build(values("f32", size, arg="v"))),
+                           search, expect)
+
+    n, count = ORDINARY_N, SPELLING_NEEDLES
+    arguments = partial(_f32_search_arguments, n, "random", count, "random")
+    kernel, right = "searchsorted_f64", "searchsorted_right_f64"
+    spellings = (
+        ("a.searchsorted(v32)", lambda a, v: a.searchsorted(v), kernel),
+        ("a.searchsorted(v32, 'right')", lambda a, v: a.searchsorted(v, "right"), right),
+        ("np.digitize(v32, a)", lambda a, v: np.digitize(v, a), right),
+        ("np.digitize(v32, a, right=True)", lambda a, v: np.digitize(v, a, right=True), kernel),
+        ("np.searchsorted(a, v32.reshape(4, -1))", lambda a, v: np.searchsorted(a, v.reshape(4, -1)), kernel),
+        ("np.searchsorted(a, v32, sorter=np.arange(len(a)))", lambda a, v: np.searchsorted(a, v, sorter=np.arange(len(a))), None),
+        ("np.searchsorted(a, v32[0])", lambda a, v: np.searchsorted(a, v[0]), None),
+        ("np.searchsorted(a, np.array(v32[0]))", lambda a, v: np.searchsorted(a, np.array(v[0])), None),
+        ("np.searchsorted(a, v32.astype(np.float16))", lambda a, v: np.searchsorted(a, v.astype(np.float16)), None),
+        ("np.searchsorted(a, v32.astype('>f4'))", lambda a, v: np.searchsorted(a, v.astype(">f4")), None),
+        ("np.searchsorted(a.astype(np.float32), v32)", lambda a, v: np.searchsorted(a.astype(np.float32), v), None),
+        ("np.searchsorted(a.astype(np.int64), v32)", lambda a, v: np.searchsorted(a.astype(np.int64), v), None),
+    )
+    for text, call, expect in spellings:
+        yield Case("searchsorted", f"{text} n={n} needles={count}", arguments, call, expect)
+    # A signalling NaN under np.errstate(invalid='raise'): NumPy raises.
+    yield Case("searchsorted", f"np.searchsorted(a, v32) v32=signalling NaN under errstate(invalid='raise') needles={count}",
+               partial(_f32_bits_arguments, F32_SIGNALLING_NANS[:1], 0, count), _search_raising_invalid, None)
+
+
+def _search_raising_invalid(a, v):
+    """Call `np.searchsorted(a, v)` under `np.errstate(invalid='raise')`.
+
+    Args:
+        a: The sorted array.
+        v: The needles.
+
+    Returns:
+        What NumPy, or the kernel in its place, returns or raises.
+    """
+    with np.errstate(invalid="raise"):
+        return np.searchsorted(a, v)
 
 
 # The two sides of a search on int64, as SEARCH_SIDES.
@@ -3846,6 +4534,34 @@ def _invalid_flag_after(call: Callable[..., object], *arguments: object) -> tupl
     return result, bool(_LIBM.fetestexcept(_FE_INVALID))
 
 
+# The inexact flag of fenv.h, and all of its flags: their values differ
+# between ARM64 macOS and x86-64 Linux.
+_FE_INEXACT = 0x10 if ON_ARM64 else 0x20
+_FE_ALL_EXCEPT = 0x9F if ON_ARM64 else 0x3D
+
+
+def _float_flags_after(call: Callable[..., object], *arguments: object) -> tuple:
+    """Make a call with the invalid and inexact flags raised, and return the flags it left.
+
+    NumPy's float sum clears the flags it reports (invalid, divide by zero,
+    overflow, underflow) and leaves the inexact flag, which its additions
+    set when one of them rounds. A kernel must leave the same flags.
+
+    Args:
+        call: Makes the call on the arguments.
+        arguments: The call's arguments.
+
+    Returns:
+        (the call's result, every flag of fenv.h set afterwards).
+    """
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    _LIBM.feraiseexcept(_FE_INVALID | _FE_INEXACT)
+    result = call(*arguments)
+    flags = _LIBM.fetestexcept(_FE_ALL_EXCEPT)
+    _LIBM.feclearexcept(_FE_ALL_EXCEPT)
+    return result, flags
+
+
 # ---------------------------------------------------------------- reduceat
 
 # Run lengths of the regular starts of np.fmax.reduceat: runs of one element,
@@ -4169,6 +4885,21 @@ ANY_MARKED_EVERY = 3
 ANY_MARKED_STEP = 5
 # Width and row count of the matrices of the layouts and spellings sweep.
 ANY_LAYOUT_SHAPES = ((3, 7), (100, 22), (1000, 22))
+# Row widths of the any(axis=0) sweep: those of any(axis=1), a width the
+# kernel was asked for, and either side of its passes of four and eight
+# strips of 32 columns, with one beyond two passes of eight.
+ANY_COLS_COLS = (*ANY_COLS, 30, 127, 128, 129, 255, 256, 257, 513)
+# Row counts of the any(axis=0) sweep: one row, the counts at which a narrow
+# matrix is under and over the 32 bytes of the kernel's vector, and many. A
+# further count per width releases the interpreter lock (_any_large_rows).
+ANY_COLS_ROWS = (1, 2, 3, 5, 100)
+# Width and row count of the matrices of the any(axis=0) layouts and
+# spellings sweep: a matrix under 32 bytes, a shape the kernel was asked for,
+# and one large enough to release the interpreter lock.
+ANY_COLS_LAYOUT_SHAPES = ((3, 7), (30, 31), (1000, 22))
+# Shapes of the any(axis=0) matrices that hold bytes other than 0 and 1: under
+# 32 bytes, narrow, a row of exactly one vector, wide, and a tall one.
+ANY_COLS_BAD_SHAPES = ((1, 1), (1, 31), (3, 7), (5, 4), (30, 31), (2, 32), (7, 33), (3, 100), (4, 300), (2000, 22))
 
 
 def _any_large_rows(cols: int) -> int:
@@ -4254,8 +4985,6 @@ _ANY_TAKING: tuple[tuple[str, Callable], ...] = (
 _ANY_NEVER: tuple[tuple[str, Callable], ...] = (
     ("m.any()", lambda m: m.any()),
     ("np.any(m)", np.any),
-    ("m.any(axis=0)", lambda m: m.any(axis=0)),
-    ("np.any(m, axis=0)", lambda m: np.any(m, axis=0)),
     ("m.any(axis=None)", lambda m: m.any(axis=None)),
     ("np.any(m, axis=None)", lambda m: np.any(m, axis=None)),
     ("m.any(axis=(1,))", lambda m: m.any(axis=(1,))),
@@ -4374,16 +5103,169 @@ def _any_bad_byte_cases() -> Iterator[Case]:
                             partial(_any_late_bad, byte), call, None)
 
 
-def any_cases() -> Iterator[Case]:
-    """Yield the cases of `m.any(axis=1)` and `np.any(m, axis=1)` on boolean matrices.
+def _any_cols_out(m):
+    """Run `m.any(axis=0, out=o)` into a new array of the right length and return `o`."""
+    return m.any(axis=0, out=np.empty(np.shape(m)[1], np.bool_))
 
-    The kernel takes a plain, C-ordered, two-dimensional boolean array with
-    at least one column whose bytes are all 0 or 1, with `axis` 1 or -1 as a
-    Python int and no other argument; see the binding's hk_try_any_rows.
+
+def _any_cols_function_out(m):
+    """Run `np.any(m, axis=0, out=o)` into a new array of the right length and return `o`."""
+    return np.any(m, axis=0, out=np.empty(np.shape(m)[1], np.bool_))
+
+
+def _any_cols_where(m):
+    """Run `m.any(axis=0, where=w)` with a `where` that leaves out the first row."""
+    where = np.ones(np.shape(m), np.bool_)
+    where[0] = False
+    return m.any(axis=0, where=where)
+
+
+# The spellings of any(axis=0) that take the kernel, first the two the sweep
+# over every value runs.
+_ANY_COLS_TAKING: tuple[tuple[str, Callable], ...] = (
+    ("m.any(axis=0)", lambda m: m.any(axis=0)),
+    ("np.any(m, axis=0)", lambda m: np.any(m, axis=0)),
+    ("m.any(axis=-2)", lambda m: m.any(axis=-2)),
+    ("m.any(0)", lambda m: m.any(0)),
+    ("m.any(-2)", lambda m: m.any(-2)),
+    ("np.any(m, axis=-2)", lambda m: np.any(m, axis=-2)),
+    ("np.any(m, 0)", lambda m: np.any(m, 0)),
+    ("np.any(m, -2)", lambda m: np.any(m, -2)),
+)
+# Spellings of the same operation, or of one beside it, that must stay with
+# NumPy. `axis=False` is axis 0 to NumPy; the binding takes only an int.
+_ANY_COLS_NEVER: tuple[tuple[str, Callable], ...] = (
+    ("m.any(axis=(0,))", lambda m: m.any(axis=(0,))),
+    ("np.any(m, axis=(0,))", lambda m: np.any(m, axis=(0,))),
+    ("m.any(axis=np.int64(0))", lambda m: m.any(axis=np.int64(0))),
+    ("np.any(m, axis=np.int64(0))", lambda m: np.any(m, axis=np.int64(0))),
+    ("m.any(axis=False)", lambda m: m.any(axis=False)),
+    ("np.any(m, axis=False)", lambda m: np.any(m, axis=False)),
+    ("m.any(axis=0, keepdims=True)", lambda m: m.any(axis=0, keepdims=True)),
+    ("np.any(m, axis=0, keepdims=True)", lambda m: np.any(m, axis=0, keepdims=True)),
+    ("m.any(axis=0, keepdims=False)", lambda m: m.any(axis=0, keepdims=False)),
+    ("m.any(0, None)", lambda m: m.any(0, None)),
+    ("np.any(m, 0, None)", lambda m: np.any(m, 0, None)),
+    ("m.any(axis=0, out=o)", _any_cols_out),
+    ("np.any(m, axis=0, out=o)", _any_cols_function_out),
+    ("m.any(axis=0, where=w)", _any_cols_where),
+    ("np.any(a=m, axis=0)", lambda m: np.any(a=m, axis=0)),
+    ("m.any(axis=-3)", lambda m: m.any(axis=-3)),
+    ("m.all(axis=0)", lambda m: m.all(axis=0)),
+    ("np.all(m, axis=0)", lambda m: np.all(m, axis=0)),
+    ("np.logical_or.reduce(m, axis=0)", lambda m: np.logical_or.reduce(m, axis=0)),
+)
+
+
+def _any_cols_bad(rows: int, cols: int, byte: int) -> np.ndarray:
+    """Return a boolean matrix with a True in some rows, each stored as `byte`, not 1.
+
+    NumPy takes any non-zero byte as True along axis 0 and answers with a 1,
+    and so does the kernel, which is given such a matrix as it is. Few
+    elements are True, so that a column's result depends on single bytes.
+
+    Args:
+        rows: Rows of the matrix.
+        cols: Columns of the matrix.
+        byte: The byte a True is stored as, 2 to 255.
+
+    Returns:
+        The matrix, of its own memory.
+    """
+    return (_any_sparse(rows, cols).view(np.uint8) * np.uint8(byte)).view(np.bool_)
+
+
+def _any_cols_mixed(rows: int, cols: int) -> np.ndarray:
+    """Return a boolean matrix whose bytes are 0 for the most part and otherwise any value from 1 to 255.
+
+    Columns hold several different non-zero bytes, whose bitwise or is yet
+    another byte: the kernel must answer 1 for each of them and 0 for the
+    columns of zeros.
+    """
+    raw = values("u8", rows * cols, arg="m").reshape(rows, cols).copy()
+    raw[_any_random(rows, cols)] = 0
+    raw[:, ::ANY_MARKED_EVERY] = 0
+    return raw.view(np.bool_)
+
+
+def _any_cols_value_cases() -> Iterator[Case]:
+    """Yield every boolean value class at every width and row count of any(axis=0), for the two main spellings.
+
+    Positional classes put their element first, in the middle and last of
+    the matrix's elements, and so in its first, a middle and its last column.
+    A matrix of no rows stays with NumPy.
+    """
+    for cols in ANY_COLS_COLS:
+        for rows in (*ANY_COLS_ROWS, _any_large_rows(cols)):
+            for _, _, label, maker in value_arrays("bool", (rows * cols,), arg="m"):
+                shape = f"{rows}x{cols} {label.split(' ', 1)[1]}"
+                for text, call in _ANY_COLS_TAKING[:2]:
+                    yield _any_case(f"{text} bool {shape}", partial(_any_matrix, maker, cols), call,
+                                    "any_cols_bool")
+            yield _any_case(f"m.any(axis=0) bool {rows}x{cols} some columns", partial(_any_sparse, rows, cols),
+                            _ANY_COLS_TAKING[0][1], "any_cols_bool")
+        for text, call in _ANY_COLS_TAKING[:2]:
+            yield _any_case(f"{text} bool 0x{cols}", partial(_any_random, 0, cols), call, None)
+
+
+def _any_cols_layout_cases() -> Iterator[Case]:
+    """Yield every spelling of any(axis=0), every layout and every element type beside bool, at a few shapes."""
+    for rows, cols in ANY_COLS_LAYOUT_SHAPES:
+        shape = f"{rows}x{cols}"
+        matrix = partial(_any_random, rows, cols)
+        for text, call in _ANY_COLS_TAKING:
+            yield _any_case(f"{text} bool {shape}", matrix, call, "any_cols_bool")
+        for text, call in _ANY_COLS_NEVER:
+            yield _any_case(f"{text} bool {shape}", matrix, call, None)
+        for name, build, expect in _ANY_LAYOUTS:
+            # The layouts the kernel of axis 1 takes are those this one takes.
+            taken = "any_cols_bool" if expect == "any_rows_bool" else expect
+            for text, call in _ANY_COLS_TAKING[:2]:
+                yield _any_case(f"{text} bool {shape} layout={name}", partial(_any_laid_out, build, rows, cols), call,
+                                taken)
+        for dtype in ("u8", "i64", "f64"):
+            for text, call in _ANY_COLS_TAKING[:2]:
+                yield _any_case(f"{text} {dtype} {shape}", partial(_any_random, rows, cols, dtype), call, None)
+        for text, call in _ANY_COLS_TAKING[:2]:
+            yield _any_case(f"{text} bool {shape} as 3-D", partial(_any_cube, rows, cols), call, None)
+            yield _any_case(f"{text} bool {rows * cols} in 1-D", partial(_any_flat, rows, cols), call, None)
+    for text, call in _ANY_COLS_TAKING[:2]:
+        for rows in (0, 3):
+            yield _any_case(f"{text} bool {rows}x0", partial(_any_random, rows, 0), call, None)
+        yield _any_case(f"{text} bool 0x0", partial(_any_random, 0, 0), call, None)
+
+
+def _any_cols_bad_byte_cases() -> Iterator[Case]:
+    """Yield matrices holding bytes other than 0 and 1, which the kernel of any(axis=0) takes.
+
+    The result must be NumPy's, True for a column that holds any non-zero
+    byte, and each of its bytes must be 0 or 1.
+    """
+    for rows, cols in ANY_COLS_BAD_SHAPES:
+        for text, call in _ANY_COLS_TAKING[:2]:
+            for byte in BAD_MASK_BYTES:
+                yield _any_case(f"{text} bool {rows}x{cols} mask bytes are {byte}",
+                                partial(_any_cols_bad, rows, cols, byte), call, "any_cols_bool")
+            yield _any_case(f"{text} bool {rows}x{cols} mask bytes are of every value",
+                            partial(_any_cols_mixed, rows, cols), call, "any_cols_bool")
+
+
+def any_cases() -> Iterator[Case]:
+    """Yield the cases of `any` along either axis of a boolean matrix, by method and by function.
+
+    Along axis 1 the kernel takes a plain, C-ordered, two-dimensional boolean
+    array with at least one column whose bytes are all 0 or 1, with `axis` 1
+    or -1 as a Python int and no other argument; see the binding's
+    hk_try_any_rows. Along axis 0 it takes such an array with at least one
+    row and one column, whatever its bytes, with `axis` 0 or -2; see
+    hk_try_any_cols.
     """
     yield from _any_value_cases()
     yield from _any_layout_cases()
     yield from _any_bad_byte_cases()
+    yield from _any_cols_value_cases()
+    yield from _any_cols_layout_cases()
+    yield from _any_cols_bad_byte_cases()
 
 
 # ------------------------------------------------- argmax and argmin along rows

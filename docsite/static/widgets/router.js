@@ -28,6 +28,10 @@ const HOOKS = {
 
 const OTHER = { label: "another type", kernel: null };
 
+// The layout nonzero takes (hook_method.c hk_try_nonzero): one dimension, or a
+// C-ordered matrix, which goes to nonzero_2d_bool.
+const NONZERO_LAYOUT = "mask is contiguous and one-dimensional, or a C-ordered matrix (served by nonzero_2d_bool)";
+
 // One entry per statement.
 //   code      the statement as the reader writes it
 //   array     the array the controls describe
@@ -38,6 +42,7 @@ const OTHER = { label: "another type", kernel: null };
 //   typeText  how the element-type check reads
 //   wrapper   what NumPy's Python wrapper does on this path, when it runs before the hook
 //   oneD      the array must be one-dimensional
+//   layout    how the layout check reads, where the usual wording does not fit
 //   given     conditions this statement meets as written, listed so the reader sees them
 //   loopGiven the same, for the clip loop below the first hook
 //   extra     one more choice that decides a check
@@ -93,13 +98,13 @@ const STATEMENTS = [
       "x is writable and does not share memory with mask", "every mask byte is 0 or 1 (the mask is read once to check)"],
   },
   { // hook_function.c call_where; np.where calls NumPy's C nonzero directly, not the method.
-    code: "np.where(mask)", array: "mask", via: "function", oneD: true,
+    code: "np.where(mask)", array: "mask", via: "function", oneD: true, layout: NONZERO_LAYOUT,
     types: [{ label: "bool", kernel: "nonzero_bool" }, OTHER],
     typeText: "elements are bool",
     given: ["mask is the only argument", "every mask byte is 0 or 1 (the mask is read once to check)"],
   },
   { // hook_method.c method_nonzero; np.nonzero calls the method.
-    code: "np.nonzero(mask)", array: "mask", via: "method", oneD: true,
+    code: "np.nonzero(mask)", array: "mask", via: "method", oneD: true, layout: NONZERO_LAYOUT,
     types: [{ label: "bool", kernel: "nonzero_bool" }, OTHER],
     typeText: "elements are bool",
     wrapper: "np.nonzero(mask) is a Python function that calls mask.nonzero().",
@@ -223,7 +228,8 @@ function route(statement, state) {
   // The checks the function, method and indexing hooks share ("When a call takes a kernel").
   const shared = () => {
     const typeOk = type.kernel !== null && (!type.inexact || state.extra === 1);
-    const layoutText = statement.oneD ? `${name} is one-dimensional and contiguous` : `${name} is contiguous (any shape)`;
+    const layoutText = statement.layout
+      || (statement.oneD ? `${name} is one-dimensional and contiguous` : `${name} is contiguous (any shape)`);
     const list = [
       check(`${name} is exactly an ndarray, not a subclass`, plain),
       check(statement.typeText, typeOk),
