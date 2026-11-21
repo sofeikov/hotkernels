@@ -195,6 +195,14 @@ static inline bool hk_is_flat(PyObject *obj, int type_num) {
            PyArray_NDIM(a) >= 1 && PyArray_IS_C_CONTIGUOUS(a);
 }
 
+// As hk_is_flat, and also a zero-dimensional array, which holds one element
+// and is always contiguous.
+static inline bool hk_is_flat_or_0d(PyObject *obj, int type_num) {
+    if (!hk_is_plain_array(obj)) return false;
+    PyArrayObject *a = (PyArrayObject *)obj;
+    return PyArray_TYPE(a) == type_num && PyArray_ISNOTSWAPPED(a) && PyArray_IS_C_CONTIGUOUS(a);
+}
+
 // As hk_is_flat, and one-dimensional.
 static inline bool hk_is_flat_1d(PyObject *obj, int type_num) {
     return hk_is_flat(obj, type_num) && PyArray_NDIM((PyArrayObject *)obj) == 1;
@@ -658,10 +666,17 @@ PyObject *hk_try_any_cols(PyObject *mask);
 
 // np.round(x, decimals) for a contiguous float64 `array` of 1 to
 // ROUND_F64_MAX_N elements, as the new array NumPy returns: the binding's own
-// loop, round_f64. `decimals` is the caller's argument, or NULL when it was
-// not given; it must be a Python int from 0 to 15. The caller has tested the
-// array's type, and that there is no `out`. In hook_method.c.
+// loop, round_f64. A zero-dimensional array gives an np.float64, as NumPy's
+// does (see hk_try_round_number). `decimals` is the caller's argument, or NULL
+// when it was not given; it must be a Python int from 0 to 15. The caller has
+// tested the array's type (hk_is_flat_or_0d), and that there is no `out`. In
+// hook_method.c.
 PyObject *hk_try_round(PyObject *array, PyObject *decimals);
+
+// np.round(x, decimals) for one float64 `value`, from an np.float64 or a
+// zero-dimensional float64 array, as the np.float64 NumPy returns for either,
+// with the loop and the conditions of hk_try_round. In hook_method.c.
+PyObject *hk_try_round_number(double value, PyObject *decimals);
 
 // Set the elements of `x` where `mask` is True to `value`, in place: the
 // maskfill kernels. `x` is contiguous and writable, and `mask` a contiguous

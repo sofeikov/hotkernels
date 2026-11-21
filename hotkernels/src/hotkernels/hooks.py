@@ -361,19 +361,25 @@ def _round_with(round_: Callable[[np.ndarray, int], np.ndarray]) -> bool:
 
     The expected values are computed in plain Python: `round` of a float to
     an int goes to the even neighbour on a tie, as `rint` does, and the
-    products are exact.
+    products are exact. Each value is also rounded alone, as an np.float64
+    and as a zero-dimensional array, both of which give an np.float64.
 
     Args:
         round_: Rounds its first argument to the number of decimals given by
             the second.
 
     Returns:
-        Whether the result is float64 and holds the rounded values.
+        Whether the results are float64 and hold the rounded values.
     """
     scale = 10.0 ** PROBE_DECIMALS
     x = (np.arange(SMALL_PROBE_N) - SMALL_PROBE_N // 2) * PROBE_ROUND_STEP / scale
+    expected = [round(v * scale) / scale for v in x.tolist()]
     result = round_(x, PROBE_DECIMALS)
-    return result.dtype == np.float64 and result.tolist() == [round(v * scale) / scale for v in x.tolist()]
+    if result.dtype != np.float64 or result.tolist() != expected:
+        return False
+    alone = [round_(number, PROBE_DECIMALS) for v in x for number in (v, np.array(v))]
+    return all(type(r) is np.float64 for r in alone) and [float(r) for r in alone[::2]] == expected \
+        and [float(r) for r in alone[1::2]] == expected
 
 
 def _round_method(x: np.ndarray, decimals: int) -> np.ndarray:

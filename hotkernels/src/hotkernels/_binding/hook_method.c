@@ -1751,8 +1751,38 @@ static HK_TARGET_KERNEL_LEVEL void round_loop(const double *restrict x, double *
     }
 }
 
+// Round the `n` elements at `x` into `out` to `places` decimals with
+// round_loop, between clearing the floating-point flags and reading them.
+// Returns false if a flag NumPy reports was raised: `out` is then not to be
+// used. The flags are left clear either way.
+static bool round_values(const double *x, double *out, size_t n, long places) {
+    hk_clear_float_flags();
+    round_loop(x, out, n, ROUND_POWERS[places]);
+    const bool raised = hk_float_flags_reported();
+    hk_clear_float_flags();
+    return !raised;
+}
+
+HK_NOINLINE PyObject *hk_try_round_number(double value, PyObject *decimals) {
+    long places;
+    if (!round_decimals(decimals, &places)) return NULL;
+    double rounded;
+    if (!round_values(&value, &rounded, 1, places)) return NULL;
+    PyObject *result = hk_scalar(NPY_DOUBLE, &rounded);
+    if (result != NULL) hk_take(HK_ROUND_F64);
+    return result;
+}
+
 HK_NOINLINE PyObject *hk_try_round(PyObject *array, PyObject *decimals) {
     PyArrayObject *x = (PyArrayObject *)array;
+    // NumPy rounds a zero-dimensional array to an np.float64, not to an
+    // array. Its data need not be aligned: memcpy, not a load through a
+    // double pointer.
+    if (PyArray_NDIM(x) == 0) {
+        double value;
+        memcpy(&value, PyArray_DATA(x), sizeof value);
+        return hk_try_round_number(value, decimals);
+    }
     const npy_intp n = PyArray_SIZE(x);
     long places;
     // NumPy returns an empty array without computing anything.
@@ -1762,11 +1792,7 @@ HK_NOINLINE PyObject *hk_try_round(PyObject *array, PyObject *decimals) {
         PyErr_Clear();
         return NULL;
     }
-    hk_clear_float_flags();
-    round_loop(PyArray_DATA(x), PyArray_DATA((PyArrayObject *)result), (size_t)n, ROUND_POWERS[places]);
-    const bool raised = hk_float_flags_reported();
-    hk_clear_float_flags();
-    if (raised) {
+    if (!round_values(PyArray_DATA(x), PyArray_DATA((PyArrayObject *)result), (size_t)n, places)) {
         Py_DECREF(result);
         return NULL;
     }
@@ -1799,13 +1825,16 @@ static HK_NOINLINE PyObject *try_round(PyObject *self, PyObject *args, PyObject 
     return hk_try_round(self, bound[DECIMALS]);
 }
 
-// x.round(decimals) on a contiguous float64 array. np.round(x, decimals) and
-// np.around call the method as x.round(decimals=d, out=o) when their own
-// hooks pass a call on, and NumPy converts a list or a scalar to an array and
-// calls its method; all of them that are not taken are counted here, once.
+// x.round(decimals) on a contiguous float64 array, zero-dimensional included.
+// np.round(x, decimals) and np.around call the method as
+// x.round(decimals=d, out=o) when their own hooks pass a call on, and NumPy
+// converts a list or a scalar to an array and calls its method (an
+// np.float64's own round method does, so `s.round(1)` arrives here as a
+// zero-dimensional array); all of them that are not taken are counted here,
+// once.
 // Called with a tuple and a dictionary (METH_VARARGS | METH_KEYWORDS).
 static PyObject *method_round(PyObject *self, PyObject *args, PyObject *kwargs) {
-    if (hk_is_flat(self, NPY_DOUBLE)) {
+    if (hk_is_flat_or_0d(self, NPY_DOUBLE)) {
         PyObject *result = try_round(self, args, kwargs);
         if (result != NULL) return result;
     }
