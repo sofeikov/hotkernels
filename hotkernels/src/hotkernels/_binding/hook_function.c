@@ -387,15 +387,12 @@ static HK_NOINLINE PyObject *try_sum_bool(PyArrayObject *mask) {
     return result;
 }
 
-#if defined(__aarch64__)
 // The sum of a contiguous, aligned, one-dimensional float32 array, as the
 // np.float32 NumPy returns: the sum_f32 kernel, which makes NumPy's additions in
 // NumPy's order (its pairwise summation) and so gives its bits. An empty
 // array sums to +0.0, as in NumPy. A sum that is not finite is NumPy's to
 // give, with its warning and the bits of its NaN, and the call is passed on.
 // The flags are left as NumPy leaves them (hk_clear_reported_float_flags).
-// ARM64 only: on x86-64 the call stays with NumPy until the kernel is
-// measured there (docs/coverage-gaps-arm64.md).
 static HK_NOINLINE PyObject *try_sum_f32(PyArrayObject *a) {
     const npy_intp n = PyArray_SIZE(a);
     float total;
@@ -411,7 +408,10 @@ static HK_NOINLINE PyObject *try_sum_f32(PyArrayObject *a) {
     return result;
 }
 
+#if defined(__aarch64__)
 // The same for float64, as the np.float64 NumPy returns: the sum_f64 kernel.
+// ARM64 only: on x86-64 the call stays with NumPy until the kernel is
+// written there (docs/coverage-gaps-arm64.md).
 static HK_NOINLINE PyObject *try_sum_f64(PyArrayObject *a) {
     const npy_intp n = PyArray_SIZE(a);
     double total;
@@ -429,21 +429,21 @@ static HK_NOINLINE PyObject *try_sum_f64(PyArrayObject *a) {
 #endif
 
 // The sum of a contiguous uint8 array, as the np.uint64 NumPy returns, or of
-// a contiguous boolean array, as the np.intp it returns for that, and on
-// ARM64 of a contiguous, aligned, one-dimensional float32 or float64 array.
+// a contiguous boolean array, as the np.intp it returns for that, and of a
+// contiguous, aligned, one-dimensional float32 array, or on ARM64 float64.
 PyObject *hk_try_sum(PyObject *array) {
     if (hk_is_flat(array, NPY_BOOL)) return try_sum_bool((PyArrayObject *)array);
-#if defined(__aarch64__)
     // An array whose elements are not aligned to their size is copied by
     // NumPy in blocks of its buffer size, 8,192 elements, whose sums it adds
     // one after another: another order. It stays with NumPy.
+#if defined(__aarch64__)
     if (hk_is_flat_1d(array, NPY_DOUBLE) && PyArray_ISALIGNED((PyArrayObject *)array)) {
         return try_sum_f64((PyArrayObject *)array);
     }
+#endif
     if (hk_is_flat_1d(array, NPY_FLOAT) && PyArray_ISALIGNED((PyArrayObject *)array)) {
         return try_sum_f32((PyArrayObject *)array);
     }
-#endif
     if (!hk_is_flat(array, NPY_UINT8)) return NULL;
     PyArrayObject *a = (PyArrayObject *)array;
     const npy_intp n = PyArray_SIZE(a);

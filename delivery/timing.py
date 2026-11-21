@@ -541,9 +541,8 @@ def _subtract_scalar(w: np.ndarray) -> None:
 # where they are built: ARM64 only. Elsewhere the statements are timed as
 # calls left to NumPy, and so they are below INPLACE_MIN_N elements.
 INPLACE_MIN_N = 131072
-# The float sum kernels take their calls on ARM64 only, until measured on
-# x86-64 (docs/coverage-gaps-arm64.md).
-SUM_F32 = "sum_f32" if ON_ARM64 else None
+# The float64 sum kernel takes its calls on ARM64 only, until it is written
+# for x86-64 (docs/coverage-gaps-arm64.md).
 SUM_F64 = "sum_f64" if ON_ARM64 else None
 # The kernel of np.nonzero on a boolean matrix, which is installed on ARM64
 # only; elsewhere those statements are timed as calls left to NumPy.
@@ -641,8 +640,8 @@ TAKEN: tuple[Timed, ...] = (
     Timed("sum", "x.sum()", "uint8", _bytes, lambda x: x.sum(), "sum_u8"),
     Timed("sum", "np.sum(mask)", "bool, half selected", partial(_mask, HALF), np.sum, "sum_u8"),
     Timed("sum", "mask.sum()", "bool, half selected", partial(_mask, HALF), lambda m: m.sum(), "sum_u8"),
-    Timed("sum", "np.sum(x)", "float32", partial(_floats, np.float32), np.sum, SUM_F32),
-    Timed("sum", "x.sum()", "float32", partial(_floats, np.float32), lambda x: x.sum(), SUM_F32),
+    Timed("sum", "np.sum(x)", "float32", partial(_floats, np.float32), np.sum, "sum_f32"),
+    Timed("sum", "x.sum()", "float32", partial(_floats, np.float32), lambda x: x.sum(), "sum_f32"),
     Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, SUM_F64),
     Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), SUM_F64),
     Timed("count_nonzero", "np.count_nonzero(x)", "int64", partial(_ints, np.int64), np.count_nonzero, "count_nonzero_i64"),
