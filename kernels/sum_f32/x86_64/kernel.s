@@ -45,7 +45,8 @@
 #
 # Speed on the Intel Core i5-14600KF: the group's loop is one load and one
 # add per vector, against two load ports and two add ports. In the
-# first-level cache it runs at 0.67 cycles a vector with x 16 bytes past a
+# first-level cache it runs at 0.67 to 0.79 cycles a vector (65 to 76.5 ns
+# at 4,096 elements in two judge runs) with x 16 bytes past a
 # 32-byte boundary, where every second load straddles two cache lines;
 # beyond it, within a tenth of a plain contiguous sum of the same bytes.
 
