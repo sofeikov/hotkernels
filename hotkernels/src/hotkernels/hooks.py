@@ -870,23 +870,29 @@ def _isin(dtype: type = np.int64) -> bool:
 
 
 def _searchsorted() -> bool:
-    """Probe the method hook: `np.searchsorted` for needles between whole numbers."""
+    """Probe the method hook: `np.searchsorted` for needles between whole numbers.
+
+    The needles are searched as float64 and as float32, which the float64
+    kernel takes converted.
+    """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N) + 0.5
     expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return bool(np.array_equal(np.searchsorted(table, needles), expected))
+    return all(bool(np.array_equal(np.searchsorted(table, v), expected)) for v in (needles, needles.astype(np.float32)))
 
 
 def _searchsorted_right() -> bool:
     """Probe the method hook: `np.searchsorted` with `side='right'` for needles that are elements.
 
     Every needle equals one element, so the left side's answer is one less at
-    each of them: a call that reached the wrong kernel fails.
+    each of them: a call that reached the wrong kernel fails. The needles are
+    searched as float64 and as float32.
     """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N).astype(np.float64)
     expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return bool(np.array_equal(np.searchsorted(table, needles, side="right"), expected))
+    return all(bool(np.array_equal(np.searchsorted(table, v, side="right"), expected))
+               for v in (needles, needles.astype(np.float32)))
 
 
 def _searchsorted_i64(side: str) -> bool:

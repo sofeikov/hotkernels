@@ -442,9 +442,76 @@ static PyObject *searchsorted_scalar(PyArrayObject *a, PyObject *needle, hk_kern
     return hk_scalar(NPY_INTP, &position);
 }
 
+// Number of float32 needles searchsorted_f32_needles converts to float64 at a
+// time: 4 KB of stack, and a multiple of the 128 needles the float64 kernels
+// search in step.
+#define SEARCH_F32_CHUNK 512
+// The bits of a float32 with the sign cleared, from which the bits of a
+// signalling NaN lie in [SIGNALLING_NAN_FIRST, SIGNALLING_NAN_FIRST +
+// SIGNALLING_NAN_SPAN): the exponent all ones, the quiet bit (bit 22) clear,
+// and some other bit of the fraction set.
+#define SIGNALLING_NAN_FIRST 0x7f800001u
+#define SIGNALLING_NAN_SPAN 0x003fffffu
+// Mask that clears the sign bit of a float32.
+#define F32_ABS_BITS 0x7fffffffu
+
+// a.searchsorted(v) for a float64 array `a` and a contiguous float32 array of
+// needles `v`, with one of the two float64 kernels. NumPy converts both to
+// their common type, float64, and searches that. Every float32 is exactly a
+// float64, a quiet NaN included, which sorts last as any float64 NaN does, so
+// converting the needles and running the float64 kernel gives NumPy's answer.
+// The needles are converted a chunk at a time into a buffer on the stack.
+//
+// Returns NULL with no exception set if a needle is a signalling NaN: NumPy's
+// cast of one warns "invalid value encountered in cast", or raises under
+// np.errstate(invalid='raise'), so the call is passed on and NumPy does that.
+// A chunk is tested before it is converted, so no floating-point flag is left
+// raised. The chunks before it have been searched and are thrown away.
+static PyObject *searchsorted_f32_needles(PyArrayObject *a, PyArrayObject *v, hk_kernel kernel) {
+    PyObject *result = PyArray_SimpleNew(PyArray_NDIM(v), PyArray_DIMS(v), NPY_INTP);
+    if (result == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    // Needles are not required to be aligned: each is copied out by memcpy,
+    // which the compiler turns into a plain load.
+    const char *needles = PyArray_DATA(v);
+    int64_t *out = PyArray_DATA((PyArrayObject *)result);
+    const size_t count = (size_t)PyArray_SIZE(v), n = (size_t)PyArray_SIZE(a);
+    // True when a needle is a signalling NaN and the call is passed on.
+    bool signalling = false;
+    {
+        HK_BEGIN_NOGIL(count)
+        double chunk[SEARCH_F32_CHUNK];
+        for (size_t start = 0; start < count; start += SEARCH_F32_CHUNK) {
+            const size_t m = count - start < SEARCH_F32_CHUNK ? count - start : SEARCH_F32_CHUNK;
+            for (size_t i = 0; i < m; i++) {
+                uint32_t bits;
+                memcpy(&bits, needles + (start + i) * sizeof(float), sizeof bits);
+                signalling |= ((bits & F32_ABS_BITS) - SIGNALLING_NAN_FIRST) < SIGNALLING_NAN_SPAN;
+            }
+            if (signalling) break;
+            for (size_t i = 0; i < m; i++) {
+                float needle;
+                memcpy(&needle, needles + (start + i) * sizeof(float), sizeof needle);
+                chunk[i] = (double)needle;
+            }
+            run_search(kernel, PyArray_DATA(a), chunk, out + start, n, m);
+        }
+        HK_END_NOGIL
+    }
+    if (signalling) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
 // a.searchsorted(v) for a one-dimensional contiguous float64 or int64 array
 // `a` and needles of the same element type: a contiguous array of any shape,
 // whose shape the result takes, or one number (see searchsorted_scalar).
+// A float64 array also takes a contiguous float32 array of needles of any
+// shape (see searchsorted_f32_needles).
 // `side` must be absent, 'left' or 'right'; each side has its own kernel.
 // There must be no `sorter`. Needles of another type are NumPy's: it converts
 // them and `a` to a common type by its own rules.
@@ -481,6 +548,9 @@ static HK_NOINLINE PyObject *try_searchsorted(PyObject *self, PyObject *const *a
         run_search(kernel, PyArray_DATA(a), PyArray_DATA(v), PyArray_DATA((PyArrayObject *)result),
                    (size_t)PyArray_SIZE(a), (size_t)needles);
         HK_END_NOGIL
+    } else if (PyArray_TYPE(a) == NPY_DOUBLE && hk_is_flat(bound[V], NPY_FLOAT)) {
+        result = searchsorted_f32_needles(a, (PyArrayObject *)bound[V], kernel);
+        if (result == NULL) return NULL;
     } else {
         result = searchsorted_scalar(a, bound[V], kernel);
         if (result == NULL) return NULL;

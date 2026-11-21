@@ -394,6 +394,20 @@ def _search(table: int | None, n: int) -> tuple:
     return (np.sort(rng.standard_normal(table or n)), rng.standard_normal(n))
 
 
+def _search_f32_needles(table: int | None, n: int) -> tuple:
+    """Build a sorted float64 array and `n` float32 needles for `np.searchsorted`.
+
+    Args:
+        table: Length of the sorted array, or None for as many elements as needles.
+        n: Number of needles.
+
+    Returns:
+        (sorted float64 array, float32 needles).
+    """
+    a, v = _search(table, n)
+    return (a, v.astype(np.float32))
+
+
 def _int_search(table: int | None, n: int) -> tuple:
     """Build a sorted int64 array and `n` int64 needles for `np.searchsorted`.
 
@@ -438,19 +452,6 @@ def _int_search_int32_needles(n: int) -> tuple:
     info = np.iinfo(np.int32)
     table, _ = _int_search(None, n)
     return (table, _rng(n).integers(info.min, info.max, n, dtype=np.int32, endpoint=True))
-
-
-def _search_float32_needles(n: int) -> tuple:
-    """Build a sorted float64 array and `n` float32 needles, which no search kernel takes.
-
-    Args:
-        n: Number of elements, and of needles.
-
-    Returns:
-        (sorted float64 array, float32 needles).
-    """
-    table, needles = _search(None, n)
-    return (table, needles.astype(np.float32))
 
 
 def _search_right(a: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -694,6 +695,10 @@ TAKEN: tuple[Timed, ...] = (
     Timed("searchsorted", "np.searchsorted(a, v, side='right')", "float64, as many needles as elements", partial(_search, None), _search_right, "searchsorted_right_f64"),
     Timed("searchsorted", "np.searchsorted(a, v, side='right')", "float64, 1,000 elements", partial(_search, SMALL_TABLE), _search_right, "searchsorted_right_f64"),
     Timed("searchsorted", "np.digitize(x, bins)", "float64, 1,000 bin edges", partial(_search, SMALL_TABLE), _digitize, "searchsorted_right_f64"),
+    Timed("searchsorted", "np.searchsorted(a, v)", "float64, float32 needles, as many needles as elements",
+          partial(_search_f32_needles, None), np.searchsorted, "searchsorted_f64"),
+    Timed("searchsorted", "np.searchsorted(a, v)", "float64, float32 needles, 1,000 elements",
+          partial(_search_f32_needles, SMALL_TABLE), np.searchsorted, "searchsorted_f64"),
     Timed("searchsorted", "np.searchsorted(a, f)", "int64, one np.int64 needle", _int_search_one, np.searchsorted, "searchsorted_i64"),
     Timed("searchsorted", "np.searchsorted(a, f, side='right')", "int64, one np.int64 needle", _int_search_one, _search_right, "searchsorted_right_i64"),
     Timed("searchsorted", "np.searchsorted(a, v)", "int64, as many needles as elements", partial(_int_search, None), np.searchsorted, "searchsorted_i64"),
@@ -750,7 +755,6 @@ LEFT: tuple[Timed, ...] = (
     Timed("bincount", "np.bincount(x)", "int32", partial(_ints, np.int32), np.bincount, None),
     Timed("unique", "np.unique(x)", "int64, wide range", partial(_labels, UNIQUE_WIDE), np.unique, None),
     Timed("isin", "np.isin(x, nine_values)", "int64", _narrow_ints, lambda x: np.isin(x, ISIN_TEST + [3]), None),
-    Timed("searchsorted", "np.searchsorted(a, v)", "float64 array, float32 needles", _search_float32_needles, np.searchsorted, None),
     Timed("searchsorted", "np.searchsorted(a, v)", "int64 array, int32 needles", _int_search_int32_needles, np.searchsorted, None),
     Timed("interp", "np.interp(x, xp, fp, left=0.0)", "float64", partial(_interp, None), lambda x, xp, fp: np.interp(x, xp, fp, left=0.0), None),
     Timed("nonzero", "x.nonzero()", "int64", partial(_ints, np.int64), lambda x: x.nonzero(), None),
