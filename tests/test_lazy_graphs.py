@@ -13,7 +13,7 @@ import numpy
 import pytest
 
 from prototypes.lazy import LazyArray, gather, get_lazy, graph, record, record_graphs, view
-from prototypes.lazy.record import BLOCK, CALL, EARLIER, INPUT, LINE, OPERATION, REPEAT, REST, STEP
+from prototypes.lazy.record import BLOCK, CALL, EARLIER, INPUT, LINE, LINES, OPERATION, REPEAT, REST, STEP
 
 lazy = get_lazy()
 
@@ -157,6 +157,50 @@ def test_a_long_loop_lists_its_ends_and_holds_the_rest():
     rest = loop.children[2]
     assert rest.label == f"steps 3 to {MANY_STEPS - 1}" and rest.operations == 3 * (MANY_STEPS - 3)
     assert len(rest.children) == MANY_STEPS - 3 and loop.operations == 3 * MANY_STEPS
+
+
+def long_function(x: LazyArray) -> LazyArray:
+    """Twenty lines that are not alike, each of two operations: more members than a group shows at once.
+
+    Args:
+        x: A lazy array.
+
+    Returns:
+        A pending lazy array.
+    """
+    x = x * 1.5 + 1
+    x = x * 2.5 - 2
+    x = x / 3.5 + 3
+    x = x / 4.5 - 4
+    x = x * 5.5 + 5
+    x = x * 6.5 - 6
+    x = x / 7.5 + 7
+    x = x / 8.5 - 8
+    x = x * 9.5 + 9
+    x = x * 10.5 - 10
+    x = x / 11.5 + 11
+    x = x / 12.5 - 12
+    x = x * 13.5 + 13
+    x = x * 14.5 - 14
+    x = x / 15.5 + 15
+    x = x / 16.5 - 16
+    x = x * 17.5 + 17
+    x = x * 18.5 - 18
+    x = x / 19.5 + 19
+    x = x / 20.5 - 20
+    return x
+
+
+def test_a_long_call_is_cut_into_stretches_of_lines():
+    """A call that wrote more than sixteen members has them in groups of eight lines that follow each other."""
+    with record_graphs() as recording:
+        long_function(lazy.arange(4.0)).gather()
+    call = recording.graphs[0].groups.children[0]
+    assert (call.kind, call.operations, kinds(call)) == (CALL, 40, [LINES, LINES, LINES])
+    first, last = call.children[0], call.children[2]
+    assert kinds(first) == [LINE] * record.BLOCK_MEMBERS and kinds(last) == [LINE] * 4
+    assert first.label == f"lines {first.lines[0]} to {first.lines[1]}" and first.lines[1] - first.lines[0] == 7
+    assert first.lines[1] + 1 == call.children[1].lines[0]
 
 
 def test_a_generator_expression_is_a_line_of_its_function():

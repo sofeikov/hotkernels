@@ -74,6 +74,7 @@ What is drawn:
 The tree of groups comes with the graph ([lazy-recording-design.md](lazy-recording-design.md#groups)). The page decides only what is open.
 
 - **A group of more than five operations opens folded.** Five is one constant, passed to the page with the data.
+- **A long function opens as stretches of lines.** A function of a hundred lines has no line large enough to fold, and would open as hundreds of boxes. The record cuts such a call into groups of eight lines that follow each other ([lazy-recording-design.md](lazy-recording-design.md#groups)), and each opens folded: `lines 71 to 78`.
 - **The middle of a long loop is always folded at first:** `steps 3 to 49`.
 - **While the top holds one folded group and nothing else, that group is opened.** A recorded block is usually one call of one function; a page that opens on one box says nothing.
 - **A graph opens at a size that can be read.** If the whole graph fits with readable text it is shown whole; otherwise it is shown from the top at its width, and the rest is a drag away. `Fit` shows the whole.
@@ -129,6 +130,8 @@ In one browser, the pane built into the Claude desktop app, on the page of the t
 - `Unfold all` on the regression: 86 elements drawn, and `Fit` showing all of them.
 - The dark colours, on one graph.
 - The `no gather` mark, on a page of seven graphs computed by `float()` in a loop and by `np.asarray`.
+- A graph of 366 operations from one function of a hundred lines, opening as three stretches of lines, and one of them unfolding into eight.
+- Four of the pages of the ten programs of [lazy-design.md](lazy-design.md#ten-programs-with-one-changed-line), of 1, 4, 83 and 749 graphs, loading without an error in the console. The other six were written and not opened.
 
 One test in [`tests/test_lazy_graphs.py`](../tests/test_lazy_graphs.py) holds the file itself: that it contains the graphs as JSON that reads back, the library's URL, and exactly three script elements when a line of the recorded code contains `</script>`.
 
@@ -159,7 +162,7 @@ Two things were found by looking and changed:
 
 - **Other browsers.** One was used.
 - **A notebook.**
-- **A very large graph.** The largest drawn was 954 operations, of which 86 elements were on screen at most. How long the layout takes on thousands of visible elements was not measured.
+- **A very large graph.** The largest drawn was 954 operations, of which 86 elements were on screen at most; the page with the most graphs had 749 and a file of 1.7 MB. How long the layout takes on thousands of visible elements was not measured.
 - **The page without a network connection.** It says the library could not be loaded; that message was not looked at in a browser.
 - **A keyboard alone, and a screen reader.** The drawing is reached by pointer.
 - **A touch screen.**

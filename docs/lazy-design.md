@@ -429,7 +429,7 @@ Not reached, because no lazy array is among the arguments: `np.zeros(3)`, a rand
 
 ### The prototype
 
-Eight modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 28 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 12 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
+Eight modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 28 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 13 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
 
 | Program | Deferred | Made at once | Result against eager NumPy |
 |---|---|---|---|
@@ -469,6 +469,29 @@ The same machine, with `hotkernels.install()` as it is by default: 43 of 49 kern
 | `np.cumsum` on `int32`, a stable `np.argsort`, `np.round(a, 2)`, `a.astype(np.float32)` and `a += b`, on lazy arrays | Each result is NumPy's. No kernel's count moved for these, for the lazy call or for the eager one; in-place adds are served by a loop the binding does not count |
 
 One test runs the regression both ways under `hotkernels.enabled()` and holds that every kernel the eager program reached is reached at least as often by the lazy one. No operation of the transformer block is served by a kernel.
+
+### Ten programs with one changed line
+
+Run once on the same machine, by a script that is not in the repository. Each program was run with NumPy and then with its `np` replaced by the stand-in and nothing else changed, under a recording, and the results were compared. Five were written for the run; five are code the repository already has, run smaller than they come.
+
+| Program | Deferred | Graphs | Largest graph | What it shows |
+|---|---|---|---|---|
+| Veros ocean model, equation of state (`delivery/apps/vendor/pyhpc/`), a grid of 4,096 points, its inputs taken in with `np.asarray` | 366 | 1 | 366 | A 48-term polynomial as one graph, every operation element by element |
+| The Mandelbrot set, 30 iterations on 300 × 240, nothing written in place | 187 | 4 | 179 | A loop as one graph |
+| Heat on a plate, 60 steps written into a slice | 724 | 64 | 12 | A graph per write |
+| Veros ocean model, isoneutral mixing, the same grid | 655 | 46 | 35 | The same: finite differences written into slices |
+| `delivery/apps/mlp_train.py`, one epoch on 1,280 examples | 278 | 83 | 8 | In-place updates at every step |
+| Karpathy's `min-char-rnn.py`, 3 iterations, with its import line as the one line changed | 1,824 | 749 | 9 | `np.dot`, called 660 times and made at once each time |
+| `delivery/apps/particle_filter.py`, 20 steps | 673 | 212 | 8 | Indexing by arrays and masks, and in-place updates |
+| k-means, four clusters of 500 points | 78 | 30 | 8 | `np.argmin`, a mask per cluster, a test for convergence |
+| PCA of 2,000 × 12 | 23 | 5 | 9 | `np.linalg.eigh` and `np.argsort` made at once |
+| A Monte Carlo option price, its data from `np.random.default_rng()` | 10 | 2 | 7 | Most of the program is never in a graph |
+
+- **All ten give NumPy's results, bit for bit,** without a line of theirs changed but the one that says what `np` is.
+- **Writes in place are what keep real training code in small graphs.** A write into a lazy array computes everything pending, and the perceptron and the recurrent network write at nearly every line. Neither gets past nine operations in one graph. This bears on the [open question](#open-questions) about writes.
+- **`np.dot` is the first thing the deferred set lacks.** For two-dimensional arrays it is the matrix product.
+- **An array from NumPy's random generator is a plain `ndarray`.** `np.random.default_rng()` returns NumPy's own generator, whose methods the stand-in does not see, so what is computed from its arrays with operators is eager. The stand-in's own `np.random.randn` gives lazy arrays.
+- **A long function needed a group of its own.** The equation of state is one function of a hundred lines that are not alike, and it opened as 366 boxes. A call of many members is now cut into stretches of lines ([lazy-recording-design.md](lazy-recording-design.md#groups)).
 
 ## Design
 
@@ -669,6 +692,7 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 
 - *The table under [The deferred set](#the-deferred-set)* (the prototype): four kinds, enough that the regression and the transformer block run without one call made at once. Since each node is computed by the call as written, a wider set costs shape rules only.
 - *Narrower, element by element and matrix product only:* less to get right first, but reductions, transposes and slices would each cut the graph, and the two programs would be made of many small graphs instead of a few whole ones.
+- *Wider, by what programs log:* `np.dot` first ([Ten programs with one changed line](#ten-programs-with-one-changed-line)). Each addition costs a shape rule.
 
 **How much to say when the layer computes without being asked.**
 
@@ -683,10 +707,10 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 - **Other array types as operands.** A masked array, an `np.matrix` or a pandas Series beside a lazy array is made at once by this design; which of the two types NumPy lets decide such a call was not probed.
 - **The list of calls that write.** It was written from memory of NumPy's API, not checked against it.
 - **Other roads to the memory.** The buffer protocol and `__dlpack__` are not defined by the prototype, so they raise `TypeError` for every lazy array, strict or not; whether anything else reaches values was not searched for systematically. [Issue 262](https://github.com/sofeikov/hotkernels/issues/262) lists it.
-- **A real codebase.** Computing on the spot is there so that one runs. None has been run yet; the applications in `delivery/apps/` are the first.
+- **A codebase that uses other libraries.** The ten programs use NumPy alone. pandas, matplotlib, SciPy and scikit-learn are not installed where they were run, so nothing here says what happens when an array is handed to one of them.
 - **Pickling and copying a lazy array.** Not tried.
 - **`install(inexact=True)` and the bottleneck hooks with the layer.** Only the default `install()` was run.
 - **The other architecture.** Everything here was run on ARM64 macOS. The layer is pure Python; which kernel takes which call differs by platform, and the test of the kernels makes no assumption about it.
 - **A stub file for the stand-in.** Whether one makes `np.` complete in an editor was not tried.
 - **NumPy releases other than 2.5.5.** Both protocols are years old and documented, and the supported range starts at 2.3; the check runs on each.
-- **A program of real size.** The two programs are a few dozen lines each. The applications in `delivery/apps/` are the next test and are part of the check.
+- **A program at its real size.** The repository's applications were run smaller than they come, once, by a script outside the repository. They are not yet part of a check that anyone can run again.
