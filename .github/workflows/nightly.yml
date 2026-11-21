@@ -1,0 +1,152 @@
+name: nightly
+
+# Times the workloads on the maintainer's Mac every night and keeps the run on
+# the perf-history branch, for the site's "Over time" page and `delivery
+# history`. The design is in docs/workloads-history-design.md.
+#
+# Only the Mac is used. If it is offline, or a runner on it is busy, the night
+# has no run: a hosted runner's figures move with the host and would not be
+# comparable from one night to the next. A scheduled workflow runs on the
+# default branch, so the code timed is `main` as it stands at that moment.
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# One run at a time; a run started by hand waits for the nightly one.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # Passes only if a runner on the Mac is online and none is busy. Reads the
+  # repository's runners with the token pick-runner.yml uses, which the
+  # workflow's own token cannot do.
+  gate:
+    if: github.repository == 'sofeikov/hotkernels'
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+    steps:
+      - id: gate
+        env:
+          # Label of the maintainer's runners.
+          OWN: hotkernels-mac
+          TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+        run: |
+          go=false
+          if [ -z "$TOKEN" ]; then
+            reason="the RUNNER_STATUS_TOKEN secret is not set"
+          elif ! runners=$(curl -fsS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+                           "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runners?per_page=100"); then
+            reason="the list of runners could not be read; the token may have expired"
+          else
+            mine='[.runners[] | select(.status == "online" and any(.labels[]; .name == $label))]'
+            online=$(jq --arg label "$OWN" "$mine | length" <<< "$runners")
+            busy=$(jq --arg label "$OWN" "$mine | map(select(.busy)) | length" <<< "$runners")
+            if [ "$online" -eq 0 ]; then
+              reason="no runner labelled $OWN is online"
+            elif [ "$busy" -gt 0 ]; then
+              reason="$busy of the $online runners labelled $OWN are busy"
+            else
+              go=true
+              reason="$online runners labelled $OWN online, none busy"
+            fi
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "Nightly run: $([ "$go" = true ] && echo yes || echo "no run tonight"). $reason." >> "$GITHUB_STEP_SUMMARY"
+
+  run:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
+    runs-on: hotkernels-mac
+    timeout-minutes: 60
+    permissions:
+      # To push the run's file to perf-history.
+      contents: write
+    env:
+      # Load average under which the machine counts as quiet: delivery.history.BUSY_LOAD.
+      BUSY_LOAD: "1.0"
+      # Minutes to wait for a quiet minute before running anyway. The run's
+      # file records the load at both ends, so a busy run is marked as such.
+      WAIT_MINUTES: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build hotkernels and the workloads' libraries
+        run: uv sync --group workloads
+      - name: Wait for a quiet minute
+        run: |
+          for _ in $(seq "$WAIT_MINUTES"); do
+            # macOS prints "{ 1.23 1.10 1.00 }": the second field is the one-minute average.
+            load=$(sysctl -n vm.loadavg | awk '{print $2}')
+            if awk -v load="$load" -v limit="$BUSY_LOAD" 'BEGIN { exit !(load < limit) }'; then
+              echo "load average $load: starting"
+              exit 0
+            fi
+            echo "load average $load: waiting"
+            sleep 60
+          done
+          echo "::notice::No quiet minute in $WAIT_MINUTES minutes. The run goes ahead and is marked busy."
+      # Outside the repository, so that the checkout of main stays clean:
+      # --history refuses a dirty tree. The branch is fetched whole, so that a
+      # retried push below can merge.
+      - name: Check out perf-history
+        run: |
+          echo "HISTORY=$RUNNER_TEMP/perf-history" >> "$GITHUB_ENV"
+          git fetch origin perf-history:refs/remotes/origin/perf-history
+          git worktree add -B perf-history "$RUNNER_TEMP/perf-history" origin/perf-history
+      # A workload whose results differ with hotkernels fails this step, but
+      # its file is still written and kept: that is a result too.
+      - id: workloads
+        name: Run the workloads
+        continue-on-error: true
+        run: uv run --group workloads delivery workloads --size M,L --history "$HISTORY" --source nightly
+      - name: Push the run to perf-history
+        working-directory: ${{ env.HISTORY }}
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          git add history
+          if git diff --cached --quiet; then
+            echo "::error::delivery workloads wrote no history file"
+            exit 1
+          fi
+          git commit -q -m "Nightly run of ${GITHUB_SHA::7}"
+          # A run recorded by hand may have been pushed meanwhile. Each run is
+          # a file of its own, so a merge never conflicts.
+          for attempt in 1 2 3; do
+            git push origin HEAD:perf-history && exit 0
+            git pull -q --no-rebase --no-edit origin perf-history
+          done
+          exit 1
+      - name: Fail if a workload's results differed
+        if: steps.workloads.outcome == 'failure'
+        run: |
+          echo "::error::delivery workloads failed; the run was kept. See its step for the workload."
+          exit 1
+      # The runner keeps its working directory between jobs, and with it the
+      # record of the worktree.
+      - name: Remove the perf-history worktree
+        if: always()
+        run: git worktree remove --force "$RUNNER_TEMP/perf-history" || git worktree prune
+
+  # A push made with the workflow's own token starts no other workflow, so
+  # the site is rebuilt by starting it directly. Also after a run that failed
+  # on a workload, since its file was pushed.
+  site:
+    needs: run
+    if: ${{ !cancelled() && needs.run.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}

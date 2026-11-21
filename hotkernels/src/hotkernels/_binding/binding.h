@@ -68,6 +68,8 @@ typedef enum {
     HK_BINCOUNT_I16, HK_BINCOUNT_I64, HK_UNIQUE_I64,
     HK_ARGSORT_F64, HK_ARGSORT_I64, HK_ARGSORT_U64,
     HK_SEARCHSORTED_I64, HK_SEARCHSORTED_RIGHT_I64,
+    // Taken on ARM64 only (docs/coverage-gaps-arm64.md); the counters exist everywhere.
+    HK_SUM_F32, HK_SUM_F64, HK_NONZERO_2D_BOOL,
     // Served through bottleneck's functions, not NumPy's (hook_bottleneck.c).
     HK_NANMEAN_COLS_F64, HK_NANSTD_COLS_F64, HK_NANMIN_COLS_F64, HK_NANMAX_COLS_F64,
     // Built into the binding.
@@ -390,6 +392,22 @@ static inline void hk_clear_float_flags(void) {
 #endif
 }
 
+#if defined(__aarch64__)
+// Clear the four floating-point status flags NumPy reports (invalid
+// operation, divide by zero, overflow, underflow: IOC, DZC, OFC and UFC, bits
+// 0 to 3 of FPSR) and leave the others. After np.sum, NumPy leaves these four
+// clear and the inexact flag as its additions left it, set or not; a kernel
+// that makes the same additions sets the same inexact flag. FPSR is written
+// only when one of the four is set.
+static inline void hk_clear_reported_float_flags(void) {
+    // IOC, DZC, OFC and UFC.
+    const uint64_t reported = 0xf;
+    uint64_t fpsr;
+    __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr) : : "memory");
+    if (fpsr & reported) __asm__ volatile("msr fpsr, %0" : : "r"(fpsr & ~reported) : "memory");
+}
+#endif
+
 // True when a floating-point exception that NumPy reports, as a warning or an
 // error by np.errstate, has been raised since the flags were last cleared:
 // invalid operation, divide by zero, overflow or underflow. NumPy ignores the
@@ -516,9 +534,9 @@ void hk_clip_in_place(hk_kernel kernel, void *data, size_t n, double lo, double 
 // being one-dimensional, tests that first. In hook_index.c.
 PyObject *hk_try_compress(PyObject *x, PyObject *mask);
 
-// The positions where a one-dimensional contiguous boolean array is True, as
-// the one-element tuple NumPy's nonzero returns: the nonzero_bool kernel. In
-// hook_method.c.
+// The positions where a contiguous boolean array is True, as the tuple
+// NumPy's nonzero returns: for one dimension the nonzero_bool kernel, and on
+// ARM64 for two (C order) the nonzero_2d_bool kernel. In hook_method.c.
 PyObject *hk_try_nonzero(PyObject *mask);
 
 // Whether each row of a boolean matrix holds a True, as the new
