@@ -1,0 +1,7 @@
+{# What LazyArray.explain() returns: one line per node of a pending graph, operands indented under their consumer. A leaf has no line of the program to show. #}
+{% set name_width = 10 %}
+{% set shape_width = 14 %}
+{% for row in rows %}
+{% set line = "  " * row.depth ~ row.name.ljust(name_width) ~ row.dtype ~ " " ~ row.shape.ljust(shape_width) ~ row.where ~ ("  (shown above)" if row.repeated else "") %}
+{{ line.rstrip() }}
+{% endfor %}
