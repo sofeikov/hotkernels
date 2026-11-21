@@ -207,6 +207,7 @@ At 16 elements most of the gain is NumPy's own call path being skipped, not the 
 - **Kernels** (`kernels/`): 49 kernels for 23 NumPy operations and four functions of bottleneck, each with a spec, a naive C reference and, where assembly beats the C, an assembly version per architecture: 34 for ARM64 and 42 for x86-64. Each kernel's `attempts.md` lists every optimisation tried, kept or not.
 - **The package** (`hotkernels/`): what a user installs. A C extension points NumPy at the kernels, and `install()`, `uninstall()`, `enabled()` and `report()` control it. `install()` installs the 43 kernels that return NumPy's result bit for bit, and the 4 that return bottleneck's for its `nanmean`, `nanstd`, `nanmin` and `nanmax` once bottleneck is imported (pandas and empyrical call them instead of NumPy's); `install(inexact=True)` the other two.
 - **The delivery tool** (`delivery/`): tests and times the package from Python. Recorded timings are in `delivery/results/`.
+- **A prototype of a lazy NumPy layer** (`prototypes/lazy/`): the design in [docs/lazy-design.md](docs/lazy-design.md) written out to be read and tried, with its tests in `tests/test_lazy_prototype.py`. It is not part of the package.
 - **An example** (`examples/workload.py`): a NumPy program written without hotkernels in mind, used to show the effect of the one line.
 - **Release tooling** (`release/`, `release-notes/`): the notes each pull request leaves, and the commands that turn them into a release. Publishing to PyPI runs in [`.github/workflows/release.yml`](.github/workflows/release.yml).
 - **The documentation site** (`docsite/`): the pages published at [sofeikov.github.io/hotkernels](https://sofeikov.github.io/hotkernels/), with a technical report on how all of this works. Its figures are read from the files above when it is built.
@@ -333,6 +334,7 @@ The tag starts the release workflow, which builds and tests the wheels and waits
 - [docs/two-sizes-design.md](docs/two-sizes-design.md): a second length for `np.searchsorted` and `np.interp`, so their kernels can serve real calls
 - [docs/release-design.md](docs/release-design.md): how a release is made and published, and who can publish
 - [docs/x86-64-design.md](docs/x86-64-design.md): the second architecture: what to target, what changes, and how the kernels are carried over
+- [docs/lazy-design.md](docs/lazy-design.md): a proposal for a lazy array type, `hotkernels.get_lazy()`, whose graph is what fusing operations would need
 - [docs/distribution-design.md](docs/distribution-design.md): what a release contains: wheels, the source distribution, other platforms, `python -m hotkernels`
 - [AGENTS.md](AGENTS.md): rules for coding agents working in this repository
 - [kernels/README.md](kernels/README.md): how to add a kernel
