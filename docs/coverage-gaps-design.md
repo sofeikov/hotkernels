@@ -2,7 +2,7 @@
 
 This is a proposal for review. [Issue 160](https://github.com/sofeikov/hotkernels/issues/160) lists the NumPy calls of a production pipeline that hotkernels 0.3.0 passed to NumPy because their element type, axis or dimension has no kernel. This document goes through that list, says for each call whether a kernel is worth writing, and proposes the kernels, their hooks and the order of work.
 
-Every figure here is x86-64's, measured on an Intel Core i5-14600KF. Nothing was measured on ARM64.
+Every figure here is x86-64's, measured on an Intel Core i5-14600KF. Nothing was measured on ARM64 for this document. The same issue was taken up on ARM64 separately, in [coverage-gaps-arm64.md](coverage-gaps-arm64.md), whose pull requests reached `main` first: they built `sum_f32`, `sum_f64` and `nonzero_2d_bool` with NEON assembly, installed on ARM64 only. The steps for `np.sum` and `np.nonzero` below take those kernels' specs and references and bring the kernels to x86-64.
 
 ## Summary
 
@@ -132,5 +132,5 @@ Each kernel keeps its assembly only if the judge finds it significantly faster t
 
 1. **C kernels for the calls where C is enough.** `np.sum` on int64 and the two casts would each be 3.5x to 5.5x faster than NumPy at 4,096 elements from a C loop alone. Not built here.
 2. **`sum_f64`.** Not asked for by the issue. Proposed because it is the same kernel twice as wide and a far commoner call.
-3. **ARM64.** Each kernel ships as its naive C there. Whether NEON is worth writing for any of them needs the survey's question asked on that machine.
+3. **ARM64.** Each kernel built here ships as its naive C there, except where the ARM64 work above has a NEON kernel of its own (`sum_f32`, `sum_f64`, `nonzero_2d_bool`). Whether NEON is worth writing for any of them needs the survey's question asked on that machine.
 4. **Needles of other integer types.** `np.searchsorted` on an int64 array with int32 needles is NumPy's here. If a recorded run shows such calls, the binding could widen them.
