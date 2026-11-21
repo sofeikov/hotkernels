@@ -16,7 +16,9 @@
 # test values' range is unchanged, and any other becomes -32,768 or 32,767,
 # which is no test key. Sixteen 16-bit keys in a register are compared with
 # the eight test keys in eight `vpcmpeqw`, where 32-bit compares need eight
-# for eight elements.
+# for eight elements. When every test value is from -32,767 to 32,766 (a set
+# of small integers) each value is its own key and nothing is subtracted
+# (.Lplain); otherwise (.Lkeyed) the four subtractions cost about a sixth.
 #
 # Wide, for any other test values: each vector of eight elements is compared
 # with the eight test values at 32 bits, the values kept broadcast in
