@@ -16,18 +16,18 @@
 # so it stays inside the n elements as long as the eight elements read do.
 #
 # The mask bits for 32 elements come from one compare and one `vpmovmskb`. A
-# mask byte counts as true when it is not zero, whatever its value.
+# mask byte counts as true when it is not zero, whatever its value. One `pdep`
+# spreads the word's four bytes into four 16-bit fields, each already a table
+# offset. `pdep` is fast on Intel processors and slow on AMD ones before Zen 3.
 #
 # Paths, by what is left:
 #   32 or more  blocks of 32: one mask word, four table steps
 #   8..31       one table step per 8, the mask bits from an 8-byte load
 #   1..7        one element at a time, as the reference does it
 
-# Offset of a table entry is 16 times the mask byte. The mask word is shifted
-# left by this once per block, so that a group's offset is one `and` away.
+# Offset of a table entry is 16 times the mask byte: the byte shifted left by
+# this. 16 is beyond the largest scale of an address, which is 8.
 .set ENTRY_SHIFT, 4
-# The bits of the shifted mask word that hold one group's offset.
-.set ENTRY_BITS, 0xff << ENTRY_SHIFT
 # The `pdep` mask that moves the four bytes of a block's mask word into the
 # four 16-bit fields of a register, each shifted left by ENTRY_SHIFT.
 .set SPREAD, 0x0ff00ff00ff00ff0
