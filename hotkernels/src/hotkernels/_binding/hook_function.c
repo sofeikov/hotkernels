@@ -59,7 +59,8 @@ static hk_function functions[F_COUNT];
 // block is read twice, so it is a third of the smallest first-level data
 // cache the kernels run on (48 KiB on the x86-64 performance cores).
 #define SUM_BOOL_BLOCK 16384
-// Number of test values `isin_i64` reads. Fewer are padded by repeating one.
+// Number of test values `isin_i64` and `isin_i32` read. Fewer are padded by
+// repeating one.
 #define ISIN_TEST_VALUES 8
 // Most sample points per query for which `np.interp` takes the kernel. The
 // sample points are read once for NaN before the kernel sees them, at about
@@ -872,17 +873,23 @@ static PyObject *call_bincount(HK_VECTORCALL_PARAMETERS) {
 
 // -------------------------------------------------------------------- isin
 
-// Read up to eight int64 test values from a contiguous one-dimensional int64
-// array, or from a list or tuple of Python ints that fit int64, which is what
-// NumPy would convert such a list to. The kernel reads exactly eight; a
-// shorter set is padded by repeating its first value, which does not change
-// membership. Returns false for anything else.
-static bool isin_test_values(PyObject *test, int64_t values[ISIN_TEST_VALUES]) {
+// Read up to eight test values for an array of `type`, NPY_INT64 or NPY_INT32:
+// from a contiguous one-dimensional array of that type, or from a list or
+// tuple of Python ints that each fit it. NumPy converts such a list to int64;
+// for an int32 array a value that does not fit int32 could never match, and
+// such a list is left to NumPy rather than trimmed. The kernels read exactly
+// eight; a shorter set is padded by repeating its first value, which does not
+// change membership. Returns false for anything else, test values of another
+// type included.
+static bool isin_test_values(PyObject *test, int type, int64_t values[ISIN_TEST_VALUES]) {
     Py_ssize_t count;
-    if (hk_is_flat_1d(test, NPY_INT64)) {
+    if (hk_is_flat_1d(test, type)) {
         count = PyArray_SIZE((PyArrayObject *)test);
         if (count < 1 || count > ISIN_TEST_VALUES) return false;
-        memcpy(values, PyArray_DATA((PyArrayObject *)test), (size_t)count * sizeof values[0]);
+        const void *data = PyArray_DATA((PyArrayObject *)test);
+        for (Py_ssize_t i = 0; i < count; i++) {
+            values[i] = type == NPY_INT64 ? ((const int64_t *)data)[i] : ((const int32_t *)data)[i];
+        }
     } else if (PyList_CheckExact(test) || PyTuple_CheckExact(test)) {
         count = PySequence_Fast_GET_SIZE(test);
         if (count < 1 || count > ISIN_TEST_VALUES) return false;
@@ -892,6 +899,7 @@ static bool isin_test_values(PyObject *test, int64_t values[ISIN_TEST_VALUES]) {
             if (!PyLong_CheckExact(item)) return false;
             values[i] = PyLong_AsLongLongAndOverflow(item, &overflow);
             if (overflow != 0) return false;
+            if (type == NPY_INT32 && (values[i] < INT32_MIN || values[i] > INT32_MAX)) return false;
         }
     } else {
         return false;
@@ -900,11 +908,16 @@ static bool isin_test_values(PyObject *test, int64_t values[ISIN_TEST_VALUES]) {
     return true;
 }
 
-// np.isin(element, test_elements) for a contiguous int64 array and at most
-// eight int64 test values, with every other argument left at its default.
+// np.isin(element, test_elements) for a contiguous int64 or int32 array and
+// at most eight test values of the same type, with every other argument left
+// at its default.
 static HK_NOINLINE PyObject *try_isin(PyObject *element, PyObject *test) {
+    int type;
+    if (hk_is_flat(element, NPY_INT64)) type = NPY_INT64;
+    else if (hk_is_flat(element, NPY_INT32)) type = NPY_INT32;
+    else return NULL;
     int64_t values[ISIN_TEST_VALUES];
-    if (!hk_is_flat(element, NPY_INT64) || !isin_test_values(test, values)) return NULL;
+    if (!isin_test_values(test, type, values)) return NULL;
     PyArrayObject *x = (PyArrayObject *)element;
     PyObject *result = PyArray_SimpleNew(PyArray_NDIM(x), PyArray_DIMS(x), NPY_BOOL);
     if (result == NULL) {
@@ -912,12 +925,19 @@ static HK_NOINLINE PyObject *try_isin(PyObject *element, PyObject *test) {
         return NULL;
     }
     const npy_intp n = PyArray_SIZE(x);
-    {
+    if (type == NPY_INT64) {
         HK_BEGIN_NOGIL(n)
         isin_i64(PyArray_DATA(x), values, PyArray_DATA((PyArrayObject *)result), (size_t)n);
         HK_END_NOGIL
+        hk_take(HK_ISIN_I64);
+    } else {
+        int32_t narrow[ISIN_TEST_VALUES];
+        for (int i = 0; i < ISIN_TEST_VALUES; i++) narrow[i] = (int32_t)values[i];
+        HK_BEGIN_NOGIL(n)
+        isin_i32(PyArray_DATA(x), narrow, PyArray_DATA((PyArrayObject *)result), (size_t)n);
+        HK_END_NOGIL
+        hk_take(HK_ISIN_I32);
     }
-    hk_take(HK_ISIN_I64);
     return result;
 }
 

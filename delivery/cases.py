@@ -2788,22 +2788,27 @@ def bincount_cases() -> Iterator[Case]:
     yield from _bincount_layout_cases()
 
 
-def _isin_x(spread: str, n: int) -> np.ndarray:
+def _isin_x(spread: str, n: int, dtype: type = np.int64) -> np.ndarray:
     """Build the array searched by an isin case.
 
     Args:
         spread: "narrow" for values from 0 to 1,000, where a small set of test
-            values matches often; "wide" for the whole int64 range.
+            values matches often; "wide" for the whole range of the type;
+            "edges" for the values either side of the 16-bit range and of the
+            windows `isin_i32` narrows to (_ISIN_I32_EDGES).
         n: Element count.
+        dtype: Element type, np.int64 or np.int32.
 
     Returns:
-        A contiguous int64 array.
+        A contiguous array of `dtype`.
     """
     rng = np.random.default_rng([SEED, n])
     if spread == "narrow":
-        return rng.integers(0, 1000, n)
-    info = np.iinfo(np.int64)
-    x = rng.integers(info.min, info.max, n, endpoint=True)
+        return rng.integers(0, 1000, n).astype(dtype)
+    if spread == "edges":
+        return rng.choice(np.array(_ISIN_I32_EDGES, dtype), n)
+    info = np.iinfo(dtype)
+    x = rng.integers(info.min, info.max, n, endpoint=True, dtype=dtype)
     x[::3] = info.max
     x[1::7] = info.min
     return x
@@ -2839,13 +2844,68 @@ _ISIN_TESTS: tuple[tuple[str, Callable[[], object], bool], ...] = (
 )
 
 
+# Values of int32 elements and test values where `isin_i32` changes path:
+# either side of -32,767 and 32,766, the test values that are their own 16-bit
+# keys; of a window 65,533 wide, the widest it narrows; and of the ends of
+# int32, where the subtraction that moves a window wraps.
+_INT32 = np.iinfo(np.int32)
+_ISIN_I32_EDGES = (-32769, -32768, -32767, -32766, 32765, 32766, 32767, 32768, 0, 1, -1,
+                   100000, 165533, 165534, 99999, _INT32.min, _INT32.min + 1, _INT32.max - 1, _INT32.max,
+                   _INT32.min + 65533, _INT32.max - 65533)
+
+# Test values for isin on int32, with whether the kernel takes them: one to
+# eight int32 values, as an int32 array or as a list or tuple of Python ints
+# that fit int32. Test values of another type are left to NumPy.
+_ISIN_I32_TESTS: tuple[tuple[str, Callable[[], object], bool], ...] = (
+    ("[5]", lambda: [5], True),
+    ("[1, 2, 3]", lambda: [1, 2, 3], True),
+    ("(1, 2, 3)", lambda: (1, 2, 3), True),
+    ("[3, 3, 3]", lambda: [3, 3, 3], True),
+    ("eight values", lambda: [1, 50, 999, 0, 7, 500, 501, 2], True),
+    ("eight wide values", lambda: [_INT32.max, _INT32.min, 0, -1, 1, 2**20, -(2**20), 65535], True),
+    ("[-32767, 32766]", lambda: [-32767, 32766], True),
+    ("[-32768, 32765]", lambda: [-32768, 32765], True),
+    ("[-32768, 32766]", lambda: [-32768, 32766], True),
+    ("[-32767, 32767]", lambda: [-32767, 32767], True),
+    ("[100000, 165533, 99999]", lambda: [100000, 165533, 99999], True),
+    ("[100000, 165534]", lambda: [100000, 165534], True),
+    ("[int32 min, int32 min + 65533]", lambda: [_INT32.min, _INT32.min + 65533], True),
+    ("[int32 max - 65533, int32 max]", lambda: [_INT32.max - 65533, _INT32.max], True),
+    ("[30000, 59990, 5, 100, 1000, 20000, 40000, -10]", lambda: [30000, 59990, 5, 100, 1000, 20000, 40000, -10], True),
+    ("int32 array of 2", lambda: np.array([4, 999], np.int32), True),
+    ("int32 array of 8", lambda: np.arange(8, dtype=np.int32) * 100, True),
+    ("int32 array of 9", lambda: np.arange(9, dtype=np.int32) * 100, False),
+    ("nine values", lambda: list(range(9)), False),
+    ("[]", lambda: [], False),
+    ("empty int32 array", lambda: np.array([], np.int32), False),
+    ("[1, 2.5]", lambda: [1, 2.5], False),
+    ("[1, True]", lambda: [1, True], False),
+    ("[2**31]", lambda: [2**31], False),
+    ("[-2**31 - 1]", lambda: [-(2**31) - 1], False),
+    ("[5, 2**40]", lambda: [5, 2**40], False),
+    ("[2**63]", lambda: [2**63], False),
+    ("int64 array", lambda: np.array([1, 2]), False),
+    ("int16 array", lambda: np.array([1, 2], np.int16), False),
+    ("uint32 array", lambda: np.array([1, 2], np.uint32), False),
+    ("strided int32 array", lambda: np.arange(16, dtype=np.int32)[::4], False),
+    ("two-dimensional int32 array", lambda: np.array([[1, 2], [3, 4]], np.int32), False),
+    ("scalar 5", lambda: 5, False),
+    ("set", lambda: {1, 2}, False),
+)
+
+
 def isin_cases() -> Iterator[Case]:
-    """Yield the cases of `isin` on int64."""
-    kernel = "isin_i64"
+    """Yield the cases of `isin` on int64 and int32."""
+    kernel = {"i64": "isin_i64", "i32": "isin_i32"}
     for n, spread in itertools.product(VALUE_SIZES, ("narrow", "wide")):
         for text, test, taken in _ISIN_TESTS:
             yield Case("isin", f"np.isin(x, {text}) n={n} x={spread}", lambda n=n, spread=spread, test=test: (_isin_x(spread, n), test()),
-                       np.isin, kernel if taken else None)
+                       np.isin, kernel["i64"] if taken else None)
+    for n, spread in itertools.product(VALUE_SIZES, ("narrow", "wide", "edges")):
+        for text, test, taken in _ISIN_I32_TESTS:
+            yield Case("isin", f"np.isin(x, {text}) int32 n={n} x={spread}",
+                       lambda n=n, spread=spread, test=test: (_isin_x(spread, n, np.int32), test()),
+                       np.isin, kernel["i32"] if taken else None)
     spellings = (
         Spelling("np.isin(x, [1, 2, 3])", lambda x: np.isin(x, [1, 2, 3])),
         Spelling("np.isin(x, [1, 2, 3], invert=True)", lambda x: np.isin(x, [1, 2, 3], invert=True), NEVER),
@@ -2858,7 +2918,7 @@ def isin_cases() -> Iterator[Case]:
             for variant in variants_for(dtype, n):
                 yield Case("isin", f"{spelling.text} {dtype} n={n} layout={variant.name}",
                            partial(_built, dtype, n, variant), spelling.call,
-                           expectation(kernel if dtype == "i64" else None, spelling, variant, n))
+                           expectation(kernel.get(dtype), spelling, variant, n))
 
 
 # ---------------------------------------------------- searchsorted and interp
