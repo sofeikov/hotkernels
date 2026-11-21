@@ -23,7 +23,8 @@ static inline bool is_mask(PyObject *index) {
 }
 
 // The compress kernels on a buffer of the binding's own. See binding.h.
-// int64 elements go to the float64 kernel and are counted as its calls.
+// int64 elements go to the float64 kernel and int32 elements to the float32
+// one, and are counted as their calls.
 // As with nonzero, the kernel's output is scratch, so it runs on a buffer of
 // n elements and the selected elements are copied into an array of exactly
 // their number. Shared with the function hooks for np.compress and
@@ -36,6 +37,8 @@ HK_NOINLINE PyObject *hk_try_compress(PyObject *array, PyObject *selector) {
     // The float64 kernel moves 64-bit elements and never computes with one,
     // so it selects int64 elements as they are.
     else if (hk_is_flat(array, NPY_INT64)) kernel = HK_COMPRESS_F64, type_num = NPY_INT64;
+    // Likewise the float32 kernel for int32.
+    else if (hk_is_flat(array, NPY_INT32)) kernel = HK_COMPRESS_F32, type_num = NPY_INT32;
     else return NULL;
     if (!hk_is_flat(selector, NPY_BOOL)) return NULL;
     PyArrayObject *x = (PyArrayObject *)array, *mask = (PyArrayObject *)selector;
@@ -96,23 +99,52 @@ static PyObject *index_get(PyObject *self, PyObject *index) {
     return original_get(self, index);
 }
 
-// The maskfill kernel. See binding.h. Shared with the function hooks for
+// The maskfill kernels. See binding.h. Shared with the function hooks for
 // np.putmask and np.copyto.
 //
-// The kernel rewrites elements the mask does not select with their own bits.
-// The interpreter lock stays held throughout, so no other Python thread can
-// write one of them in between and have its write undone.
+// maskfill_f64 rewrites elements the mask does not select with their own
+// bits. The interpreter lock stays held throughout, so no other Python thread
+// can write one of them in between and have its write undone. maskfill_f32
+// does not rewrite them on either architecture; it keeps the lock as well, so
+// that the four element types behave alike.
+//
+// The kernels move bits and never compute with them, so int64 goes to the
+// float64 kernel and int32 to the float32 one, each with the value's bits.
 HK_NOINLINE bool hk_try_maskfill(PyObject *array, PyObject *selector, PyObject *value) {
-    double fill;
-    if (!hk_is_flat(array, NPY_DOUBLE) || !hk_is_flat(selector, NPY_BOOL)) return false;
+    // The value's bits, as the kernel for x's type takes them.
+    union {
+        double f64;
+        int64_t i64;
+        float f32;
+        int32_t i32;
+    } fill;
+    hk_kernel kernel;
+    size_t element;
+    if (hk_is_flat(array, NPY_DOUBLE)) {
+        if (!hk_as_double(value, &fill.f64)) return false;
+        kernel = HK_MASKFILL_F64, element = sizeof(double);
+    } else if (hk_is_flat(array, NPY_FLOAT)) {
+        if (!hk_as_float32(value, &fill.f32)) return false;
+        kernel = HK_MASKFILL_F32, element = sizeof(float);
+    } else if (hk_is_flat(array, NPY_INT64)) {
+        if (!hk_as_int64(value, &fill.i64)) return false;
+        kernel = HK_MASKFILL_F64, element = sizeof(int64_t);
+    } else if (hk_is_flat(array, NPY_INT32)) {
+        if (!hk_as_int32(value, &fill.i32)) return false;
+        kernel = HK_MASKFILL_F32, element = sizeof(int32_t);
+    } else {
+        return false;
+    }
+    if (!hk_is_flat(selector, NPY_BOOL)) return false;
     PyArrayObject *x = (PyArrayObject *)array, *mask = (PyArrayObject *)selector;
     const npy_intp n = PyArray_SIZE(x);
-    if (n != PyArray_SIZE(mask) || !PyArray_ISWRITEABLE(x) || !hk_as_double(value, &fill)) return false;
+    if (n != PyArray_SIZE(mask) || !PyArray_ISWRITEABLE(x)) return false;
     // A boolean view of x's own memory would be read while it is written.
-    if (!hk_disjoint(PyArray_DATA(x), (size_t)n * sizeof(double), PyArray_DATA(mask), (size_t)n)) return false;
+    if (!hk_disjoint(PyArray_DATA(x), (size_t)n * element, PyArray_DATA(mask), (size_t)n)) return false;
     if (!hk_mask_is_clean(PyArray_DATA(mask), (size_t)n)) return false;
-    maskfill_f64(PyArray_DATA(x), PyArray_DATA(mask), (size_t)n, fill);
-    hk_take(HK_MASKFILL_F64);
+    if (kernel == HK_MASKFILL_F64) maskfill_f64(PyArray_DATA(x), PyArray_DATA(mask), (size_t)n, fill.f64);
+    else maskfill_f32(PyArray_DATA(x), PyArray_DATA(mask), (size_t)n, fill.f32);
+    hk_take(kernel);
     return true;
 }
 

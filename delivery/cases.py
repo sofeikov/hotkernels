@@ -1697,16 +1697,17 @@ def _extract_call(x, mask):
 # Value classes of `x` in the sweep of mask selection over every size and
 # mask: the ones whose bit patterns a kernel that computed on its elements
 # would change.
-_COMPRESS_VALUE_CLASSES = {"f32": ("random", "nan_some"), "f64": ("random", "nan_some"), "i64": ("random", "extremes")}
+_COMPRESS_VALUE_CLASSES = {"f32": ("random", "nan_some"), "f64": ("random", "nan_some"), "i64": ("random", "extremes"),
+                           "i32": ("random", "extremes")}
 
 
 def compress_cases() -> Iterator[Case]:
     """Yield the cases of `x[mask]`, `np.compress(mask, x)` and `np.extract(mask, x)`.
 
     int64 elements are selected by the float64 kernel, which moves 64-bit
-    elements without computing on them.
+    elements without computing on them, and int32 elements by the float32 one.
     """
-    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64"}
+    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64", "i32": "compress_f32"}
     select = Spelling("x[mask]", lambda x, mask: x[mask], any_shape=False)
     functions = (
         Spelling("np.compress(mask, x)", _compress_call),
@@ -1800,16 +1801,62 @@ def _overlapping(n: int) -> tuple:
     return (x, x.view(np.bool_)[:n])
 
 
-# Values assigned through a mask, with whether the kernel takes them: a
-# Python float, or a Python int that converts to a double.
-_FILL_VALUES: tuple[tuple[str, object, bool], ...] = (
-    ("0.0", 0.0, True), ("1.5", 1.5, True), ("-0.0", -0.0, True), ("nan", float("nan"), True),
-    ("-inf", float("-inf"), True), ("5e-324", 5e-324, True), ("0", 0, True), ("-3", -3, True),
-    ("2**53", 2**53, True), ("2**53 + 1", 2**53 + 1, True), ("2**70", 2**70, True),
-    ("10**400", 10**400, False), ("True", True, False), ("np.float64(2.0)", np.float64(2.0), False),
-    ("np.float32(2.0)", np.float32(2.0), False), ("array", np.array(7.0), False), ("'1.5'", "1.5", False),
-    ("None", None, False), ("1j", 1j, False),
+# Element types of the masked-assignment cases, and the kernel that takes
+# each. The kernels move bits, so int64 goes to the float64 one and int32 to
+# the float32 one. uint8 has none.
+_MASKFILL_KERNELS = {"f64": "maskfill_f64", "f32": "maskfill_f32", "i64": "maskfill_f64", "i32": "maskfill_f32",
+                     "u8": None}
+# The element types that are floats and those that are integers, as the
+# kinds of value each takes are written below.
+_FLOATS = frozenset({"f64", "f32"})
+_INTS = frozenset({"i64", "i32"})
+_F64 = frozenset({"f64"})
+_ALL = _FLOATS | _INTS
+_NONE: frozenset = frozenset()
+# A signalling NaN as a Python float: the conversion to float32 raises the
+# invalid flag, so NumPy keeps it for float32.
+_SIGNALLING_NAN = float(np.array(0x7FF0000000000001, np.uint64).view(np.float64))
+
+# Values assigned through a mask, with the element types whose kernel takes
+# them: float64 takes a Python float, or a Python int that converts to a
+# double; float32 a Python float that is a quiet NaN, an infinity, a zero or
+# rounds to a normal float32, a Python int of at most 2**24 in magnitude, and
+# an np.float32; int64 and int32 a Python int in their range and their own
+# NumPy scalar. Everything else is NumPy's, including its warnings and errors.
+_FILL_VALUES: tuple[tuple[str, object, frozenset], ...] = (
+    ("0.0", 0.0, _FLOATS), ("1.5", 1.5, _FLOATS), ("-0.0", -0.0, _FLOATS), ("nan", float("nan"), _FLOATS),
+    ("-inf", float("-inf"), _FLOATS), ("5e-324", 5e-324, _F64), ("0", 0, _ALL), ("-3", -3, _ALL),
+    ("2**53", 2**53, _F64 | {"i64"}), ("2**53 + 1", 2**53 + 1, _F64 | {"i64"}), ("2**70", 2**70, _F64),
+    ("10**400", 10**400, _NONE), ("True", True, _NONE), ("np.float64(2.0)", np.float64(2.0), _NONE),
+    ("np.float32(2.0)", np.float32(2.0), frozenset({"f32"})), ("array", np.array(7.0), _NONE),
+    ("'1.5'", "1.5", _NONE), ("None", None, _NONE), ("1j", 1j, _NONE),
+    # float32's rounding, overflow and underflow.
+    ("0.1", 0.1, _FLOATS), ("-1e30", -1e30, _FLOATS), ("1e300", 1e300, _F64),
+    ("3.4028235e38", 3.4028235e38, _FLOATS), ("3.4028235677973366e38", 3.4028235677973366e38, _F64),
+    ("1.1754943508222875e-38", 1.1754943508222875e-38, _FLOATS), ("1e-40", 1e-40, _F64),
+    ("1e-50", 1e-50, _F64), ("signalling nan", _SIGNALLING_NAN, _F64), ("np.float32(nan)", np.float32("nan"),
+                                                                        frozenset({"f32"})),
+    ("np.float16(1.5)", np.float16(1.5), _NONE), ("np.longdouble(0.1)", np.longdouble(0.1), _NONE),
+    # Python ints at the edges of float32's exact integers and of int32 and int64.
+    ("2**24", 2**24, _ALL), ("-2**24 - 1", -2**24 - 1, _F64 | _INTS), ("2**31 - 1", 2**31 - 1, _F64 | _INTS),
+    ("-2**31", -2**31, _F64 | _INTS), ("2**31", 2**31, _F64 | {"i64"}), ("-2**31 - 1", -2**31 - 1, _F64 | {"i64"}),
+    ("2**63 - 1", 2**63 - 1, _F64 | {"i64"}), ("-2**63", -2**63, _F64 | {"i64"}), ("2**63", 2**63, _F64),
+    ("-2**63 - 1", -2**63 - 1, _F64),
+    # NumPy integer scalars: each array's own type is taken, the others converted by NumPy.
+    ("np.int64(5)", np.int64(5), frozenset({"i64"})), ("np.int64(-2**40)", np.int64(-2**40), frozenset({"i64"})),
+    ("np.int32(5)", np.int32(5), frozenset({"i32"})), ("np.int32(-2**31)", np.int32(-2**31), frozenset({"i32"})),
+    ("np.uint32(2**32 - 1)", np.uint32(2**32 - 1), _NONE), ("np.int8(-3)", np.int8(-3), _NONE),
+    ("np.True_", np.True_, _NONE), ("2.0", 2.0, _FLOATS),
 )
+# An ordinary value of each element type, for the cases about layouts.
+_ORDINARY_FILL = {"f64": 1.5, "f32": 1.5, "i64": 3, "i32": 3, "u8": 3}
+# Values for the sweep over sizes and masks, by element type.
+_SIZE_FILLS = {
+    "f64": ((("0.0", 0.0), ("1.5", 1.5), ("-0.0", -0.0), ("nan", float("nan")))),
+    "f32": ((("0.0", 0.0), ("1.5", 1.5), ("-0.0", -0.0), ("nan", float("nan")))),
+    "i64": ((("0", 0), ("-3", -3), ("2**40", 2**40))),
+    "i32": ((("0", 0), ("-3", -3), ("2**31 - 1", 2**31 - 1))),
+}
 
 
 def _copyto_casting(value, x, mask):
@@ -1908,30 +1955,35 @@ def _maskfill_shape_cases(dtype: str, takes: str | None) -> Iterator[Case]:
     )
     for text, x_maker, mask_maker, *expects in shapes:
         make = lambda x_maker=x_maker, mask_maker=mask_maker: (x_maker(), mask_maker())
+        fill = _ORDINARY_FILL[dtype]
         for (spelling, function, _), expect in zip(_ASSIGNMENTS[:3], expects):
-            yield Case("maskfill", f"{spelling} with v=1.5 {dtype} {text}", make, partial(function, 1.5), expect)
+            yield Case("maskfill", f"{spelling} with v={fill} {dtype} {text}", make, partial(function, fill), expect)
 
 
 def maskfill_cases() -> Iterator[Case]:
     """Yield the cases of `x[mask] = value`, `np.putmask` and `np.copyto(..., where=mask)`."""
-    kernel = "maskfill_f64"
-    for n in VALUE_SIZES:
-        for mask_label, mask_maker in _mask_makers(n):
-            for text, value, _ in _FILL_VALUES[:4]:
-                yield Case("maskfill", f"x[mask] = {text} f64 n={n} {mask_label}",
-                           partial(_values_and_mask, "f64", n, "random", mask_maker), partial(_assign, value), kernel)
-            for spelling, function, _ in _FUNCTION_ASSIGNMENTS:
-                yield Case("maskfill", f"{spelling} with v=1.5 f64 n={n} {mask_label}",
-                           partial(_values_and_mask, "f64", n, "random", mask_maker), partial(function, 1.5), kernel)
-    for dtype in ("f64", "f32", "i64"):
-        takes = kernel if dtype == "f64" else None
+    for dtype, fills in _SIZE_FILLS.items():
+        kernel = _MASKFILL_KERNELS[dtype]
+        for n in VALUE_SIZES:
+            for mask_label, mask_maker in _mask_makers(n):
+                for text, value in fills:
+                    yield Case("maskfill", f"x[mask] = {text} {dtype} n={n} {mask_label}",
+                               partial(_values_and_mask, dtype, n, "random", mask_maker), partial(_assign, value),
+                               kernel)
+                fill = _ORDINARY_FILL[dtype]
+                for spelling, function, _ in _FUNCTION_ASSIGNMENTS:
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} {mask_label}",
+                               partial(_values_and_mask, dtype, n, "random", mask_maker), partial(function, fill),
+                               kernel)
+    for dtype, takes in _MASKFILL_KERNELS.items():
+        fill = _ORDINARY_FILL[dtype]
         for n in (0, *LAYOUT_SIZES):
             plain_mask = partial(values, "bool", n, arg="mask")
             for spelling, function, by_kernel in _ASSIGNMENTS:
                 for text, value, taken in _FILL_VALUES:
                     yield Case("maskfill", f"{spelling} with v={text} {dtype} n={n}",
                                partial(_x_and_mask, dtype, n, CONTIGUOUS, plain_mask), partial(function, value),
-                               takes if taken and by_kernel else None)
+                               takes if dtype in taken and by_kernel else None)
             for spelling, function, _ in _ASSIGNMENTS[:3]:
                 for variant in variants_for(dtype, n):
                     if variant.dims != 1 or variant.name == "list":
@@ -1939,25 +1991,25 @@ def maskfill_cases() -> Iterator[Case]:
                     expect = takes if variant.plain and variant.writeable else None
                     if takes and (not variant.predictable or (n == 0 and not variant.plain)):
                         expect = ANY
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} x={variant.name}",
-                               partial(_x_and_mask, dtype, n, variant, plain_mask), partial(function, 1.5), expect)
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} x={variant.name}",
+                               partial(_x_and_mask, dtype, n, variant, plain_mask), partial(function, fill), expect)
                 for variant in variants_for("bool", n):
                     if variant.dims != 1:
                         continue
                     expect = takes if variant.plain else (ANY if takes and n == 0 else None)
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask={variant.name}",
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask={variant.name}",
                                partial(_x_and_mask, dtype, n, CONTIGUOUS, partial(_variant_of, "bool", n, variant, "mask")),
-                               partial(function, 1.5), expect)
-                yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask=int64",
-                           partial(_x_and_mask, dtype, n, CONTIGUOUS, _int_mask(plain_mask)), partial(function, 1.5), None)
+                               partial(function, fill), expect)
+                yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask=int64",
+                           partial(_x_and_mask, dtype, n, CONTIGUOUS, _int_mask(plain_mask)), partial(function, fill), None)
                 if n:
                     for byte in BAD_MASK_BYTES:
-                        yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask bytes are {byte}",
+                        yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask bytes are {byte}",
                                    partial(_x_and_mask, dtype, n, CONTIGUOUS, partial(_bad_mask, n, byte)),
-                                   partial(function, 1.5), None)
+                                   partial(function, fill), None)
                     short = partial(values, "bool", n - 1, arg="mask")
-                    yield Case("maskfill", f"{spelling} with v=1.5 {dtype} n={n} mask one short",
-                               partial(_x_and_mask, dtype, n, CONTIGUOUS, short), partial(function, 1.5), None)
+                    yield Case("maskfill", f"{spelling} with v={fill} {dtype} n={n} mask one short",
+                               partial(_x_and_mask, dtype, n, CONTIGUOUS, short), partial(function, fill), None)
         yield from _maskfill_shape_cases(dtype, takes)
     for spelling, function, _ in _ASSIGNMENTS[:3]:
         yield Case("maskfill", f"{spelling} with v=1.5 where mask is a view of x", partial(_overlapping, ORDINARY_N),

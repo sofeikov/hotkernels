@@ -82,8 +82,10 @@ PROBE_BINS = 4
 PROBE_RANGE = (0.0, 4.0)
 # Byte value the bincount, sum and astype probes fill their array with.
 PROBE_BYTE = 7
-# Value the masked-assignment probe writes.
+# Value the masked-assignment probe writes into a float array.
 PROBE_FILL = 2.5
+# Value the masked-assignment probe writes into an integer array.
+PROBE_INT_FILL = 7
 
 # Length of the runs the reduceat probe cuts its array into: the length the
 # kernel was timed for.
@@ -429,35 +431,38 @@ def _compress_function(dtype: type, function: Callable) -> bool:
     return bool(np.array_equal(function(_stride_mask(), x), x[::PROBE_STRIDE]))
 
 
-def _assign(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `x[mask] = PROBE_FILL`."""
-    x[mask] = PROBE_FILL
+def _assign(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `x[mask] = fill`."""
+    x[mask] = fill
 
 
-def _putmask(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `np.putmask(x, mask, PROBE_FILL)`."""
-    np.putmask(x, mask, PROBE_FILL)
+def _putmask(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `np.putmask(x, mask, fill)`."""
+    np.putmask(x, mask, fill)
 
 
-def _copyto(x: np.ndarray, mask: np.ndarray) -> None:
-    """Run `np.copyto(x, PROBE_FILL, where=mask)`."""
-    np.copyto(x, PROBE_FILL, where=mask)
+def _copyto(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
+    """Run `np.copyto(x, fill, where=mask)`."""
+    np.copyto(x, fill, where=mask)
 
 
-def _maskfill(assign: Callable[[np.ndarray, np.ndarray], None]) -> bool:
+def _maskfill(assign: Callable[[np.ndarray, np.ndarray, object], None], dtype: type = np.float64,
+              fill: object = PROBE_FILL) -> bool:
     """Probe a masked assignment: `x[mask] = value` or one of its function forms.
 
     Args:
         assign: Sets the elements of its first argument where its second is
-            True to PROBE_FILL, in place.
+            True to its third, in place.
+        dtype: Element type of the probe array.
+        fill: The value written, of a kind the binding takes for `dtype`.
 
     Returns:
         Whether exactly the selected elements were set.
     """
-    x = np.arange(PROBE_N, dtype=np.float64)
+    x = np.arange(PROBE_N).astype(dtype)
     expected = x.copy()
-    expected[::PROBE_STRIDE] = PROBE_FILL
-    assign(x, _stride_mask())
+    expected[::PROBE_STRIDE] = fill
+    assign(x, _stride_mask(), fill)
     return bool(np.array_equal(x, expected))
 
 
@@ -1028,8 +1033,14 @@ HOOKS: tuple[Hook, ...] = (
         Probe("compress_f32", partial(_compress_function, np.float32, np.extract)),
         Probe("compress_f64", partial(_compress_function, np.float64, np.extract)),
     )),
-    Hook("function.putmask", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _putmask)),)),
-    Hook("function.copyto", FUNCTION, (Probe("maskfill_f64", partial(_maskfill, _copyto)),)),
+    Hook("function.putmask", FUNCTION, (
+        Probe("maskfill_f64", partial(_maskfill, _putmask)),
+        Probe("maskfill_f32", partial(_maskfill, _putmask, np.float32)),
+    )),
+    Hook("function.copyto", FUNCTION, (
+        Probe("maskfill_f64", partial(_maskfill, _copyto)),
+        Probe("maskfill_f32", partial(_maskfill, _copyto, np.float32)),
+    )),
     Hook("function.where", FUNCTION, (
         Probe("nonzero_bool", partial(_nonzero, np.where)),
         Probe("nonzero_2d_bool", partial(_nonzero_2d, np.where)),
@@ -1111,8 +1122,17 @@ HOOKS: tuple[Hook, ...] = (
     Hook("index.get", INDEXING, (
         Probe("compress_f32", partial(_compress, np.float32)),
         Probe("compress_f64", partial(_compress, np.float64)),
+        # The kernels move bits, so int32 goes to the float32 one.
+        Probe("compress_f32", partial(_compress, np.int32)),
     )),
-    Hook("index.set", INDEXING, (Probe("maskfill_f64", partial(_maskfill, _assign)),)),
+    Hook("index.set", INDEXING, (
+        Probe("maskfill_f64", partial(_maskfill, _assign)),
+        Probe("maskfill_f32", partial(_maskfill, _assign, np.float32)),
+        # The kernels move bits: int64 goes to the float64 one, int32 to the
+        # float32 one.
+        Probe("maskfill_f64", partial(_maskfill, _assign, np.int64, PROBE_INT_FILL)),
+        Probe("maskfill_f32", partial(_maskfill, _assign, np.int32, PROBE_INT_FILL)),
+    )),
     # bottleneck's functions, applied only when bottleneck is imported.
     *(Hook(f"bottleneck.{function}", BOTTLENECK,
            (Probe(f"{function}_cols_f64", partial(_bottleneck, function, f"bottleneck.{function}")),),
@@ -1146,6 +1166,7 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("clip_i64", "np.clip", "int64", "clip", ("function.clip", "method.clip"), builtin=True),
     KernelInfo("compress_f32", "x[mask]", "float32", "compress", COMPRESS_HOOKS),
     KernelInfo("compress_f64", "x[mask]", "float64", "compress", COMPRESS_HOOKS),
+    KernelInfo("maskfill_f32", "x[mask] = v", "float32", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("maskfill_f64", "x[mask] = v", "float64", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("nonzero_bool", "np.nonzero", "bool", "nonzero", ("method.nonzero", "function.where")),
     # The same call on a C-ordered matrix.
