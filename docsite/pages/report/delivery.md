@@ -62,7 +62,7 @@ The rule for choosing is: **use the deepest hook that exists for an operation**,
 
 One library is reached without NumPy at all. pandas and empyrical send NaN-aware reductions to bottleneck, whose `nanmean`, `nanstd`, `nanmin` and `nanmax` are C function objects of CPython's own type. The function hook works on them unchanged: their call pointer is set, so every holder of the object reaches the binding, and a call no kernel takes goes on to bottleneck as CPython would have sent it. Four kernels, checked against bottleneck rather than NumPy, serve them along one axis of a two-dimensional array ([the design](https://github.com/sofeikov/hotkernels/blob/main/docs/bottleneck-design.md)). hotkernels never imports bottleneck; it hooks it when it is imported.
 
-The syntax and its function forms meet different hooks. `x[mask]` and `x[mask] = v` reach the indexing hook; `np.compress(mask, x)`, `np.extract(mask, x)`, `np.putmask(x, mask, v)` and `np.copyto(x, v, where=mask)` are function objects, and each has a function hook in front of the same kernel. `np.where(mask)` needs one too: it calls NumPy's C code for `nonzero` directly and never reaches the method `np.nonzero` calls. The function forms flatten their arrays, so they take a contiguous `x` of any shape where the syntax takes one dimension.
+The syntax and its function forms meet different hooks. `x[mask]` and `x[mask] = v` reach the indexing hook; `np.compress(mask, x)`, `np.extract(mask, x)`, `np.putmask(x, mask, v)` and `np.copyto(x, v, where=mask)` are function objects, and each has a function hook in front of the same kernel. `np.where(mask)` needs one too: it calls NumPy's C code for `nonzero` directly and never reaches the method `np.nonzero` calls. On ARM64 the method and `np.where(mask)` also take a C-ordered boolean matrix, for the `nonzero_2d_bool` kernel, and return what NumPy returns for one: two views of the columns of a single array of (row, column) pairs, with the same strides and base. The function forms flatten their arrays, so they take a contiguous `x` of any shape where the syntax takes one dimension.
 
 Try it. The figure below encodes the binding's actual rules.
 
@@ -99,7 +99,7 @@ The indexing hook sits on *every* index operation on *every* array in the proces
 | `x[1:5]` | 88.8 ns | 89.4 ns | +0.6 ns |
 | `x.astype(np.float64)`, uint8, 16 elements | 198 ns | 201 ns | +3 ns |
 | `np.clip(x[::2], -0.5, 0.5)`, 16 elements | 1.24 µs | 1.26 µs | within noise |
-| `np.sum(x)`, float64, 16 elements | 815 ns | 820 ns | within noise |
+| `np.sum(x)`, int64, 16 elements | 1.08 µs | 1.08 µs | within noise |
 
 **About a nanosecond.** Getting there took the same kind of measured iteration as the kernels, and three findings from it are instructive:
 
@@ -167,6 +167,8 @@ That mask check is one of several places where binding the kernels to real calls
 | `clip` bounds that are arrays, reversed, or NaN | Matches only NumPy's scalar, ordered case | Takes the kernel for ordered scalar bounds only |
 | A NaN among the sample points of `np.interp` | Read before the start of its buffers, or return something other than NumPy | Reads the sample points once; sends the call to NumPy. Only worth doing when there are enough queries to pay for the pass, so a call with more than 64 sample points per query goes to NumPy as well |
 | Floating-point status flags left set by a kernel | NumPy would turn them into spurious warnings | Clears them after `clip`; for float `cumsum`, discards the kernel's output if any flag was raised and lets NumPy compute and warn |
+| A float32 or float64 sum whose array is not aligned to its elements' size (ARM64) | Add in NumPy's pairwise order, where NumPy copies such an array in blocks of 8,192 elements and adds the blocks' sums one after another | Sends the call to NumPy |
+| A float32 or float64 sum that is not finite (ARM64) | Return a NaN whose bits depend on which operand of an addition came first, and no overflow warning | Discards the kernel's result and lets NumPy compute and warn |
 
 The binding's check is what handles each row today. Fixing the kernels themselves, so that the check is no longer needed, is still open for the mask, in-place and `argmax` rows. The lesson generalises: a function verified in isolation is verified *on the inputs its tests can express*. Integrating it is a second round of verification, against what real callers can actually pass.
 
@@ -223,7 +225,7 @@ The judge proves a kernel right as a native function. It says nothing about the 
 | Spellings | Positional, keyword, `out=`, `axis=`, method and function forms |
 | Values | The judge's value classes: NaN, infinities, signed zeros, ties |
 
-That is **246,621 calls over the 23 hooked NumPy operations and bottleneck's four functions** (on x86-64; 96,734 over 15 when the first kernels were bound), and all agree.
+That is **253,982 calls over the 23 hooked NumPy operations and bottleneck's four functions** (on ARM64; x86-64 makes fewer, since there the float sums and `np.nonzero` on a matrix are NumPy's and their sweeps are not made; 96,734 over 15 when the first kernels were bound), and all agree.
 
 **Each case also states whether a kernel should have run**, and the counters are checked against it. Without that, a check that quietly stopped matching would pass every comparison, since NumPy's fallback is always right, while delivering nothing.
 
@@ -237,6 +239,6 @@ The binding runs without guard pages. A wrong length passed to a correct kernel 
 
 ## Where that leaves things
 
-Of the 42 kernels, 40 are installed by `install()` and the other 2 with `install(inexact=True)`; 4 of the 40 serve bottleneck's functions, and are applied once bottleneck is imported. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. The stable `argsort` kernels came from a study of whole applications, where sorting was the largest cost no kernel touched; they are reached through a hook on the `argsort` method, because NumPy 2.5 no longer sorts through the per-type table that `argmax` is hooked into. The search on int64 came from a production pipeline, whose calls with one `np.int64` needle all reached the hook and went to NumPy ([issue 160](https://github.com/sofeikov/hotkernels/issues/160)). An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
+Of the 45 kernels, 43 are installed by `install()` on ARM64 (on x86-64 the float sum kernels and `nonzero_2d_bool` are not, and their calls stay with NumPy) and the other 2 with `install(inexact=True)`; 4 of the 43 serve bottleneck's functions, and are applied once bottleneck is imported. `searchsorted` and `interp` were bound late: they were written with one length for the sorted array and the needles, which no real call has, and had to be given a second before a hook could hand them anything. The last kernel added is the right side of the search, which `np.digitize` asks for by default. The stable `argsort` kernels came from a study of whole applications, where sorting was the largest cost no kernel touched; they are reached through a hook on the `argsort` method, because NumPy 2.5 no longer sorts through the per-type table that `argmax` is hooked into. The search on int64 came from a production pipeline, whose calls with one `np.int64` needle all reached the hook and went to NumPy ([issue 160](https://github.com/sofeikov/hotkernels/issues/160)). An ordinary NumPy program that uses eleven of these operations on two million elements runs in 45 ms on plain NumPy and 8.4 ms with the one line added, with the same results bit for bit.
 
 The last chapter collects every number, and is candid about which of them mean less than they appear to.

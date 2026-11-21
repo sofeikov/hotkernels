@@ -62,6 +62,9 @@ ANY_COLUMNS = 22
 # Columns of the timed boolean matrices of any(axis=0): the width of the
 # masks its kernel was asked for.
 ANY_COLS_COLUMNS = 31
+# Rows of the boolean matrices of the workload np.nonzero on a matrix was
+# asked for: 30 to 50 rows of ANY_COLUMNS columns.
+NONZERO_ROWS = 40
 # Share of a mask that is True in the two mask distributions.
 HALF = 0.5
 FEW = 0.05
@@ -143,6 +146,9 @@ class Timed:
     # no limit. The loops built into the binding for short arrays have one;
     # above it the statement is measured as one left to NumPy.
     max_n: int | None = None
+    # Element counts to time the statement at, when they are not SIZES: for a
+    # shape that a workload has and the usual sizes do not.
+    sizes: tuple[int, ...] | None = None
 
     def kernel_at(self, n: int) -> str | None:
         """Return the kernel that takes the call at `n` elements, or None."""
@@ -287,6 +293,21 @@ def _selected(dtype: type, share: float, n: int) -> tuple:
     """Build a mask that is True for `share` of its elements and two arrays of floats to select from."""
     rng = _rng(n)
     return (rng.random(n) < share, rng.standard_normal(n).astype(dtype), rng.standard_normal(n).astype(dtype))
+
+
+def _fortran_matrix(share: float, n: int) -> tuple:
+    """Build the matrix of `_matrix` in Fortran order, which the binding leaves to NumPy.
+
+    Args:
+        share: Probability that an element is True, from 0 to 1.
+        n: Element count asked for, as for `_matrix`, but at least two
+            rows: a matrix of one row is in C order as well.
+
+    Returns:
+        (matrix,).
+    """
+    (m,) = _matrix(share, max(n, 2 * ANY_COLUMNS))
+    return (np.asfortranarray(m),)
 
 
 def _mask(share: float, n: int) -> tuple:
@@ -520,6 +541,13 @@ def _subtract_scalar(w: np.ndarray) -> None:
 # where they are built: ARM64 only. Elsewhere the statements are timed as
 # calls left to NumPy, and so they are below INPLACE_MIN_N elements.
 INPLACE_MIN_N = 131072
+# The float sum kernels take their calls on ARM64 only, until measured on
+# x86-64 (docs/coverage-gaps-arm64.md).
+SUM_F32 = "sum_f32" if ON_ARM64 else None
+SUM_F64 = "sum_f64" if ON_ARM64 else None
+# The kernel of np.nonzero on a boolean matrix, which is installed on ARM64
+# only; elsewhere those statements are timed as calls left to NumPy.
+NONZERO_2D = "nonzero_2d_bool" if ON_ARM64 else None
 SUBTRACT_IN_PLACE = "subtract_inplace_f64" if ON_ARM64 else None
 ADD_IN_PLACE = "add_inplace_f64" if ON_ARM64 else None
 
@@ -571,6 +599,16 @@ TAKEN: tuple[Timed, ...] = (
     Timed("nonzero", "np.nonzero(mask)", "bool, half selected", partial(_mask, HALF), np.nonzero, "nonzero_bool"),
     Timed("nonzero", "np.nonzero(mask)", "bool, few selected", partial(_mask, FEW), np.nonzero, "nonzero_bool"),
     Timed("nonzero", "np.where(mask)", "bool, half selected", partial(_mask, HALF), np.where, "nonzero_bool"),
+    *(Timed("nonzero", "np.nonzero(m)", f"bool, {ANY_COLUMNS} columns, {name}", partial(_matrix, share), np.nonzero,
+            NONZERO_2D, sizes=sizes)
+      for sizes in ((NONZERO_ROWS * ANY_COLUMNS,), None)
+      for name, share in (("few True", FEW), ("half True", HALF))),
+    Timed("nonzero", "m.nonzero()", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW),
+          lambda m: m.nonzero(), NONZERO_2D),
+    Timed("nonzero", "np.where(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.where,
+          NONZERO_2D),
+    Timed("nonzero", "np.argwhere(m)", f"bool, {ANY_COLUMNS} columns, few True", partial(_matrix, FEW), np.argwhere,
+          NONZERO_2D),
     Timed("where", "np.where(mask, a, b)", "float64, half true", partial(_selected, np.float64, HALF), np.where, "where_f64"),
     Timed("where", "np.where(mask, a, np.nan)", "float64, mostly true", partial(_selected, np.float64, MOSTLY),
           lambda m, a, b: np.where(m, a, np.nan), "where_f64"),
@@ -603,6 +641,10 @@ TAKEN: tuple[Timed, ...] = (
     Timed("sum", "x.sum()", "uint8", _bytes, lambda x: x.sum(), "sum_u8"),
     Timed("sum", "np.sum(mask)", "bool, half selected", partial(_mask, HALF), np.sum, "sum_u8"),
     Timed("sum", "mask.sum()", "bool, half selected", partial(_mask, HALF), lambda m: m.sum(), "sum_u8"),
+    Timed("sum", "np.sum(x)", "float32", partial(_floats, np.float32), np.sum, SUM_F32),
+    Timed("sum", "x.sum()", "float32", partial(_floats, np.float32), lambda x: x.sum(), SUM_F32),
+    Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, SUM_F64),
+    Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), SUM_F64),
     Timed("count_nonzero", "np.count_nonzero(x)", "int64", partial(_ints, np.int64), np.count_nonzero, "count_nonzero_i64"),
     Timed("count_nonzero", "np.count_nonzero(x)", "float64", partial(_ints, np.float64), np.count_nonzero, "count_nonzero_f64"),
     Timed("histogram", "np.histogram(x, 50, (-3.0, 3.0))", "float64", partial(_floats, np.float64), lambda x: np.histogram(x, BINS, RANGE), "histogram_f64"),
@@ -659,8 +701,8 @@ LEFT: tuple[Timed, ...] = (
     Timed("inplace", "w -= b", "float32", lambda n: tuple(a.astype(np.float32) for a in _two_floats(n)),
           _subtract_in_place, None),
     Timed("astype", "x.astype(np.float64)", "uint8", _bytes, lambda x: x.astype(np.float64), None),
-    Timed("sum", "np.sum(x)", "float64", partial(_floats, np.float64), np.sum, None),
-    Timed("sum", "x.sum()", "float64", partial(_floats, np.float64), lambda x: x.sum(), None),
+    Timed("sum", "np.sum(x)", "int64", partial(_ints, np.int64), np.sum, None),
+    Timed("sum", "np.sum(x[::2])", "float32, strided", partial(_floats, np.float32), lambda x: np.sum(x[::2]), None),
     Timed("count_nonzero", "np.count_nonzero(x)", "int32", partial(_ints, np.int32), np.count_nonzero, None),
     Timed("cumsum", "np.cumsum(x)", "float64, exact kernels only", partial(_floats, np.float64), np.cumsum, None),
     Timed("accumulate", "np.add.accumulate(x)", "int64", partial(_ints, np.int64), np.add.accumulate, None),
@@ -679,6 +721,8 @@ LEFT: tuple[Timed, ...] = (
     Timed("searchsorted", "np.searchsorted(a, v)", "int64 array, int32 needles", _int_search_int32_needles, np.searchsorted, None),
     Timed("interp", "np.interp(x, xp, fp, left=0.0)", "float64", partial(_interp, None), lambda x, xp, fp: np.interp(x, xp, fp, left=0.0), None),
     Timed("nonzero", "x.nonzero()", "int64", partial(_ints, np.int64), lambda x: x.nonzero(), None),
+    Timed("nonzero", "np.nonzero(m)", f"bool, {ANY_COLUMNS} columns, Fortran order", partial(_fortran_matrix, FEW),
+          np.nonzero, None),
     Timed("compress", "x[3]", "float64", partial(_floats, np.float64), lambda x: x[3], None),
     Timed("compress", "x[1:5]", "float64", partial(_floats, np.float64), lambda x: x[1:5], None),
     Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], None),
@@ -768,7 +812,7 @@ def measure(entry: Timed, n: int) -> Measurement:
 
 def run(entries: Iterable[Timed], sizes: tuple[int, ...] = SIZES) -> list[Measurement]:
     """Time every entry at every size."""
-    return [measure(entry, n) for entry in entries for n in sizes]
+    return [measure(entry, n) for entry in entries for n in (entry.sizes or sizes)]
 
 
 def _output_of(command: list[str]) -> str:

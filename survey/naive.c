@@ -666,3 +666,86 @@ ARGSORT_MERGE(argsort_merge_u64, uint64_t, sort_key_u64)
 ARGSORT_RADIX(argsort_radix_f64, f64, sort_key_f64)
 ARGSORT_RADIX(argsort_radix_i64, i64, sort_key_i64)
 ARGSORT_RADIX(argsort_radix_u64, uint64_t, sort_key_u64)
+
+// ---------------------------------------------------------------- coverage gaps
+// Candidates from the calls of a second program in use: docs/coverage-gaps-arm64.md.
+
+// np.searchsorted(a, v, side='right'): the first index whose element is greater.
+NOINLINE i64 searchsorted_right_i64(const i64 *a, i64 n, const i64 *v, i64 m, i64 *out) {
+    for (i64 j = 0; j < m; j++) {
+        i64 key = v[j];
+        i64 lo = 0, hi = n;
+        while (lo < hi) {
+            i64 mid = lo + ((hi - lo) >> 1);
+            if (a[mid] <= key) lo = mid + 1; else hi = mid;
+        }
+        out[j] = lo;
+    }
+    return 0;
+}
+BENCH_OUT(searchsorted_right_i64, i64, (const i64 *a, i64 n, const i64 *v, i64 m, i64 *out0, i64 fresh, i64 reps), (a, n, v, m, out))
+
+// np.sum on floats, with the additions in NumPy's order, so the result is the
+// same bits: eight running sums over blocks of at most 128 elements, and the
+// blocks added in pairs. A block shorter than 8 is summed in order.
+#define PAIRWISE_BLOCK 128
+#define SUM_PAIRWISE(name, T)                                                  \
+    static T name##_part(const T *x, i64 n) {                                  \
+        if (n < 8) {                                                           \
+            T s = 0;                                                           \
+            for (i64 i = 0; i < n; i++) s += x[i];                             \
+            return s;                                                          \
+        }                                                                      \
+        if (n <= PAIRWISE_BLOCK) {                                             \
+            T r[8];                                                            \
+            for (int k = 0; k < 8; k++) r[k] = x[k];                           \
+            i64 i = 8;                                                         \
+            for (; i < n - (n % 8); i += 8)                                    \
+                for (int k = 0; k < 8; k++) r[k] += x[i + k];                  \
+            T s = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7])); \
+            for (; i < n; i++) s += x[i];                                      \
+            return s;                                                          \
+        }                                                                      \
+        i64 half = n / 2;                                                      \
+        half -= half % 8;                                                      \
+        return name##_part(x, half) + name##_part(x + half, n - half);         \
+    }                                                                          \
+    NOINLINE i64 name(const T *x, i64 n, T *res) {                             \
+        *res = 0 + name##_part(x, n);                                          \
+        return 0;                                                              \
+    }                                                                          \
+    BENCH(name, (const T *x, i64 n, T *res, i64 reps), (x, n, res))
+
+SUM_PAIRWISE(sum_pairwise_f32, f32)
+SUM_PAIRWISE(sum_pairwise_f64, f64)
+
+// np.sum on int64, which wraps around as the C does.
+NOINLINE i64 sum_i64(const i64 *x, i64 n) {
+    uint64_t s = 0;
+    for (i64 i = 0; i < n; i++) s += (uint64_t)x[i];
+    return (i64)s;
+}
+BENCH(sum_i64, (const i64 *x, i64 n, i64 reps), (x, n))
+
+// m.any(axis=0) on a C-ordered boolean array of `rows` rows and `cols` columns.
+NOINLINE i64 any_cols_bool(const u8 *m, u8 *out, i64 rows, i64 cols) {
+    for (i64 j = 0; j < cols; j++) out[j] = 0;
+    for (i64 r = 0; r < rows; r++)
+        for (i64 j = 0; j < cols; j++) out[j] |= m[r * cols + j];
+    return 0;
+}
+BENCH_OUT(any_cols_bool, u8, (const u8 *m, u8 *out0, i64 rows, i64 cols, i64 fresh, i64 reps), (m, out, rows, cols))
+
+// np.nonzero on a C-ordered boolean array of `rows` rows and `cols` columns:
+// the row of each True element into out, its column into out + rows * cols.
+NOINLINE i64 nonzero_2d_bool(const u8 *m, i64 *out, i64 rows, i64 cols) {
+    i64 *at_row = out, *at_col = out + rows * cols;
+    i64 k = 0;
+    for (i64 r = 0; r < rows; r++)
+        for (i64 j = 0; j < cols; j++)
+            if (m[r * cols + j]) { at_row[k] = r; at_col[k] = j; k++; }
+    return k;
+}
+BENCH_OUT(nonzero_2d_bool, i64, (const u8 *m, i64 *out0, i64 rows, i64 cols, i64 fresh, i64 reps), (m, out, rows, cols))
+
+CAST(cast_i16_i64, i16, i64)
