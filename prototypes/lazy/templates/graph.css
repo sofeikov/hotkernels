@@ -125,6 +125,9 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minma
 .entry.current { border-left-color: var(--accent); background: var(--bg); }
 .entry .top { display: flex; gap: 6px; align-items: baseline; }
 .entry .call { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry .unasked { padding: 0 6px; border: 1px solid var(--atonce-line); border-radius: 9px; background: var(--atonce-fill); font-size: 11px; white-space: nowrap; }
+.entry .unasked + .alike { margin-left: 0; }
+.entry .call + .unasked { margin-left: auto; }
 .entry .alike { margin-left: auto; padding: 0 6px; border-radius: 9px; background: var(--accent); color: var(--panel); font-size: 11px; white-space: nowrap; }
 .entry .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

@@ -13,6 +13,10 @@ An `ndarray` that exists already enters through it too, held by reference:
 
     x = np.asarray(existing_ndarray)
 
+`get_lazy(strict=True)` gives a stand-in whose arrays, and everything computed
+from them, raise `NotGathered` where a value is needed and `gather()` was not
+called, instead of computing.
+
 Nothing is patched: `get_lazy()` returns an object, the line above binds a
 name in the module that wrote it, and `sys.modules["numpy"]` and NumPy's own
 functions are as they were. Another module's `import numpy as np` is the real
@@ -35,16 +39,26 @@ CONVERTERS = frozenset({"array", "asarray", "asanyarray", "ascontiguousarray", "
 PASS_THROUGH = frozenset({"asarray", "asanyarray"})
 
 
-def get_lazy() -> "LazyNumPy":
-    """Return the stand-in for the `numpy` module. NumPy itself is not changed."""
-    return LazyNumPy(np)
+def get_lazy(strict: bool = False) -> "LazyNumPy":
+    """Return the stand-in for the `numpy` module. NumPy itself is not changed.
+
+    Args:
+        strict: Whether the arrays it makes refuse to give their values
+            without `gather()`. By default a value that is needed is
+            computed, and the log says so.
+
+    Returns:
+        The stand-in.
+    """
+    return LazyNumPy(np, strict)
 
 
-def _lifted(arg: Any) -> Any:
+def _lifted(arg: Any, strict: bool) -> Any:
     """Make the `ndarray`s of an argument lazy.
 
     Args:
         arg: One argument of a call made through the stand-in.
+        strict: Whether an `ndarray` made lazy here is strict.
 
     Returns:
         A lazy array for an exact `ndarray`; a list or tuple with its
@@ -52,19 +66,20 @@ def _lifted(arg: Any) -> Any:
         is left alone: what NumPy does with it is NumPy's business.
     """
     if type(arg) is np.ndarray:
-        return wrap(arg)
+        return wrap(arg, strict=strict)
     if isinstance(arg, (list, tuple)) and any(type(item) is np.ndarray for item in arg):
-        return type(arg)(_lifted(item) for item in arg)
+        return type(arg)(_lifted(item, strict) for item in arg)
     return arg
 
 
-def _made_lazy(result: Any, source: str) -> Any:
+def _made_lazy(result: Any, source: str, strict: bool) -> Any:
     """Make the arrays a function returned lazy.
 
     Args:
         result: What the NumPy function returned.
         source: The function as a reader would name it, such as "np.zeros",
             so a recording can say where an array entered.
+        strict: Whether an `ndarray` made lazy here is strict.
 
     Returns:
         A lazy array for an exact `ndarray`; a tuple or list with its
@@ -72,9 +87,9 @@ def _made_lazy(result: Any, source: str) -> Any:
         included: `np.sqrt(2.0)` stays an `np.float64`.
     """
     if type(result) is np.ndarray:
-        return wrap(result, source)
+        return wrap(result, source, strict)
     if type(result) in (list, tuple) and any(type(item) is np.ndarray for item in result):
-        return type(result)(_made_lazy(item, source) for item in result)
+        return type(result)(_made_lazy(item, source, strict) for item in result)
     return result
 
 
@@ -88,13 +103,15 @@ class LazyCallable:
     `np.add.reduce` is wrapped the same way.
     """
 
-    def __init__(self, function: Callable[..., Any]) -> None:
+    def __init__(self, function: Callable[..., Any], strict: bool) -> None:
         """Wrap one callable.
 
         Args:
             function: The function or ufunc of the real module.
+            strict: Whether the arrays it makes lazy are strict.
         """
         self._function = function
+        self._strict = strict
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Call the NumPy function with lazy arrays in place of `ndarray`s.
@@ -106,8 +123,9 @@ class LazyCallable:
         Returns:
             The result, with any `ndarray` in it made lazy.
         """
-        result = self._function(*(_lifted(arg) for arg in args), **{key: _lifted(arg) for key, arg in kwargs.items()})
-        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}")
+        result = self._function(*(_lifted(arg, self._strict) for arg in args),
+                                **{key: _lifted(arg, self._strict) for key, arg in kwargs.items()})
+        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}", self._strict)
 
     def __repr__(self) -> str:
         """Say which function this wraps."""
@@ -123,19 +141,21 @@ class LazyCallable:
             `np.add.reduce` as another wrapped callable; `np.add.nin` as the number it is.
         """
         attribute = getattr(self._function, name)
-        return LazyCallable(attribute) if callable(attribute) else attribute
+        return LazyCallable(attribute, self._strict) if callable(attribute) else attribute
 
 
 class LazyNumPy:
     """Stands where a NumPy module stands, and answers every name the module has."""
 
-    def __init__(self, module: ModuleType) -> None:
+    def __init__(self, module: ModuleType, strict: bool) -> None:
         """Stand in for one module.
 
         Args:
             module: `numpy`, or one of its submodules such as `numpy.linalg`.
+            strict: Whether the arrays it makes refuse to give their values without `gather()`.
         """
         self._module = module
+        self._strict = strict
 
     def __repr__(self) -> str:
         """Say which module this stands in for."""
@@ -161,12 +181,12 @@ class LazyNumPy:
         """
         attribute = getattr(self._module, name)
         if isinstance(attribute, ModuleType):
-            return LazyNumPy(attribute)
+            return LazyNumPy(attribute, self._strict)
         if isinstance(attribute, type) or not callable(attribute):
             return attribute
         if self._module is np and name in CONVERTERS:
             return self._converter(attribute, name)
-        return LazyCallable(attribute)
+        return LazyCallable(attribute, self._strict)
 
     def _converter(self, function: Callable[..., Any], name: str) -> Callable[..., Any]:
         """Wrap `np.array`, `np.asarray` and their like.
@@ -187,5 +207,5 @@ class LazyNumPy:
                 return args[0]
             if args and isinstance(args[0], LazyArray):
                 return _at_once(function, f"np.{name}", args, kwargs)
-            return _made_lazy(function(*args, **kwargs), f"np.{name}")
+            return _made_lazy(function(*args, **kwargs), f"np.{name}", self._strict)
         return convert

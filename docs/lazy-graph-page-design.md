@@ -29,7 +29,7 @@ Three areas:
 
 | Area | What is in it |
 |---|---|
-| Left | The graphs of the recording, in order: what triggered each, the line, the number of operations. `× 8 alike` marks graphs that are the same in every operation, shape, type and line |
+| Left | The graphs of the recording, in order: what triggered each, the line, the number of operations. `× 8 alike` marks graphs that are the same in every operation, shape, type and line. `no gather` marks a graph that was computed because something needed a value and `gather()` was not called |
 | Middle | The selected graph. Above it, what made the layer compute it, the line, and the text of that line |
 | Right | The selected node; or, with nothing selected, the graph: counts, and its operations by name |
 
@@ -128,6 +128,7 @@ In one browser, the pane built into the Claude desktop app, on the page of the t
 - An entry of eight graphs alike going from one to the next, and a name under "Operations by name" setting the search.
 - `Unfold all` on the regression: 86 elements drawn, and `Fit` showing all of them.
 - The dark colours, on one graph.
+- The `no gather` mark, on a page of seven graphs computed by `float()` in a loop and by `np.asarray`.
 
 One test in [`tests/test_lazy_graphs.py`](../tests/test_lazy_graphs.py) holds the file itself: that it contains the graphs as JSON that reads back, the library's URL, and exactly three script elements when a line of the recorded code contains `</script>`.
 

@@ -9,6 +9,7 @@ intermediate nobody holds disappears when its consumer has been computed.
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import sys
 import threading
@@ -35,12 +36,22 @@ LOCK = threading.RLock()
 # Hands out node numbers. Operands are always numbered below their consumer.
 _numbers = itertools.count()
 
+log = logging.getLogger(__name__)
+
 # What can make the layer compute: the kinds of `Trigger`.
-GATHER, AT_ONCE, WRITE, LIMIT, PENDING = "gather", "at once", "write", "limit", "pending"
+GATHER, AT_ONCE, WRITE, NEEDED, LIMIT, PENDING = "gather", "at once", "write", "needed", "limit", "pending"
+
+# The three ways the layer computes without being asked, and what the log says
+# of each. The arguments are the call, the file's name and the line.
+_FALLBACK_MESSAGES = {
+    AT_ONCE: "%s is not deferred: NumPy made the call at once, and the result is still lazy (%s:%d)",
+    WRITE: "%s writes into a lazy array: everything pending was computed first (%s:%d)",
+    NEEDED: "%s needed values without gather(): computed here (%s:%d)",
+}
 
 
 class NotGathered(TypeError):
-    """Raised when something needs the values of a lazy array and `gather()` was not called.
+    """Raised when something needs the values of a strict lazy array and `gather()` was not called.
 
     A `TypeError`, because that is what Python raises when an object cannot
     be turned into the number or the array that was asked for.
@@ -67,8 +78,9 @@ class Trigger:
     """What made the layer compute."""
 
     # One of GATHER, AT_ONCE (a call outside the deferred set), WRITE (a write
-    # into a lazy array), LIMIT (too many nodes pending) and PENDING (nothing
-    # did: the nodes are not computed).
+    # into a lazy array), NEEDED (something needed values and `gather()` was
+    # not called), LIMIT (too many nodes pending) and PENDING (nothing did: the
+    # nodes are not computed).
     kind: str
     # The call as a reader would name it: "gather", "np.argmax", "x[index] = v".
     call: str
@@ -144,6 +156,9 @@ class Node:
     # "matmul", "reduction" or "view". For a leaf, AT_ONCE when it is the
     # result of a call made at once, and empty for an array from outside.
     kind: str = ""
+    # True for an array that refuses to give its values without `gather()`:
+    # one made by a strict stand-in, or computed from such an array.
+    strict: bool = False
 
     @property
     def pending(self) -> bool:
@@ -164,13 +179,16 @@ class Counts:
 
     # Operations added to the graph.
     deferred: int = 0
-    # Calls made at once, by the name NumPy gives the function.
+    # Calls made at once and writes into lazy arrays, by the call's name.
     at_once: dict[str, int] = field(default_factory=dict)
+    # Times values were needed without `gather()`, by what needed them.
+    needed: dict[str, int] = field(default_factory=dict)
 
     def reset(self) -> None:
         """Start counting from nothing."""
         self.deferred = 0
         self.at_once = {}
+        self.needed = {}
 
 
 # The one set of counters of the process.
@@ -181,7 +199,30 @@ COUNTS = Counts()
 _pending: weakref.WeakSet[Node] = weakref.WeakSet()
 
 
-def leaf(value: Any, source: str = "array", kind: str = "") -> Node:
+# The fallbacks already logged, as (kind, call, file, line): each line of the
+# user's code is reported once, however often it runs.
+_logged: set[tuple[str, str, str, int]] = set()
+
+
+def fallback(kind: str, call: str) -> None:
+    """Count one time the layer computed without being asked, and log it once per line of the user's code.
+
+    Args:
+        kind: AT_ONCE, WRITE or NEEDED.
+        call: The call as a reader would name it: "np.argmax", "x[index] = v", "float()".
+    """
+    counts = COUNTS.needed if kind == NEEDED else COUNTS.at_once
+    counts[call] = counts.get(call, 0) + 1
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    origin = caller()
+    seen = (kind, call, origin.filename, origin.lineno)
+    if seen not in _logged:
+        _logged.add(seen)
+        log.debug(_FALLBACK_MESSAGES[kind], call, os.path.basename(origin.filename), origin.lineno)
+
+
+def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False) -> Node:
     """Make a node for an array or NumPy scalar that already exists.
 
     Args:
@@ -189,19 +230,20 @@ def leaf(value: Any, source: str = "array", kind: str = "") -> Node:
         source: What made the array, for an observer: "array" for one that
             came from outside, or the call's name, such as "np.zeros".
         kind: AT_ONCE for the result of a call made at once; empty otherwise.
+        strict: Whether the array refuses to give its values without `gather()`.
 
     Returns:
         A computed node with that value.
     """
     node = Node(number=next(_numbers), name="array", operation=None, args=(), kwargs={},
-                shape=value.shape, dtype=value.dtype, value=value, kind=kind)
+                shape=value.shape, dtype=value.dtype, value=value, kind=kind, strict=strict)
     if observer is not None:
         observer.made(node, source)
     return node
 
 
 def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
-             shape: tuple[int, ...], dtype: np.dtype, kind: str) -> Node:
+             shape: tuple[int, ...], dtype: np.dtype, kind: str, strict: bool = False) -> Node:
     """Make a pending node and add it to the pending list.
 
     Args:
@@ -212,12 +254,13 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
         shape: Shape of the result.
         dtype: Element type of the result.
         kind: The kind of deferred operation, as `rules` names it.
+        strict: Whether the array refuses to give its values without `gather()`.
 
     Returns:
         The node. It remembers the caller's line and the `np.errstate` in effect.
     """
     node = Node(number=next(_numbers), name=name, operation=operation, args=args, kwargs=kwargs,
-                shape=shape, dtype=dtype, origin=caller(), errstate=np.geterr(), kind=kind)
+                shape=shape, dtype=dtype, origin=caller(), errstate=np.geterr(), kind=kind, strict=strict)
     with LOCK:
         _pending.add(node)
     COUNTS.deferred += 1

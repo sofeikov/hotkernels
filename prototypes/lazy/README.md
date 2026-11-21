@@ -17,7 +17,7 @@ Try it from the repository's root with `uv run python`.
 
 - Defers a narrow set of NumPy operations into a graph: element-by-element operations, the matrix product, the common reductions, and views.
 - Makes every other NumPy call at once, on gathered operands, and returns a lazy array that has its values.
-- Gives values through `gather()` only. Anything else that would need them (`float(x)`, `if x > 0:`, `np.asarray(x)`) raises `NotGathered`.
+- Gives values through `gather()`, and computes on the spot where something else needs them (`float(x)`, `if x > 0:`, `np.asarray(x)`), saying so in the log once per line. `get_lazy(strict=True)` gives arrays that raise `NotGathered` there instead.
 - Computes the graph one node at a time, each with the call the user wrote, spelled the same way, so results are NumPy's and nothing is faster. With `hotkernels.install()` in effect those calls reach the kernels as the eager program's do.
 - Patches nothing: `get_lazy()` returns an object, and the `numpy` module and other modules' imports are as they were. An `ndarray` that exists enters with `np.asarray(a)`.
 

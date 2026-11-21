@@ -7,6 +7,7 @@ module: type, element type, shape and bits. Run with
 from __future__ import annotations
 
 import gc
+import logging
 import sys
 import warnings
 
@@ -24,6 +25,8 @@ EXAMPLES, FEATURES, STEPS = 2_000, 12, 30
 TOKENS, WIDTH, HEADS, WIDENING = 16, 24, 4, 4
 
 lazy = get_lazy()
+# A stand-in whose arrays refuse to give their values without gather().
+strict = get_lazy(strict=True)
 
 
 def same(expected, got) -> bool:
@@ -111,38 +114,128 @@ def test_a_transformer_block_is_lazy_when_its_input_is():
     assert same(expected, out.gather())
 
 
-def test_values_leave_only_through_gather():
-    """Every implicit way to a value raises NotGathered, also when the array is already computed."""
-    x = lazy.arange(6.0)
+def test_a_strict_array_gives_values_only_through_gather():
+    """On a strict array every implicit way to a value raises NotGathered, also when the array is already computed."""
+    x = strict.arange(6.0)
     total = (x * 2).sum()
     total.gather()
     ways = {
         "float": lambda: float(total), "int": lambda: int(total), "bool": lambda: bool(total > 0),
-        "if": lambda: 1 if total > 0 else 0, "format": lambda: f"{total:.3f}", "iteration": lambda: list(x),
-        "range": lambda: range(lazy.arange(4).max()), "in": lambda: 3.0 in x, "flat": lambda: x.flat,
+        "if": lambda: 1 if total > 0 else 0, "format": lambda: f"{total:.3f}",
+        "range": lambda: range(strict.arange(4).max()), "in": lambda: 3.0 in x, "flat": lambda: x.flat,
         "tolist": lambda: x.tolist(), "item": lambda: total.item(), "allclose": lambda: numpy.allclose(x, x),
     }
     for name, way in ways.items():
         assert isinstance(raised(way), NotGathered), name
     assert isinstance(raised(lambda: float(total)), TypeError)
+    assert same(numpy.float64(30.0), total.gather())
 
 
-def test_numpy_cannot_take_the_values_unnoticed():
+def test_strictness_follows_the_array():
+    """What is computed from a strict array is strict, through the real module and beside a plain or a lenient array."""
+    hard = strict.arange(3.0)
+    assert isinstance(raised(lambda: float(numpy.sum(hard * 2))), NotGathered)
+    assert isinstance(raised(lambda: float((hard + lazy.arange(3.0) + numpy.ones(3)).sum())), NotGathered)
+    assert isinstance(raised(lambda: int(numpy.argmax(hard))), NotGathered)
+    assert float((lazy.arange(3.0) * 2).sum()) == 6.0
+
+
+def test_numpy_cannot_take_the_values_of_a_strict_array_unnoticed():
     """NumPy asking for an array, an ndarray written from a lazy array, and the array interface are all refused."""
-    x = lazy.arange(6.0)
+    x = strict.arange(6.0)
     plain = numpy.zeros(6)
     ways = {
         "asarray": lambda: numpy.asarray(x), "array": lambda: numpy.array(x),
         "ndarray[:] = lazy": lambda: plain.__setitem__(slice(None), x),
         "ndarray += lazy": lambda: plain.__iadd__(x), "out=ndarray": lambda: numpy.multiply(x, 2, out=plain),
-        "copyto": lambda: numpy.copyto(plain, x), "index": lambda: plain[lazy.arange(3)],
+        "copyto": lambda: numpy.copyto(plain, x), "index": lambda: plain[strict.arange(3)],
         "generator": lambda: numpy.random.default_rng(SEED).permutation(x),
     }
     for name, way in ways.items():
         assert isinstance(raised(way), NotGathered), name
     assert not plain.any()
     for name in ("__array_interface__", "__array_struct__"):
-        assert not hasattr(x, name)
+        assert not hasattr(x, name) and not hasattr(lazy.arange(3.0), name)
+
+
+def test_a_value_needed_without_gather_is_what_numpy_gives():
+    """By default every implicit way to a value computes it, and gives what the same line gives with NumPy."""
+    data = numpy.arange(6.0)
+    x = lazy.asarray(data.copy())
+    total, plain_total = (x * 2).sum(), (data * 2).sum()
+    graph.COUNTS.reset()
+    pairs = {
+        "float": (float(total), float(plain_total)), "int": (int(total), int(plain_total)),
+        "complex": (complex(total), complex(plain_total)), "bool": (bool(total > 0), bool(plain_total > 0)),
+        "if": (1 if total > 100 else 0, 0), "format": (f"{total:.3f}", f"{plain_total:.3f}"),
+        "range": (range(lazy.arange(4).max()), range(numpy.arange(4).max())), "in": (3.0 in x, 3.0 in data),
+        "tolist": (x.tolist(), data.tolist()), "item": (total.item(), plain_total.item()),
+        "allclose": (numpy.allclose(x, x + 1e-12), True), "flat": (list(x.flat), list(data.flat)),
+        "index": (list(data[lazy.arange(3)]), list(data[numpy.arange(3)])),
+    }
+    for name, (got, expected) in pairs.items():
+        assert type(got) is type(expected) and got == expected, name
+    assert same(data, numpy.asarray(x)) and numpy.asarray(x) is x.gather()
+    assert same(data, numpy.array(x)) and numpy.array(x) is not x.gather()
+    assert same(numpy.random.default_rng(SEED).permutation(data), numpy.random.default_rng(SEED).permutation(x))
+    assert graph.COUNTS.needed["float()"] == 1 and graph.COUNTS.needed["Conversion to an ndarray"] >= 4
+
+
+def test_lazy_values_written_into_an_ndarray_are_numpys():
+    """ndarray[:] = lazy, ndarray += lazy, out=ndarray and copyto compute the lazy side and let NumPy write."""
+    data = numpy.arange(4.0)
+    cases = {
+        "ndarray[:] = lazy": lambda np, plain, x: plain.__setitem__(slice(None), x * 2),
+        "ndarray += lazy": lambda np, plain, x: plain.__iadd__(x * 2),
+        "out=ndarray": lambda np, plain, x: numpy.multiply(x, 3, out=plain),
+        "copyto": lambda np, plain, x: numpy.copyto(plain, x + 1),
+    }
+    for name, case in cases.items():
+        expected, got = numpy.ones(4), numpy.ones(4)
+        case(numpy, expected, data)
+        case(lazy, got, lazy.asarray(data))
+        assert same(expected, got), name
+
+
+def test_handing_out_an_array_computes_everything_pending_first():
+    """Before lazy values reach an ndarray, all pending work is computed: it may read what is about to change."""
+    held = numpy.zeros(3)
+    reader = lazy.asarray(held) + 1
+    source = lazy.ones(3) * 5
+    held[:] = source
+    assert not reader._node.pending
+    assert same(numpy.ones(3), reader.gather()) and same(numpy.full(3, 5.0), held)
+    # A number that leaves is not an array someone can write through: only what it needs is computed.
+    untouched = lazy.arange(3.0) * 2
+    assert float((lazy.arange(3.0) + 1).sum()) == 6.0 and untouched._node.pending
+
+
+def test_fallbacks_are_logged_once_per_line(caplog):
+    """Each line that makes the layer compute unasked is logged once, however often it runs, and every time is counted."""
+    caplog.set_level(logging.DEBUG, logger=graph.log.name)
+    graph.COUNTS.reset()
+    x = lazy.arange(4.0)
+    for _ in range(3):
+        float((x * 2).sum())
+    numpy.argmax(x)
+    x[0] = 9.0
+    messages = [entry.getMessage() for entry in caplog.records if entry.name == graph.log.name]
+    assert len(messages) == 3
+    assert messages[0].startswith("float() needed values without gather(): computed here (test_lazy_prototype.py:")
+    assert messages[1].startswith("np.argmax is not deferred: NumPy made the call at once, and the result is still lazy (")
+    assert messages[2].startswith("x[index] = v writes into a lazy array: everything pending was computed first (")
+    assert graph.COUNTS.needed == {"float()": 3} and graph.COUNTS.at_once == {"np.argmax": 1, "x[index] = v": 1}
+
+
+def test_iterating_needs_no_value():
+    """Iteration gives lazy views of the first dimension, for a strict array too; a scalar is not iterable, as in NumPy."""
+    data = numpy.arange(6.0).reshape(2, 3)
+    for stand_in in (lazy, strict):
+        rows = list(stand_in.asarray(data) * 2)
+        assert len(rows) == 2 and all(type(row) is LazyArray and row._node.pending for row in rows)
+        assert same(data[1] * 2, rows[1].gather())
+    assert [float(value) for value in lazy.arange(3.0)] == [0.0, 1.0, 2.0]
+    assert str(raised(lambda: iter(lazy.arange(3.0).sum()))) == str(raised(lambda: iter(numpy.array(3.0))))
 
 
 def test_shape_and_type_errors_are_numpys_and_come_at_the_line():

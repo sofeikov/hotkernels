@@ -8,8 +8,10 @@
 It exists to be read and argued with. It defers a narrow set of NumPy
 operations into a graph, makes every other NumPy call at once, and computes
 the graph one node at a time with the NumPy call each node stands for, so it
-makes nothing faster. Values leave only through `gather()`: anything else
-that would need them raises `NotGathered`.
+makes nothing faster. `gather()` is the way to ask for values; anything else
+that needs them (`float(x)`, `if x > 0:`, `np.asarray(x)`) gets them computed
+on the spot and logged, and raises `NotGathered` for an array made by
+`get_lazy(strict=True)`.
 
 The modules, in the order to read them:
 
