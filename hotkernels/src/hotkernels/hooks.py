@@ -1038,10 +1038,14 @@ HOOKS: tuple[Hook, ...] = (
     Hook("function.compress", FUNCTION, (
         Probe("compress_f32", partial(_compress_function, np.float32, np.compress)),
         Probe("compress_f64", partial(_compress_function, np.float64, np.compress)),
+        Probe("compress_u8", partial(_compress_function, np.uint8, np.compress)),
+        Probe("compress_i16", partial(_compress_function, np.int16, np.compress)),
     )),
     Hook("function.extract", FUNCTION, (
         Probe("compress_f32", partial(_compress_function, np.float32, np.extract)),
         Probe("compress_f64", partial(_compress_function, np.float64, np.extract)),
+        Probe("compress_u8", partial(_compress_function, np.uint8, np.extract)),
+        Probe("compress_i16", partial(_compress_function, np.int16, np.extract)),
     )),
     Hook("function.putmask", FUNCTION, (
         Probe("maskfill_f64", partial(_maskfill, _putmask)),
@@ -1134,6 +1138,10 @@ HOOKS: tuple[Hook, ...] = (
         Probe("compress_f64", partial(_compress, np.float64)),
         # The kernels move bits, so int32 goes to the float32 one.
         Probe("compress_f32", partial(_compress, np.int32)),
+        # int8 and bool go to compress_u8, uint16 to compress_i16.
+        Probe("compress_u8", partial(_compress, np.uint8)),
+        Probe("compress_u8", partial(_compress, np.bool_)),
+        Probe("compress_i16", partial(_compress, np.int16)),
     )),
     Hook("index.set", INDEXING, (
         Probe("maskfill_f64", partial(_maskfill, _assign)),
@@ -1176,6 +1184,10 @@ KERNELS: tuple[KernelInfo, ...] = (
     KernelInfo("clip_i64", "np.clip", "int64", "clip", ("function.clip", "method.clip"), builtin=True),
     KernelInfo("compress_f32", "x[mask]", "float32", "compress", COMPRESS_HOOKS),
     KernelInfo("compress_f64", "x[mask]", "float64", "compress", COMPRESS_HOOKS),
+    # Each also counts the other element types of its width: int8 and bool,
+    # and uint16.
+    KernelInfo("compress_u8", "x[mask]", "uint8", "compress", COMPRESS_HOOKS),
+    KernelInfo("compress_i16", "x[mask]", "int16", "compress", COMPRESS_HOOKS),
     KernelInfo("maskfill_f32", "x[mask] = v", "float32", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("maskfill_f64", "x[mask] = v", "float64", "maskfill", ("index.set", "function.putmask", "function.copyto")),
     KernelInfo("nonzero_bool", "np.nonzero", "bool", "nonzero", ("method.nonzero", "function.where")),

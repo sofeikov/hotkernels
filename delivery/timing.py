@@ -68,6 +68,9 @@ NONZERO_ROWS = 40
 # Share of a mask that is True in the two mask distributions.
 HALF = 0.5
 FEW = 0.05
+# Ends (exclusive) of the values of timed uint8 and bool data.
+UINT8_END = 256
+BOOL_END = 2
 # Share of a condition that is True in the timed np.where with a scalar.
 MOSTLY = 0.95
 # Bounds, bin count and range used by the timed clip and histogram calls.
@@ -281,6 +284,22 @@ def _masked(dtype: type, share: float, n: int) -> tuple:
     """Build data and a mask that selects `share` of it."""
     rng = _rng(n)
     return (rng.standard_normal(n).astype(dtype), rng.random(n) < share)
+
+
+def _masked_bytes(dtype: type, share: float, n: int) -> tuple:
+    """Build uint8 or bool data, every value of the type equally likely, and a mask that selects `share` of it.
+
+    Args:
+        dtype: np.uint8 or np.bool_.
+        share: Probability that a mask element is True, from 0 to 1.
+        n: Element count.
+
+    Returns:
+        (x, mask).
+    """
+    rng = _rng(n)
+    end = BOOL_END if dtype is np.bool_ else UINT8_END
+    return (rng.integers(0, end, n).astype(dtype), rng.random(n) < share)
 
 
 def _masked_rows(dtype: type, share: float, n: int) -> tuple:
@@ -591,6 +610,11 @@ TAKEN: tuple[Timed, ...] = (
     Timed("compress", "x[mask]", "int64, half selected", partial(_masked, np.int64, HALF), lambda x, m: x[m], "compress_f64"),
     Timed("compress", "x[mask]", "int32, half selected", partial(_masked, np.int32, HALF), lambda x, m: x[m], "compress_f32"),
     Timed("compress", "x[mask]", "int32, few selected", partial(_masked, np.int32, FEW), lambda x, m: x[m], "compress_f32"),
+    Timed("compress", "x[mask]", "uint8, half selected", partial(_masked_bytes, np.uint8, HALF), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "uint8, few selected", partial(_masked_bytes, np.uint8, FEW), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "bool, half selected", partial(_masked_bytes, np.bool_, HALF), lambda x, m: x[m], "compress_u8"),
+    Timed("compress", "x[mask]", "int16, half selected", partial(_masked, np.int16, HALF), lambda x, m: x[m], "compress_i16"),
+    Timed("compress", "x[mask]", "int16, few selected", partial(_masked, np.int16, FEW), lambda x, m: x[m], "compress_i16"),
     Timed("maskfill", "x[mask] = 0.0", "float64, half selected", partial(_masked, np.float64, HALF), partial(_assign, 0.0), "maskfill_f64"),
     Timed("maskfill", "x[mask] = 0.0", "float32, half selected", partial(_masked, np.float32, HALF), partial(_assign, 0.0), "maskfill_f32"),
     Timed("maskfill", "x[mask] = 0.0", "float32, few selected", partial(_masked, np.float32, FEW), partial(_assign, 0.0), "maskfill_f32"),
@@ -734,7 +758,7 @@ LEFT: tuple[Timed, ...] = (
           np.nonzero, None),
     Timed("compress", "x[3]", "float64", partial(_floats, np.float64), lambda x: x[3], None),
     Timed("compress", "x[1:5]", "float64", partial(_floats, np.float64), lambda x: x[1:5], None),
-    Timed("compress", "x[mask]", "int16, half selected", partial(_masked, np.int16, HALF), lambda x, m: x[m], None),
+    Timed("compress", "x[mask]", "float16, half selected", partial(_masked, np.float16, HALF), lambda x, m: x[m], None),
     Timed("maskfill", "x[3] = 1.0", "float64", partial(_floats, np.float64), _set_element, None),
     Timed("maskfill", "x[mask] = 0.0", "float32, value an np.float64", partial(_masked, np.float32, HALF),
           partial(_assign, np.float64(0.0)), None),

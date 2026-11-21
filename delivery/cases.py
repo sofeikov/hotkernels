@@ -1698,7 +1698,8 @@ def _extract_call(x, mask):
 # mask: the ones whose bit patterns a kernel that computed on its elements
 # would change.
 _COMPRESS_VALUE_CLASSES = {"f32": ("random", "nan_some"), "f64": ("random", "nan_some"), "i64": ("random", "extremes"),
-                           "i32": ("random", "extremes")}
+                           "i32": ("random", "extremes"), "u8": ("random", "extremes"), "i8": ("random", "extremes"),
+                           "bool": ("random",), "i16": ("random", "extremes"), "u16": ("random", "extremes")}
 
 
 def compress_cases() -> Iterator[Case]:
@@ -1706,8 +1707,11 @@ def compress_cases() -> Iterator[Case]:
 
     int64 elements are selected by the float64 kernel, which moves 64-bit
     elements without computing on them, and int32 elements by the float32 one.
+    Likewise int8 and bool by compress_u8, and uint16 by compress_i16.
     """
-    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64", "i32": "compress_f32"}
+    kernels = {"f32": "compress_f32", "f64": "compress_f64", "i64": "compress_f64", "i32": "compress_f32",
+               "u8": "compress_u8", "i8": "compress_u8", "bool": "compress_u8",
+               "i16": "compress_i16", "u16": "compress_i16"}
     select = Spelling("x[mask]", lambda x, mask: x[mask], any_shape=False)
     functions = (
         Spelling("np.compress(mask, x)", _compress_call),
@@ -1734,7 +1738,7 @@ def compress_cases() -> Iterator[Case]:
                 for spelling in functions:
                     make = partial(_values_and_mask, dtype, n, "random", mask_maker)
                     yield Case("compress", f"{spelling.text} {dtype} n={n} {mask_label}", make, spelling.call, kernel)
-    for dtype in ("f32", "f64", "i64", "u64", "i32", "u8"):
+    for dtype in ("f32", "f64", "i64", "u64", "i32", "u32", "u8", "i8", "bool", "i16", "u16"):
         kernel = kernels.get(dtype)
         for n in (0, *LAYOUT_SIZES):
             plain_mask = partial(values, "bool", n, arg="mask")
