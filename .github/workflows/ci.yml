@@ -4,15 +4,69 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Runs every job on any branch: such a run has no list of changed paths.
+  workflow_dispatch:
+
+# The macOS jobs queue for the maintainer's runners, so a run nobody will read
+# gives way. On a pull request a newer push cancels the unfinished run. On main
+# the running run finishes, and a newer push replaces the one still waiting:
+# a burst of merges gets two or three runs, and a merge in its middle may get
+# none of its own. Every commit a run reaches is checked in full.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs the change needs, from the paths it touches: none for a change
+  # to documentation alone, and numpy-range on a pull request only when it
+  # touches what that job checks. The rules are in .github/scripts/ci-scope.sh.
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      tests: ${{ steps.scope.outputs.tests }}
+      numpy_range: ${{ steps.scope.outputs.numpy_range }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          # The files of the whole pull request, or of the push. A list that
+          # cannot be read, or reaches the API's limit (3,000 files for a pull
+          # request, 300 for a comparison), is left empty, and an empty list
+          # runs everything. So does a push that creates the branch, whose
+          # `before` is all zeros, and a run started by hand.
+          files=""
+          limit=0
+          if [ "$EVENT" = pull_request ]; then
+            limit=3000
+            files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename') || files=""
+          elif [ "$EVENT" = push ] && [[ ! "$BEFORE" =~ ^0+$ ]]; then
+            limit=300
+            files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$SHA" --jq '.files[].filename') || files=""
+          fi
+          count=$(grep -c . <<< "$files" || true)
+          if [ "$count" -ge "$limit" ]; then files=""; fi
+          echo "$count changed paths"
+          .github/scripts/ci-scope.sh <<< "$files" | tee -a "$GITHUB_OUTPUT"
+
   # The maintainer's Mac when it is online, a hosted macOS runner otherwise.
   runner:
     uses: ./.github/workflows/pick-runner.yml
     secrets: inherit
 
   judge:
-    needs: runner
+    needs: [runner, scope]
+    if: needs.scope.outputs.tests == 'true'
     runs-on: ${{ needs.runner.outputs.runner }} # Apple Silicon either way
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +96,10 @@ jobs:
   # on PyPI. hotkernels is built against the newest NumPy in both, as a wheel
   # is, so the first step also shows that such a build runs on the oldest.
   numpy-range:
-    needs: runner
+    needs: [runner, scope]
+    # Every run on main that is not documentation; on a pull request, only
+    # when it touches what this job checks.
+    if: needs.scope.outputs.tests == 'true' && (github.event_name != 'pull_request' || needs.scope.outputs.numpy_range == 'true')
     runs-on: ${{ needs.runner.outputs.runner }} # Apple Silicon either way
     env:
       VERSIONS: 'import sys, numpy; print(f"Python {sys.version.split()[0]}, NumPy {numpy.__version__}")'
@@ -68,6 +125,8 @@ jobs:
   # processors have the x86-64-v3 instruction sets the kernels need; if one
   # did not, install() would do nothing and the delivery check would say so.
   judge-linux:
+    needs: scope
+    if: needs.scope.outputs.tests == 'true'
     runs-on: ubuntu-latest # x86-64, with clang and GNU binutils installed
     steps:
       - uses: actions/checkout@v4
