@@ -842,7 +842,7 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 
 - **Other array types as operands.** A masked array, an `np.matrix` or a pandas Series beside a lazy array is made at once by this design; which of the two types NumPy lets decide such a call was not probed.
 - **The list of calls that write.** It was written from memory of NumPy's API, not checked against it.
-- **Other roads to the memory.** The buffer protocol and `__dlpack__` are not defined by the prototype, so they raise `TypeError` for every lazy array, strict or not; whether anything else reaches values was not searched for systematically. [Issue 262](https://github.com/sofeikov/hotkernels/issues/262) lists it.
+- **Other roads to the memory.** The buffer protocol and `__dlpack__` are not defined by the prototype, so they raise `TypeError` for every lazy array, strict or not; `np.from_dlpack(x)` fails with an `AttributeError` that names `__dlpack__`. Whether anything else reaches values was not searched for systematically: pickling, `copy.copy` and `np.save` were not looked at. [Issue 270](https://github.com/sofeikov/hotkernels/issues/270) is that search.
 - **A codebase that uses other libraries.** The ten programs use NumPy alone. pandas, matplotlib, SciPy and scikit-learn are not installed where they were run, so nothing here says what happens when an array is handed to one of them.
 - **Pickling and copying a lazy array.** Not tried.
 - **`install(inexact=True)` and the bottleneck hooks with the layer.** Only the default `install()` was run.
