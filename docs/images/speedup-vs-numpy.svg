@@ -1,90 +1,280 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 666" width="936" height="666" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 1296" width="936" height="1296" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-labelledby="t d">
 <title id="t">Speedup of each hotkernels kernel over NumPy</title>
-<desc id="d">Horizontal bars, one per NumPy call, showing how many times faster the kernel is than NumPy 2.5.5 on arrays of 1,048,576 elements on an Apple M1 Pro. The values are in the table that follows the chart in the README.</desc>
-<rect x="0.5" y="0.5" width="935" height="665" rx="12" fill="#0d1117" stroke="#30363d"/>
+<desc id="d">Horizontal bars, two per NumPy call, showing how many times faster the kernel is than NumPy 2.5.5 on arrays of 1,048,576 elements: on an Apple M1 Pro and on an Intel Core i5-14600KF. The values are in the table that follows the chart in the README.</desc>
+<rect x="0.5" y="0.5" width="935" height="1295" rx="12" fill="#0d1117" stroke="#30363d"/>
 <g transform="translate(28 28)">
-<text x="0" y="20" font-size="16" font-weight="600" fill="#f0efec">Speedup over NumPy</text>
-<text x="0" y="40" font-size="12" fill="#c3c2b7">Times faster than NumPy 2.5.5 on arrays of 1,048,576 elements. Apple M1 Pro.</text>
+<text x="0" y="20" font-size="16" font-weight="600" fill="#f0efec">Speedup over NumPy, kernel by kernel</text>
+<text x="0" y="40" font-size="12" fill="#c3c2b7">Times faster than NumPy 2.5.5 on arrays of 1,048,576 elements, timed as native functions. Logarithmic scale.</text>
 <rect x="0" y="58" width="12" height="12" rx="2" fill="#3987e5"/>
-<text x="18" y="68" font-size="12" fill="#c3c2b7">in every case timed</text>
-<rect x="150" y="58" width="12" height="12" rx="2" fill="#184f95"/>
-<text x="168" y="68" font-size="12" fill="#c3c2b7">in the more favourable case only</text>
-<line x1="276.0" y1="90" x2="276.0" y2="580" stroke="#3d444d" stroke-width="1"/>
-<text x="276.0" y="596" font-size="11" text-anchor="middle" fill="#9a9890">0x</text>
-<line x1="400.0" y1="90" x2="400.0" y2="580" stroke="#262b33" stroke-width="1"/>
-<text x="400.0" y="596" font-size="11" text-anchor="middle" fill="#9a9890">20x</text>
-<line x1="524.0" y1="90" x2="524.0" y2="580" stroke="#262b33" stroke-width="1"/>
-<text x="524.0" y="596" font-size="11" text-anchor="middle" fill="#9a9890">40x</text>
-<line x1="648.0" y1="90" x2="648.0" y2="580" stroke="#262b33" stroke-width="1"/>
-<text x="648.0" y="596" font-size="11" text-anchor="middle" fill="#9a9890">60x</text>
-<line x1="772.0" y1="90" x2="772.0" y2="580" stroke="#262b33" stroke-width="1"/>
-<text x="772.0" y="596" font-size="11" text-anchor="middle" fill="#9a9890">80x</text>
-<text x="266" y="112.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
-<path d="M276.0,102.0 H451.8 Q455.8,102.0 455.8,106.0 V110.0 Q455.8,114.0 451.8,114.0 H276.0 Z" fill="#3987e5"/>
-<text x="461.8" y="112.0" font-size="12" fill="#c3c2b7">29.0x</text>
-<text x="266" y="136.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,126.0 H396.6 Q400.6,126.0 400.6,130.0 V134.0 Q400.6,138.0 396.6,138.0 H276.0 Z" fill="#3987e5"/>
-<text x="406.6" y="136.0" font-size="12" fill="#c3c2b7">20.1x</text>
-<text x="266" y="160.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
-<rect x="276" y="150.0" width="107.3" height="12" fill="#3987e5"/>
-<path d="M385.3,150.0 H530.5 Q534.5,150.0 534.5,154.0 V158.0 Q534.5,162.0 530.5,162.0 H385.3 Z" fill="#184f95"/>
-<text x="540.5" y="160.0" font-size="12" fill="#c3c2b7">17.3x – 41.7x</text>
-<text x="266" y="184.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.interp(x, xp, fp)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,174.0 H376.2 Q380.2,174.0 380.2,178.0 V182.0 Q380.2,186.0 376.2,186.0 H276.0 Z" fill="#3987e5"/>
-<text x="386.2" y="184.0" font-size="12" fill="#c3c2b7">16.8x</text>
-<text x="266" y="208.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.sum(x)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
-<path d="M276.0,198.0 H369.3 Q373.3,198.0 373.3,202.0 V206.0 Q373.3,210.0 369.3,210.0 H276.0 Z" fill="#3987e5"/>
-<text x="379.3" y="208.0" font-size="12" fill="#c3c2b7">15.7x</text>
-<text x="266" y="232.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
-<path d="M276.0,222.0 H349.5 Q353.5,222.0 353.5,226.0 V230.0 Q353.5,234.0 349.5,234.0 H276.0 Z" fill="#3987e5"/>
-<text x="359.5" y="232.0" font-size="12" fill="#c3c2b7">12.5x</text>
-<text x="266" y="256.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<rect x="276" y="246.0" width="68.2" height="12" fill="#3987e5"/>
-<path d="M346.2,246.0 H411.5 Q415.5,246.0 415.5,250.0 V254.0 Q415.5,258.0 411.5,258.0 H346.2 Z" fill="#184f95"/>
-<text x="421.5" y="256.0" font-size="12" fill="#c3c2b7">11.0x – 22.5x</text>
-<text x="266" y="280.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.histogram(x, bins, range)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,270.0 H332.1 Q336.1,270.0 336.1,274.0 V278.0 Q336.1,282.0 332.1,282.0 H276.0 Z" fill="#3987e5"/>
-<text x="342.1" y="280.0" font-size="12" fill="#c3c2b7">9.70x</text>
-<text x="266" y="304.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argmax(x), np.argmin(x)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
-<path d="M276.0,294.0 H326.7 Q330.7,294.0 330.7,298.0 V302.0 Q330.7,306.0 326.7,306.0 H276.0 Z" fill="#3987e5"/>
-<text x="336.7" y="304.0" font-size="12" fill="#c3c2b7">8.82x, 8.86x</text>
-<text x="266" y="328.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.clip(x, lo, hi)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
-<rect x="276" y="318.0" width="47.2" height="12" fill="#3987e5"/>
-<path d="M325.2,318.0 H340.2 Q344.2,318.0 344.2,322.0 V326.0 Q344.2,330.0 340.2,330.0 H325.2 Z" fill="#184f95"/>
-<text x="350.2" y="328.0" font-size="12" fill="#c3c2b7">7.62x – 11.0x</text>
-<text x="266" y="352.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask] = value</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<rect x="276" y="342.0" width="46.4" height="12" fill="#3987e5"/>
-<path d="M324.4,342.0 H404.7 Q408.7,342.0 408.7,346.0 V350.0 Q408.7,354.0 404.7,354.0 H324.4 Z" fill="#184f95"/>
-<text x="414.7" y="352.0" font-size="12" fill="#c3c2b7">7.48x – 21.4x</text>
-<text x="266" y="376.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argmax(x), np.argmin(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,366.0 H314.5 Q318.5,366.0 318.5,370.0 V374.0 Q318.5,378.0 314.5,378.0 H276.0 Z" fill="#3987e5"/>
-<text x="324.5" y="376.0" font-size="12" fill="#c3c2b7">6.86x, 7.10x</text>
-<text x="266" y="400.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.bincount(x)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
-<path d="M276.0,390.0 H313.8 Q317.8,390.0 317.8,394.0 V398.0 Q317.8,402.0 313.8,402.0 H276.0 Z" fill="#3987e5"/>
-<text x="323.8" y="400.0" font-size="12" fill="#c3c2b7">6.74x</text>
-<text x="266" y="424.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.searchsorted(a, v)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,414.0 H311.7 Q315.7,414.0 315.7,418.0 V422.0 Q315.7,426.0 311.7,426.0 H276.0 Z" fill="#3987e5"/>
-<text x="321.7" y="424.0" font-size="12" fill="#c3c2b7">6.40x</text>
-<text x="266" y="448.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.nonzero(mask)</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
-<rect x="276" y="438.0" width="31.9" height="12" fill="#3987e5"/>
-<path d="M309.9,438.0 H391.0 Q395.0,438.0 395.0,442.0 V446.0 Q395.0,450.0 391.0,450.0 H309.9 Z" fill="#184f95"/>
-<text x="401.0" y="448.0" font-size="12" fill="#c3c2b7">5.15x – 19.2x</text>
-<text x="266" y="472.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.count_nonzero(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<path d="M276.0,462.0 H295.5 Q299.5,462.0 299.5,466.0 V470.0 Q299.5,474.0 295.5,474.0 H276.0 Z" fill="#3987e5"/>
-<text x="305.5" y="472.0" font-size="12" fill="#c3c2b7">3.79x</text>
-<text x="266" y="496.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.clip(x, lo, hi)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
-<rect x="276" y="486.0" width="23.4" height="12" fill="#3987e5"/>
-<path d="M301.4,486.0 H303.4 Q307.4,486.0 307.4,490.0 V494.0 Q307.4,498.0 303.4,498.0 H301.4 Z" fill="#184f95"/>
-<text x="313.4" y="496.0" font-size="12" fill="#c3c2b7">3.78x – 5.06x</text>
-<text x="266" y="520.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.count_nonzero(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
-<path d="M276.0,510.0 H292.2 Q296.2,510.0 296.2,514.0 V518.0 Q296.2,522.0 292.2,522.0 H276.0 Z" fill="#3987e5"/>
-<text x="302.2" y="520.0" font-size="12" fill="#c3c2b7">3.25x</text>
-<text x="266" y="544.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">x.astype(np.float32)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
-<path d="M276.0,534.0 H288.6 Q292.6,534.0 292.6,538.0 V542.0 Q292.6,546.0 288.6,546.0 H276.0 Z" fill="#3987e5"/>
-<text x="298.6" y="544.0" font-size="12" fill="#c3c2b7">2.68x</text>
-<text x="266" y="568.0" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.isin(x, test)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
-<rect x="276" y="558.0" width="11.3" height="12" fill="#3987e5"/>
-<path d="M289.3,558.0 H740.7 Q744.7,558.0 744.7,562.0 V566.0 Q744.7,570.0 740.7,570.0 H289.3 Z" fill="#184f95"/>
-<text x="750.7" y="568.0" font-size="12" fill="#c3c2b7">1.83x – 75.6x</text>
+<text x="18" y="68" font-size="12" fill="#c3c2b7">Apple M1 Pro</text>
+<rect x="119.19999999999999" y="58" width="12" height="12" rx="2" fill="#e08a2c"/>
+<text x="137.2" y="68" font-size="12" fill="#c3c2b7">Intel Core i5-14600KF</text>
+<rect x="297.79999999999995" y="58" width="12" height="12" rx="2" fill="#7a4a12"/>
+<text x="315.79999999999995" y="68" font-size="12" fill="#c3c2b7"></text>
+<rect x="313.79999999999995" y="58" width="12" height="12" rx="2" fill="#184f95"/>
+<text x="331.79999999999995" y="68" font-size="12" fill="#c3c2b7">darker: in the more favourable case only</text>
+<line x1="300.0" y1="90" x2="300.0" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="300.0" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">0.5x</text>
+<line x1="351.1" y1="90" x2="351.1" y2="1212" stroke="#3d444d" stroke-width="1"/>
+<text x="351.1" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">1x</text>
+<line x1="402.3" y1="90" x2="402.3" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="402.3" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">2x</text>
+<line x1="469.9" y1="90" x2="469.9" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="469.9" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">5x</text>
+<line x1="521.0" y1="90" x2="521.0" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="521.0" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">10x</text>
+<line x1="572.1" y1="90" x2="572.1" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="572.1" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">20x</text>
+<line x1="639.7" y1="90" x2="639.7" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="639.7" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">50x</text>
+<line x1="690.9" y1="90" x2="690.9" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="690.9" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">100x</text>
+<line x1="742.0" y1="90" x2="742.0" y2="1212" stroke="#262b33" stroke-width="1"/>
+<text x="742.0" y="1228" font-size="11" text-anchor="middle" fill="#9a9890">200x</text>
+<text x="290" y="111" font-size="12" text-anchor="end"><tspan fill="#f0efec">m.any(axis=0), rows of 31</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
+<path d="M351.1,98.0 H620.2 Q624.2,98.0 624.2,102.0 V102.0 Q624.2,106.0 620.2,106.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="106" font-size="10" fill="#c3c2b7">40.5x</text>
+<path d="M351.1,107.0 H614.5 Q618.5,107.0 618.5,111.0 V111.0 Q618.5,115.0 614.5,115.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="115" font-size="10" fill="#c3c2b7">37.5x</text>
+<text x="290" y="137" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
+<path d="M351.1,124.0 H595.5 Q599.5,124.0 599.5,128.0 V128.0 Q599.5,132.0 595.5,132.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="132" font-size="10" fill="#c3c2b7">29.0x</text>
+<path d="M351.1,133.0 H538.0 Q542.0,133.0 542.0,137.0 V137.0 Q542.0,141.0 538.0,141.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="141" font-size="10" fill="#c3c2b7">13.3x</text>
+<text x="290" y="163" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.unique(x), labels</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<rect x="351.1" y="150.0" width="238.6" height="8" fill="#3987e5"/>
+<path d="M591.8,150.0 H619.3 Q623.3,150.0 623.3,154.0 V154.0 Q623.3,158.0 619.3,158.0 H591.8 Z" fill="#184f95"/>
+<text x="754" y="158" font-size="10" fill="#c3c2b7">25.4x – 40.0x</text>
+<rect x="351.1" y="159.0" width="313.8" height="8" fill="#e08a2c"/>
+<path d="M667.0,159.0 H673.3 Q677.3,159.0 677.3,163.0 V163.0 Q677.3,167.0 673.3,167.0 H667.0 Z" fill="#7a4a12"/>
+<text x="754" y="167" font-size="10" fill="#c3c2b7">70.4x – 83.2x</text>
+<text x="290" y="189" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.nonzero(m), rows of 22</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
+<rect x="351.1" y="176.0" width="229.7" height="8" fill="#3987e5"/>
+<path d="M582.8,176.0 H610.9 Q614.9,176.0 614.9,180.0 V180.0 Q614.9,184.0 610.9,184.0 H582.8 Z" fill="#184f95"/>
+<text x="754" y="184" font-size="10" fill="#c3c2b7">22.5x – 35.7x</text>
+<rect x="351.1" y="185.0" width="222.1" height="8" fill="#e08a2c"/>
+<path d="M575.2,185.0 H619.6 Q623.6,185.0 623.6,189.0 V189.0 Q623.6,193.0 619.6,193.0 H575.2 Z" fill="#7a4a12"/>
+<text x="754" y="193" font-size="10" fill="#c3c2b7">20.3x – 40.2x</text>
+<text x="290" y="215" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,202.0 H568.5 Q572.5,202.0 572.5,206.0 V206.0 Q572.5,210.0 568.5,210.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="210" font-size="10" fill="#c3c2b7">20.1x</text>
+<path d="M351.1,211.0 H480.4 Q484.4,211.0 484.4,215.0 V215.0 Q484.4,219.0 480.4,219.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="219" font-size="10" fill="#c3c2b7">6.09x</text>
+<text x="290" y="241" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
+<rect x="351.1" y="228.0" width="210.3" height="8" fill="#3987e5"/>
+<path d="M563.4,228.0 H622.3 Q626.3,228.0 626.3,232.0 V232.0 Q626.3,236.0 622.3,236.0 H563.4 Z" fill="#184f95"/>
+<text x="754" y="236" font-size="10" fill="#c3c2b7">17.3x – 41.7x</text>
+<rect x="351.1" y="237.0" width="186.9" height="8" fill="#e08a2c"/>
+<path d="M540.0,237.0 H604.4 Q608.4,237.0 608.4,241.0 V241.0 Q608.4,245.0 604.4,245.0 H540.0 Z" fill="#7a4a12"/>
+<text x="754" y="245" font-size="10" fill="#c3c2b7">12.6x – 32.7x</text>
+<text x="290" y="267" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argsort(x, kind="stable")</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<rect x="351.1" y="254.0" width="210.3" height="8" fill="#3987e5"/>
+<path d="M563.4,254.0 H655.0 Q659.0,254.0 659.0,258.0 V258.0 Q659.0,262.0 655.0,262.0 H563.4 Z" fill="#184f95"/>
+<text x="754" y="262" font-size="10" fill="#c3c2b7">17.3x – 64.9x</text>
+<text x="357.1" y="271" font-size="10" fill="#9a9890">not timed</text>
+<text x="290" y="293" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.interp(x, xp, fp)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,280.0 H555.3 Q559.3,280.0 559.3,284.0 V284.0 Q559.3,288.0 555.3,288.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="288" font-size="10" fill="#c3c2b7">16.8x</text>
+<path d="M351.1,289.0 H521.3 Q525.3,289.0 525.3,293.0 V293.0 Q525.3,297.0 521.3,297.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="297" font-size="10" fill="#c3c2b7">10.6x</text>
+<text x="290" y="319" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.sum(x)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
+<path d="M351.1,306.0 H550.3 Q554.3,306.0 554.3,310.0 V310.0 Q554.3,314.0 550.3,314.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="314" font-size="10" fill="#c3c2b7">15.7x</text>
+<path d="M351.1,315.0 H623.0 Q627.0,315.0 627.0,319.0 V319.0 Q627.0,323.0 623.0,323.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="323" font-size="10" fill="#c3c2b7">42.1x</text>
+<text x="290" y="345" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.fmax.accumulate(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<rect x="351.1" y="332.0" width="201.7" height="8" fill="#3987e5"/>
+<path d="M554.9,332.0 H561.2 Q565.2,332.0 565.2,336.0 V336.0 Q565.2,340.0 561.2,340.0 H554.9 Z" fill="#184f95"/>
+<text x="754" y="340" font-size="10" fill="#c3c2b7">15.4x – 18.2x</text>
+<rect x="351.1" y="341.0" width="116.5" height="8" fill="#e08a2c"/>
+<path d="M469.6,341.0 H490.7 Q494.7,341.0 494.7,345.0 V345.0 Q494.7,349.0 490.7,349.0 H469.6 Z" fill="#7a4a12"/>
+<text x="754" y="349" font-size="10" fill="#c3c2b7">4.85x – 7.00x</text>
+<text x="290" y="371" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argsort(x, kind="stable")</tspan><tspan fill="#9a9890" dx="6">uint64</tspan></text>
+<rect x="351.1" y="358.0" width="198.3" height="8" fill="#3987e5"/>
+<path d="M551.4,358.0 H668.5 Q672.5,358.0 672.5,362.0 V362.0 Q672.5,366.0 668.5,366.0 H551.4 Z" fill="#184f95"/>
+<text x="754" y="366" font-size="10" fill="#c3c2b7">14.7x – 78.0x</text>
+<text x="357.1" y="375" font-size="10" fill="#9a9890">not timed</text>
+<text x="290" y="397" font-size="12" text-anchor="end"><tspan fill="#f0efec">m.any(axis=1), rows of 22</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
+<rect x="351.1" y="384.0" width="197.8" height="8" fill="#3987e5"/>
+<path d="M550.9,384.0 H616.8 Q620.8,384.0 620.8,388.0 V388.0 Q620.8,392.0 616.8,392.0 H550.9 Z" fill="#184f95"/>
+<text x="754" y="392" font-size="10" fill="#c3c2b7">14.6x – 38.7x</text>
+<rect x="351.1" y="393.0" width="289.8" height="8" fill="#e08a2c"/>
+<path d="M642.9,393.0 H646.2 Q649.5,393.0 649.5,396.3 V397.7 Q649.5,401.0 646.2,401.0 H642.9 Z" fill="#7a4a12"/>
+<text x="754" y="401" font-size="10" fill="#c3c2b7">50.8x – 57.1x</text>
+<text x="290" y="423" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argsort(x, kind="stable")</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<rect x="351.1" y="410.0" width="191.5" height="8" fill="#3987e5"/>
+<path d="M544.6,410.0 H558.7 Q562.7,410.0 562.7,414.0 V414.0 Q562.7,418.0 558.7,418.0 H544.6 Z" fill="#184f95"/>
+<text x="754" y="418" font-size="10" fill="#c3c2b7">13.4x – 17.6x</text>
+<text x="357.1" y="427" font-size="10" fill="#9a9890">not timed</text>
+<text x="290" y="449" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(mask)</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
+<path d="M351.1,436.0 H535.8 Q539.8,436.0 539.8,440.0 V440.0 Q539.8,444.0 535.8,444.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="444" font-size="10" fill="#c3c2b7">12.9x</text>
+<path d="M351.1,445.0 H529.8 Q533.8,445.0 533.8,449.0 V449.0 Q533.8,453.0 529.8,453.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="453" font-size="10" fill="#c3c2b7">11.9x</text>
+<text x="290" y="475" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.cumsum(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<path d="M351.1,462.0 H533.5 Q537.5,462.0 537.5,466.0 V466.0 Q537.5,470.0 533.5,470.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="470" font-size="10" fill="#c3c2b7">12.5x</text>
+<path d="M351.1,471.0 H470.7 Q474.7,471.0 474.7,475.0 V475.0 Q474.7,479.0 470.7,479.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="479" font-size="10" fill="#c3c2b7">5.34x</text>
+<text x="290" y="501" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.maximum.accumulate(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<rect x="351.1" y="488.0" width="177.6" height="8" fill="#3987e5"/>
+<rect x="530.7" y="488.0" width="1.0" height="8" fill="#184f95"/>
+<text x="754" y="496" font-size="10" fill="#c3c2b7">11.1x – 11.3x</text>
+<rect x="351.1" y="497.0" width="126.2" height="8" fill="#e08a2c"/>
+<path d="M479.3,497.0 H481.1 Q482.9,497.0 482.9,498.8 V503.2 Q482.9,505.0 481.1,505.0 H479.3 Z" fill="#7a4a12"/>
+<text x="754" y="505" font-size="10" fill="#c3c2b7">5.53x – 5.97x</text>
+<text x="290" y="527" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<rect x="351.1" y="514.0" width="176.9" height="8" fill="#3987e5"/>
+<path d="M530.0,514.0 H576.8 Q580.8,514.0 580.8,518.0 V518.0 Q580.8,522.0 576.8,522.0 H530.0 Z" fill="#184f95"/>
+<text x="754" y="522" font-size="10" fill="#c3c2b7">11.0x – 22.5x</text>
+<rect x="351.1" y="523.0" width="165.1" height="8" fill="#e08a2c"/>
+<path d="M518.3,523.0 H554.4 Q558.4,523.0 558.4,527.0 V527.0 Q558.4,531.0 554.4,531.0 H518.3 Z" fill="#7a4a12"/>
+<text x="754" y="531" font-size="10" fill="#c3c2b7">9.38x – 16.6x</text>
+<text x="290" y="553" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.histogram(x, bins, range)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,540.0 H514.8 Q518.8,540.0 518.8,544.0 V544.0 Q518.8,548.0 514.8,548.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="548" font-size="10" fill="#c3c2b7">9.70x</text>
+<path d="M351.1,549.0 H495.7 Q499.7,549.0 499.7,553.0 V553.0 Q499.7,557.0 495.7,557.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="557" font-size="10" fill="#c3c2b7">7.49x</text>
+<text x="290" y="579" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argmax(x), np.argmin(x)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
+<path d="M351.1,566.0 H507.7 Q511.7,566.0 511.7,570.0 V570.0 Q511.7,574.0 507.7,574.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="574" font-size="10" fill="#c3c2b7">8.82x, 8.86x</text>
+<path d="M351.1,575.0 H394.5 Q398.5,575.0 398.5,579.0 V579.0 Q398.5,583.0 394.5,583.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="583" font-size="10" fill="#c3c2b7">1.90x, 1.90x</text>
+<text x="290" y="605" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.clip(x, lo, hi)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
+<rect x="351.1" y="592.0" width="149.8" height="8" fill="#3987e5"/>
+<path d="M502.9,592.0 H524.0 Q528.0,592.0 528.0,596.0 V596.0 Q528.0,600.0 524.0,600.0 H502.9 Z" fill="#184f95"/>
+<text x="754" y="600" font-size="10" fill="#c3c2b7">7.62x – 11.0x</text>
+<rect x="319.4" y="601.0" width="31.8" height="8" fill="#e08a2c"/>
+<path d="M353.1,601.0 H484.0 Q488.0,601.0 488.0,605.0 V605.0 Q488.0,609.0 484.0,609.0 H353.1 Z" fill="#7a4a12"/>
+<text x="754" y="609" font-size="10" fill="#c3c2b7">0.65x – 6.39x</text>
+<text x="290" y="631" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask] = value</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<rect x="351.1" y="618.0" width="148.4" height="8" fill="#3987e5"/>
+<path d="M501.6,618.0 H573.1 Q577.1,618.0 577.1,622.0 V622.0 Q577.1,626.0 573.1,626.0 H501.6 Z" fill="#184f95"/>
+<text x="754" y="626" font-size="10" fill="#c3c2b7">7.48x – 21.4x</text>
+<rect x="351.1" y="627.0" width="146.6" height="8" fill="#e08a2c"/>
+<path d="M499.8,627.0 H562.0 Q566.0,627.0 566.0,631.0 V631.0 Q566.0,635.0 562.0,635.0 H499.8 Z" fill="#7a4a12"/>
+<text x="754" y="635" font-size="10" fill="#c3c2b7">7.30x – 18.4x</text>
+<text x="290" y="657" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.searchsorted(a, v, side='right')</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,644.0 H489.5 Q493.5,644.0 493.5,648.0 V648.0 Q493.5,652.0 489.5,652.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="652" font-size="10" fill="#c3c2b7">6.89x</text>
+<path d="M351.1,653.0 H486.1 Q490.1,653.0 490.1,657.0 V657.0 Q490.1,661.0 486.1,661.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="661" font-size="10" fill="#c3c2b7">6.58x</text>
+<text x="290" y="683" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.argmax(x), np.argmin(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,670.0 H489.2 Q493.2,670.0 493.2,674.0 V674.0 Q493.2,678.0 489.2,678.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="678" font-size="10" fill="#c3c2b7">6.86x, 7.10x</text>
+<path d="M351.1,679.0 H387.1 Q391.1,679.0 391.1,683.0 V683.0 Q391.1,687.0 387.1,687.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="687" font-size="10" fill="#c3c2b7">1.72x, 1.87x</text>
+<text x="290" y="709" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.bincount(x)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
+<path d="M351.1,696.0 H487.9 Q491.9,696.0 491.9,700.0 V700.0 Q491.9,704.0 487.9,704.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="704" font-size="10" fill="#c3c2b7">6.74x</text>
+<path d="M351.1,705.0 H452.7 Q456.7,705.0 456.7,709.0 V709.0 Q456.7,713.0 452.7,713.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="713" font-size="10" fill="#c3c2b7">4.18x</text>
+<text x="290" y="735" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.searchsorted(a, v)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,722.0 H484.1 Q488.1,722.0 488.1,726.0 V726.0 Q488.1,730.0 484.1,730.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="730" font-size="10" fill="#c3c2b7">6.40x</text>
+<path d="M351.1,731.0 H481.6 Q485.6,731.0 485.6,735.0 V735.0 Q485.6,739.0 481.6,739.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="739" font-size="10" fill="#c3c2b7">6.19x</text>
+<text x="290" y="761" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.bincount(x)</tspan><tspan fill="#9a9890" dx="6">int16</tspan></text>
+<rect x="351.1" y="748.0" width="136.8" height="8" fill="#3987e5"/>
+<path d="M490.0,748.0 H537.5 Q541.5,748.0 541.5,752.0 V752.0 Q541.5,756.0 537.5,756.0 H490.0 Z" fill="#184f95"/>
+<text x="754" y="756" font-size="10" fill="#c3c2b7">6.39x – 13.2x</text>
+<rect x="351.1" y="757.0" width="93.0" height="8" fill="#e08a2c"/>
+<path d="M446.2,757.0 H480.2 Q484.2,757.0 484.2,761.0 V761.0 Q484.2,765.0 480.2,765.0 H446.2 Z" fill="#7a4a12"/>
+<text x="754" y="765" font-size="10" fill="#c3c2b7">3.53x – 6.07x</text>
+<text x="290" y="787" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.nonzero(mask)</tspan><tspan fill="#9a9890" dx="6">bool</tspan></text>
+<rect x="351.1" y="774.0" width="120.9" height="8" fill="#3987e5"/>
+<path d="M474.0,774.0 H565.1 Q569.1,774.0 569.1,778.0 V778.0 Q569.1,782.0 565.1,782.0 H474.0 Z" fill="#184f95"/>
+<text x="754" y="782" font-size="10" fill="#c3c2b7">5.15x – 19.2x</text>
+<rect x="351.1" y="783.0" width="84.9" height="8" fill="#e08a2c"/>
+<path d="M438.0,783.0 H567.4 Q571.4,783.0 571.4,787.0 V787.0 Q571.4,791.0 567.4,791.0 H438.0 Z" fill="#7a4a12"/>
+<text x="754" y="791" font-size="10" fill="#c3c2b7">3.16x – 19.8x</text>
+<text x="290" y="813" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.bincount(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<rect x="351.1" y="800.0" width="118.3" height="8" fill="#3987e5"/>
+<path d="M471.4,800.0 H508.9 Q512.9,800.0 512.9,804.0 V804.0 Q512.9,808.0 508.9,808.0 H471.4 Z" fill="#184f95"/>
+<text x="754" y="808" font-size="10" fill="#c3c2b7">4.97x – 8.96x</text>
+<rect x="351.1" y="809.0" width="62.1" height="8" fill="#e08a2c"/>
+<path d="M415.2,809.0 H444.6 Q448.6,809.0 448.6,813.0 V813.0 Q448.6,817.0 444.6,817.0 H415.2 Z" fill="#7a4a12"/>
+<text x="754" y="817" font-size="10" fill="#c3c2b7">2.32x – 3.75x</text>
+<text x="290" y="839" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.count_nonzero(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,826.0 H445.4 Q449.4,826.0 449.4,830.0 V830.0 Q449.4,834.0 445.4,834.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="834" font-size="10" fill="#c3c2b7">3.79x</text>
+<path d="M351.1,835.0 H455.8 Q459.8,835.0 459.8,839.0 V839.0 Q459.8,843.0 455.8,843.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="843" font-size="10" fill="#c3c2b7">4.36x</text>
+<text x="290" y="865" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.clip(x, lo, hi)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<rect x="351.1" y="852.0" width="98.1" height="8" fill="#3987e5"/>
+<path d="M451.2,852.0 H466.7 Q470.7,852.0 470.7,856.0 V856.0 Q470.7,860.0 466.7,860.0 H451.2 Z" fill="#184f95"/>
+<text x="754" y="860" font-size="10" fill="#c3c2b7">3.78x – 5.06x</text>
+<rect x="324.8" y="861.0" width="26.3" height="8" fill="#e08a2c"/>
+<path d="M353.1,861.0 H362.4 Q366.4,861.0 366.4,865.0 V865.0 Q366.4,869.0 362.4,869.0 H353.1 Z" fill="#7a4a12"/>
+<text x="754" y="869" font-size="10" fill="#c3c2b7">0.70x – 1.23x</text>
+<text x="290" y="891" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.count_nonzero(x)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<path d="M351.1,878.0 H434.1 Q438.1,878.0 438.1,882.0 V882.0 Q438.1,886.0 434.1,886.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="886" font-size="10" fill="#c3c2b7">3.25x</text>
+<path d="M351.1,887.0 H364.2 Q368.2,887.0 368.2,891.0 V891.0 Q368.2,895.0 364.2,895.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="895" font-size="10" fill="#c3c2b7">1.26x</text>
+<text x="290" y="917" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.sum(x)</tspan><tspan fill="#9a9890" dx="6">float32</tspan></text>
+<path d="M351.1,904.0 H433.4 Q437.4,904.0 437.4,908.0 V908.0 Q437.4,912.0 433.4,912.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="912" font-size="10" fill="#c3c2b7">3.22x</text>
+<path d="M351.1,913.0 H390.1 Q394.1,913.0 394.1,917.0 V917.0 Q394.1,921.0 390.1,921.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="921" font-size="10" fill="#c3c2b7">1.79x</text>
+<text x="290" y="943" font-size="12" text-anchor="end"><tspan fill="#f0efec">x.astype(np.float32)</tspan><tspan fill="#9a9890" dx="6">uint8</tspan></text>
+<path d="M351.1,930.0 H419.9 Q423.9,930.0 423.9,934.0 V934.0 Q423.9,938.0 419.9,938.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="938" font-size="10" fill="#c3c2b7">2.68x</text>
+<path d="M351.1,939.0 H352.9 Q354.7,939.0 354.7,940.8 V945.2 Q354.7,947.0 352.9,947.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="947" font-size="10" fill="#c3c2b7">1.05x</text>
+<text x="290" y="969" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.sum(x)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,956.0 H392.9 Q396.9,956.0 396.9,960.0 V960.0 Q396.9,964.0 392.9,964.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="964" font-size="10" fill="#c3c2b7">1.86x</text>
+<path d="M351.1,965.0 H379.9 Q383.9,965.0 383.9,969.0 V969.0 Q383.9,973.0 379.9,973.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="973" font-size="10" fill="#c3c2b7">1.56x</text>
+<text x="290" y="995" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.isin(x, test)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<rect x="351.1" y="982.0" width="44.6" height="8" fill="#3987e5"/>
+<path d="M397.7,982.0 H666.2 Q670.2,982.0 670.2,986.0 V986.0 Q670.2,990.0 666.2,990.0 H397.7 Z" fill="#184f95"/>
+<text x="754" y="990" font-size="10" fill="#c3c2b7">1.83x – 75.6x</text>
+<rect x="351.1" y="991.0" width="98.1" height="8" fill="#e08a2c"/>
+<path d="M451.2,991.0 H618.9 Q622.9,991.0 622.9,995.0 V995.0 Q622.9,999.0 618.9,999.0 H451.2 Z" fill="#7a4a12"/>
+<text x="754" y="999" font-size="10" fill="#c3c2b7">3.78x – 39.8x</text>
+<text x="290" y="1021" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.searchsorted(a, v, side='right')</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<path d="M351.1,1008.0 H388.8 Q392.8,1008.0 392.8,1012.0 V1012.0 Q392.8,1016.0 388.8,1016.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="1016" font-size="10" fill="#c3c2b7">1.76x</text>
+<path d="M351.1,1017.0 H376.1 Q380.1,1017.0 380.1,1021.0 V1021.0 Q380.1,1025.0 376.1,1025.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="1025" font-size="10" fill="#c3c2b7">1.48x</text>
+<text x="290" y="1047" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.searchsorted(a, v)</tspan><tspan fill="#9a9890" dx="6">int64</tspan></text>
+<path d="M351.1,1034.0 H387.1 Q391.1,1034.0 391.1,1038.0 V1038.0 Q391.1,1042.0 387.1,1042.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="1042" font-size="10" fill="#c3c2b7">1.72x</text>
+<path d="M351.1,1043.0 H374.5 Q378.5,1043.0 378.5,1047.0 V1047.0 Q378.5,1051.0 374.5,1051.0 H351.1 Z" fill="#e08a2c"/>
+<text x="754" y="1051" font-size="10" fill="#c3c2b7">1.45x</text>
+<text x="290" y="1073" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.where(c, a, b)</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,1060.0 H379.9 Q383.9,1060.0 383.9,1064.0 V1064.0 Q383.9,1068.0 379.9,1068.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="1068" font-size="10" fill="#c3c2b7">1.56x</text>
+<rect x="351.1" y="1069.0" width="31.9" height="8" fill="#e08a2c"/>
+<path d="M385.0,1069.0 H473.3 Q477.3,1069.0 477.3,1073.0 V1073.0 Q477.3,1077.0 473.3,1077.0 H385.0 Z" fill="#7a4a12"/>
+<text x="754" y="1077" font-size="10" fill="#c3c2b7">1.54x – 5.53x</text>
+<text x="290" y="1099" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.fmax.reduceat(x, starts), one run</tspan><tspan fill="#9a9890" dx="6">float64</tspan></text>
+<path d="M351.1,1086.0 H351.9 Q352.6,1086.0 352.6,1086.7 V1093.3 Q352.6,1094.0 351.9,1094.0 H351.1 Z" fill="#3987e5"/>
+<text x="754" y="1094" font-size="10" fill="#c3c2b7">1.02x</text>
+<rect x="351.1" y="1095.0" width="14.1" height="8" fill="#e08a2c"/>
+<rect x="367.2" y="1095.0" width="1.0" height="8" fill="#7a4a12"/>
+<text x="754" y="1103" font-size="10" fill="#c3c2b7">1.21x – 1.22x</text>
+<text x="290" y="1125" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">uint8, int8, bool</tspan></text>
+<text x="357.1" y="1120" font-size="10" fill="#9a9890">not timed</text>
+<rect x="351.1" y="1121.0" width="226.3" height="8" fill="#e08a2c"/>
+<path d="M579.5,1121.0 H670.0 Q674.0,1121.0 674.0,1125.0 V1125.0 Q674.0,1129.0 670.0,1129.0 H579.5 Z" fill="#7a4a12"/>
+<text x="754" y="1129" font-size="10" fill="#c3c2b7">21.5x – 79.6x</text>
+<text x="290" y="1151" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask]</tspan><tspan fill="#9a9890" dx="6">int16, uint16</tspan></text>
+<text x="357.1" y="1146" font-size="10" fill="#9a9890">not timed</text>
+<rect x="351.1" y="1147.0" width="214.8" height="8" fill="#e08a2c"/>
+<path d="M568.0,1147.0 H648.2 Q652.2,1147.0 652.2,1151.0 V1151.0 Q652.2,1155.0 648.2,1155.0 H568.0 Z" fill="#7a4a12"/>
+<text x="754" y="1155" font-size="10" fill="#c3c2b7">18.4x – 59.2x</text>
+<text x="290" y="1177" font-size="12" text-anchor="end"><tspan fill="#f0efec">x[mask] = value</tspan><tspan fill="#9a9890" dx="6">float32, int32</tspan></text>
+<text x="357.1" y="1172" font-size="10" fill="#9a9890">not timed</text>
+<rect x="351.1" y="1173.0" width="176.2" height="8" fill="#e08a2c"/>
+<path d="M529.4,1173.0 H611.1 Q615.1,1173.0 615.1,1177.0 V1177.0 Q615.1,1181.0 611.1,1181.0 H529.4 Z" fill="#7a4a12"/>
+<text x="754" y="1181" font-size="10" fill="#c3c2b7">10.9x – 35.8x</text>
+<text x="290" y="1203" font-size="12" text-anchor="end"><tspan fill="#f0efec">np.isin(x, test)</tspan><tspan fill="#9a9890" dx="6">int32</tspan></text>
+<text x="357.1" y="1198" font-size="10" fill="#9a9890">not timed</text>
+<rect x="351.1" y="1199.0" width="122.8" height="8" fill="#e08a2c"/>
+<path d="M475.9,1199.0 H692.5 Q696.5,1199.0 696.5,1203.0 V1203.0 Q696.5,1207.0 692.5,1207.0 H475.9 Z" fill="#7a4a12"/>
+<text x="754" y="1207" font-size="10" fill="#c3c2b7">5.28x – 108x</text>
 </g>
 </svg>
