@@ -22,9 +22,9 @@ np.argmax(x)       <span class="c"># 7x faster</span></code></pre>
 </section>
 
 <div class="stats">
-<div><b>41</b><span>kernels for 23 NumPy operations, all of them bound to NumPy</span></div>
-<div><b>5x+</b><span>faster than NumPy for 17 of the 22 in the results table, at a million elements</span></div>
-<div><b>21 / 23</b><span>return NumPy's result bit for bit; the other two are opt-in</span></div>
+<div><b>49</b><span>kernels for 23 NumPy operations and four functions of bottleneck</span></div>
+<div><b>5x+</b><span>faster than NumPy for 29 of the 41 measured on an Apple M1 Pro, at a million elements</span></div>
+<div><b>47 / 49</b><span>return NumPy's result, or bottleneck's, bit for bit; the other two are opt-in</span></div>
 <div><b>~1 ns</b><span>added to a call that no kernel takes</span></div>
 </div>
 
@@ -34,12 +34,12 @@ Each bar is one NumPy call on an array of 1,048,576 elements, timed as a native 
 
 <figure class="widget">
 <div data-widget="speedups"></div>
-<figcaption>Speedup of each kernel at 1,048,576 elements. Read from the results table in the repository's README when this site was built. The <a href="[[ root ]]report/results/">results chapter</a> has every size, the confidence intervals, and the timings from Python.</figcaption>
+<figcaption>Speedup of each kernel at 1,048,576 elements. Read from the kernel table in the repository's README when this site was built. The <a href="[[ root ]]report/results/">results chapter</a> has every size, the confidence intervals, and the timings from Python.</figcaption>
 </figure>
 
 ## What stands behind the numbers
 
-- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Thirty-nine of the 41 match bit for bit. The two float `cumsum` kernels regroup the additions, which is where their speed comes from; they stay inside a declared error bound and are installed only on request.
+- **Checked against NumPy, not against a description of it.** Every kernel is compared with NumPy's own output on inputs that include NaN, infinities, signed zeros, ties and denormals. Forty-seven of the 49 match bit for bit, 43 of them NumPy and 4 the functions of bottleneck they stand in for. The two float `cumsum` kernels regroup the additions, which is where their speed comes from; they stay inside a declared error bound and are installed only on request.
 - **Memory-safe by test.** Each kernel is run with its buffers pressed against pages the process may not touch. Reading or writing one byte outside a buffer crashes the check.
 - **Assembly only where it wins.** A kernel keeps its assembly only if it is measurably faster than the compiled C. Where it is not, the C ships.
 - **Nothing breaks when a kernel does not apply.** A strided array, another element type, an argument a kernel does not implement: the call goes to NumPy exactly as written. With hotkernels installed, NumPy's own test suite gives the same outcome for each of its 47,234 tests.

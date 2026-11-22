@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 634" width="936" height="634" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-labelledby="t d">
+<title id="t">Speedup of whole programs with hotkernels installed</title>
+<desc id="d">Horizontal bars, one per program, showing how many times faster it runs after hotkernels.install() than on plain NumPy 2.5.5: ten applications on an Apple M1 Pro and nine workloads on an Apple M4 Max. The values are in the table that follows the chart in the README.</desc>
+<rect x="0.5" y="0.5" width="935" height="633" rx="12" fill="#0d1117" stroke="#30363d"/>
+<g transform="translate(28 28)">
+<text x="0" y="20" font-size="16" font-weight="600" fill="#f0efec">Whole programs, with and without hotkernels</text>
+<text x="0" y="40" font-size="12" fill="#c3c2b7">Times faster with the one line added, on plain NumPy 2.5.5. Each program gave the same results bit for bit.</text>
+<rect x="0" y="58" width="12" height="12" rx="2" fill="#3987e5"/>
+<text x="18" y="68" font-size="12" fill="#c3c2b7">Apple M1 Pro, applications at their large size</text>
+<rect x="343.59999999999997" y="58" width="12" height="12" rx="2" fill="#e08a2c"/>
+<text x="361.59999999999997" y="68" font-size="12" fill="#c3c2b7">Apple M4 Max, workloads at size M (example: S)</text>
+<line x1="190.0" y1="90" x2="190.0" y2="550" stroke="#3d444d" stroke-width="1"/>
+<text x="190.0" y="566" font-size="11" text-anchor="middle" fill="#9a9890">0x</text>
+<line x1="293.3" y1="90" x2="293.3" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="293.3" y="566" font-size="11" text-anchor="middle" fill="#9a9890">1x</text>
+<line x1="396.7" y1="90" x2="396.7" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="396.7" y="566" font-size="11" text-anchor="middle" fill="#9a9890">2x</text>
+<line x1="500.0" y1="90" x2="500.0" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="500.0" y="566" font-size="11" text-anchor="middle" fill="#9a9890">3x</text>
+<line x1="603.3" y1="90" x2="603.3" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="603.3" y="566" font-size="11" text-anchor="middle" fill="#9a9890">4x</text>
+<line x1="706.7" y1="90" x2="706.7" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="706.7" y="566" font-size="11" text-anchor="middle" fill="#9a9890">5x</text>
+<line x1="810.0" y1="90" x2="810.0" y2="550" stroke="#262b33" stroke-width="1"/>
+<text x="810.0" y="566" font-size="11" text-anchor="middle" fill="#9a9890">6x</text>
+<line x1="293.3" y1="90" x2="293.3" y2="550" stroke="#9a9890" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="297.3" y="86" font-size="11" fill="#9a9890">1x: no change</text>
+<text x="180" y="112" font-size="12" text-anchor="end" fill="#f0efec">example</text>
+<path d="M190.0,102.0 H806.0 Q810.0,102.0 810.0,106.0 V110.0 Q810.0,114.0 806.0,114.0 H190.0 Z" fill="#e08a2c"/>
+<text x="816.0" y="112" font-size="12" fill="#c3c2b7">6.00x</text>
+<text x="180" y="136" font-size="12" text-anchor="end" fill="#f0efec">pandas_filter</text>
+<path d="M190.0,126.0 H781.2 Q785.2,126.0 785.2,130.0 V134.0 Q785.2,138.0 781.2,138.0 H190.0 Z" fill="#e08a2c"/>
+<text x="791.2" y="136" font-size="12" fill="#c3c2b7">5.76x</text>
+<text x="180" y="160" font-size="12" text-anchor="end" fill="#f0efec">empyrical_stats</text>
+<path d="M190.0,150.0 H592.1 Q596.1,150.0 596.1,154.0 V158.0 Q596.1,162.0 592.1,162.0 H190.0 Z" fill="#3987e5"/>
+<text x="602.1" y="160" font-size="12" fill="#c3c2b7">3.93x</text>
+<text x="180" y="184" font-size="12" text-anchor="end" fill="#f0efec">sklearn_metrics</text>
+<path d="M190.0,174.0 H545.6 Q549.6,174.0 549.6,178.0 V182.0 Q549.6,186.0 545.6,186.0 H190.0 Z" fill="#3987e5"/>
+<text x="555.6" y="184" font-size="12" fill="#c3c2b7">3.48x</text>
+<text x="180" y="208" font-size="12" text-anchor="end" fill="#f0efec">mlp_train</text>
+<path d="M190.0,198.0 H413.3 Q417.3,198.0 417.3,202.0 V206.0 Q417.3,210.0 413.3,210.0 H190.0 Z" fill="#3987e5"/>
+<text x="423.3" y="208" font-size="12" fill="#c3c2b7">2.20x</text>
+<text x="180" y="232" font-size="12" text-anchor="end" fill="#f0efec">azimint_hist</text>
+<path d="M190.0,222.0 H361.7 Q365.7,222.0 365.7,226.0 V230.0 Q365.7,234.0 361.7,234.0 H190.0 Z" fill="#e08a2c"/>
+<text x="371.7" y="232" font-size="12" fill="#c3c2b7">1.70x</text>
+<text x="180" y="256" font-size="12" text-anchor="end" fill="#f0efec">flame</text>
+<path d="M190.0,246.0 H348.2 Q352.2,246.0 352.2,250.0 V254.0 Q352.2,258.0 348.2,258.0 H190.0 Z" fill="#e08a2c"/>
+<text x="358.2" y="256" font-size="12" fill="#c3c2b7">1.57x</text>
+<text x="180" y="280" font-size="12" text-anchor="end" fill="#f0efec">make_decision</text>
+<path d="M190.0,270.0 H345.1 Q349.1,270.0 349.1,274.0 V278.0 Q349.1,282.0 345.1,282.0 H190.0 Z" fill="#e08a2c"/>
+<text x="355.1" y="280" font-size="12" fill="#c3c2b7">1.54x</text>
+<text x="180" y="304" font-size="12" text-anchor="end" fill="#f0efec">trimesh_mesh</text>
+<path d="M190.0,294.0 H317.2 Q321.2,294.0 321.2,298.0 V302.0 Q321.2,306.0 317.2,306.0 H190.0 Z" fill="#3987e5"/>
+<text x="327.2" y="304" font-size="12" fill="#c3c2b7">1.27x</text>
+<text x="180" y="328" font-size="12" text-anchor="end" fill="#f0efec">azimint_naive</text>
+<path d="M190.0,318.0 H303.8 Q307.8,318.0 307.8,322.0 V326.0 Q307.8,330.0 303.8,330.0 H190.0 Z" fill="#e08a2c"/>
+<text x="313.8" y="328" font-size="12" fill="#c3c2b7">1.14x</text>
+<text x="180" y="352" font-size="12" text-anchor="end" fill="#f0efec">mandelbrot2</text>
+<path d="M190.0,342.0 H301.7 Q305.7,342.0 305.7,346.0 V350.0 Q305.7,354.0 301.7,354.0 H190.0 Z" fill="#e08a2c"/>
+<text x="311.7" y="352" font-size="12" fill="#c3c2b7">1.12x</text>
+<text x="180" y="376" font-size="12" text-anchor="end" fill="#f0efec">particle_filter</text>
+<path d="M190.0,366.0 H300.7 Q304.7,366.0 304.7,370.0 V374.0 Q304.7,378.0 300.7,378.0 H190.0 Z" fill="#3987e5"/>
+<text x="310.7" y="376" font-size="12" fill="#c3c2b7">1.11x</text>
+<text x="180" y="400" font-size="12" text-anchor="end" fill="#f0efec">equalize_hist</text>
+<path d="M190.0,390.0 H299.7 Q303.7,390.0 303.7,394.0 V398.0 Q303.7,402.0 299.7,402.0 H190.0 Z" fill="#e08a2c"/>
+<text x="309.7" y="400" font-size="12" fill="#c3c2b7">1.10x</text>
+<text x="180" y="424" font-size="12" text-anchor="end" fill="#f0efec">pandas_sales</text>
+<path d="M190.0,414.0 H296.6 Q300.6,414.0 300.6,418.0 V422.0 Q300.6,426.0 296.6,426.0 H190.0 Z" fill="#3987e5"/>
+<text x="306.6" y="424" font-size="12" fill="#c3c2b7">1.07x</text>
+<text x="180" y="448" font-size="12" text-anchor="end" fill="#f0efec">skimage_pipeline</text>
+<path d="M190.0,438.0 H291.4 Q295.4,438.0 295.4,442.0 V446.0 Q295.4,450.0 291.4,450.0 H190.0 Z" fill="#3987e5"/>
+<text x="301.4" y="448" font-size="12" fill="#c3c2b7">1.02x</text>
+<text x="180" y="472" font-size="12" text-anchor="end" fill="#f0efec">veros_ocean</text>
+<path d="M190.0,462.0 H290.4 Q294.4,462.0 294.4,466.0 V470.0 Q294.4,474.0 290.4,474.0 H190.0 Z" fill="#3987e5"/>
+<text x="300.4" y="472" font-size="12" fill="#c3c2b7">1.01x</text>
+<text x="180" y="496" font-size="12" text-anchor="end" fill="#f0efec">mandelbrot1</text>
+<path d="M190.0,486.0 H290.4 Q294.4,486.0 294.4,490.0 V494.0 Q294.4,498.0 290.4,498.0 H190.0 Z" fill="#e08a2c"/>
+<text x="300.4" y="496" font-size="12" fill="#c3c2b7">1.01x</text>
+<text x="180" y="520" font-size="12" text-anchor="end" fill="#f0efec">min_char_rnn</text>
+<path d="M190.0,510.0 H289.3 Q293.3,510.0 293.3,514.0 V518.0 Q293.3,522.0 289.3,522.0 H190.0 Z" fill="#3987e5"/>
+<text x="299.3" y="520" font-size="12" fill="#c3c2b7">1.00x</text>
+<text x="180" y="544" font-size="12" text-anchor="end" fill="#f0efec">astropy_timeseries</text>
+<path d="M190.0,534.0 H289.3 Q293.3,534.0 293.3,538.0 V542.0 Q293.3,546.0 289.3,546.0 H190.0 Z" fill="#3987e5"/>
+<text x="299.3" y="544" font-size="12" fill="#c3c2b7">1.00x</text>
+</g>
+</svg>

@@ -66,7 +66,7 @@ _FIRST_ATTEMPT = 1
 
 # Header cells that identify the two results tables.
 _FINDINGS_HEADER = "| Kernel | Input | vs naive C |"
-_README_HEADER = "| NumPy call | Elements | vs NumPy |"
+_README_HEADER = "| NumPy call | Elements | M1 Pro: vs NumPy |"
 # Marks a difference the judge did not find statistically significant.
 _NOT_SIGNIFICANT = "n.s."
 # Sizes of the four single-size columns of the findings table, in order.
@@ -286,12 +286,18 @@ def headline() -> list[dict]:
     """The headline results per NumPy call, from the README.
 
     Returns:
-        One entry per row of the README's results table: the call, its element
-        type, and its speedup over NumPy and over `clang -O3` at 1,048,576
-        elements, each as a range.
+        One entry per row of the README's kernel table that has a figure for
+        the Apple M1 Pro: the call, its element type, and its speedup over
+        NumPy and over `clang -O3` at 1,048,576 elements on that machine, each
+        as a range.
     """
     rows = []
-    for call, elements, vs_numpy, vs_c in _table(README, _README_HEADER):
+    # The table also has a column for the Apple M4 Max and one for the Intel
+    # Core i5-14600KF; the site's chart is of the Apple M1 Pro alone.
+    for call, elements, vs_numpy, vs_c, _m4_max, _x86_64 in _table(README, _README_HEADER):
+        if _range_cell(vs_numpy) is None:
+            # A kernel that ships as its C on ARM64 and was timed on x86-64 only.
+            continue
         rows.append({
             "call": call.replace("`", ""),
             "elements": elements,
