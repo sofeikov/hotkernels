@@ -40,8 +40,8 @@ Graph 5 of a loop that gathers its loss every fifth step is selected in the list
 
 - **One tab per file** that wrote an operation or made the layer compute, the file with the most operations first. Selecting a graph brings up the file that holds most of it.
 - **`Code` and `Graph` switch the middle** between the listing and the drawing of the selected graph. The list of graphs and the panel stay.
-- **The panel says which lines a graph was written on:** `monitor.py:38-40`.
-- **From a node of the drawing, `Show monitor.py:40 in the code`** goes back to the listing at that line.
+- **The panel says which lines a graph was written on:** `monitor.py:37-39`.
+- **From a node of the drawing, `Show monitor.py:39 in the code`** goes back to the listing at that line.
 - **How much code is there is the recording's choice:** whole files, only the lines that did something, with gaps between them, or line numbers alone ([lazy-recording-design.md](lazy-recording-design.md#how-much-code-a-page-carries)).
 
 The listing is also the log in another form: the `eager`, `write` and `needed` marks are what the layer's loggers say ([lazy-design.md](lazy-design.md#what-the-layer-says)), put on the lines they are about.
@@ -83,7 +83,7 @@ What is drawn:
 | Click `Code` or `Graph` | The middle shows the program's lines, or the drawing of the selected graph |
 | Click a graph in the list while the code is shown | Its lines are marked, and the file that holds most of them comes up |
 | Click a mark on a line: `in graph 3`, `gather → 10 graphs`, `eager np.median → graph 13` | The drawing of that graph, with the first operation of that line selected and whatever hid it unfolded |
-| Select a node and click `Show monitor.py:40 in the code` | The listing, at that line |
+| Select a node and click `Show monitor.py:39 in the code` | The listing, at that line |
 | Click a folded group | It unfolds one level, and stays where it was on the screen |
 | Click the title of an open group | It folds |
 | Click a node | It is selected. The panel shows its type, shape, size, state, line and the text of the line, its arguments as written and what reads it. On the drawing, everything it depends on and everything that depends on it stays lit and the rest is dimmed |
