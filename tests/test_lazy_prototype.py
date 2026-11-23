@@ -247,16 +247,16 @@ def test_the_report_ranks_what_was_computed_unasked():
     x = lazy.asarray(numpy.arange(4.0))
     for _ in range(3):
         numpy.argsort(x * 2)
-    numpy.cumsum(x)
+    numpy.sort(x)
     x[0] = float((x + 1).sum())
     found = lazy_report()
-    assert [(row.call, row.count) for row in found.eager] == [("np.argsort", 3), ("np.cumsum", 1)]
+    assert [(row.call, row.count) for row in found.eager] == [("np.argsort", 3), ("np.sort", 1)]
     assert found.eager[0].places[0][1] == 3 and found.eager[0].places[0][0].startswith("test_lazy_prototype.py:")
     assert [(row.call, row.count) for row in found.writes] == [("x[index] = v", 1)]
     assert [(row.call, row.count) for row in found.needed] == [("float()", 1)]
     text = str(found).splitlines()
     assert text[0] == "Made at once by NumPy: not in the deferred set"
-    assert text[1].split()[:2] == ["3", "np.argsort"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.cumsum"]
+    assert text[1].split()[:2] == ["3", "np.argsort"] and text[1].endswith("× 3") and text[2].split()[:2] == ["1", "np.sort"]
     assert "A graph computed early: a write into a lazy array" in text and "none" not in str(found)
     assert lazy_report(reset=True).eager and not lazy_report().eager and "none" in str(lazy_report())
 
@@ -557,7 +557,9 @@ def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     cases = {
         "part of what a mask selects": (x[x > 0][:3], data[data > 0][:3]),
         "norm": (numpy.linalg.norm(x * 2), numpy.linalg.norm(data * 2)),
-        "cumsum": (x.cumsum(), data.cumsum()),
+        "a method outside the set": (x.argsort(), data.argsort()),
+        "a running total of another type": (numpy.cumsum(x, dtype=numpy.float32), numpy.cumsum(data, dtype=numpy.float32)),
+        "a search with a sorter": (numpy.searchsorted(x, 0.0, sorter=numpy.argsort(data)), numpy.searchsorted(data, 0.0, sorter=numpy.argsort(data))),
         "argsort": (numpy.argsort(-x), numpy.argsort(-data)),
         "ravel in another order": ((x * 2).reshape(5, 10).ravel(order="F"), (data * 2).reshape(5, 10).ravel(order="F")),
         "concatenate": (numpy.concatenate([x, data]), numpy.concatenate([data, data])),
@@ -567,6 +569,46 @@ def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     for name, (got, expected) in cases.items():
         assert type(got) is LazyArray and not got._node.pending, name
         assert same(expected, got.gather()), name
+
+
+def test_running_totals_and_searches_are_deferred():
+    """np.cumsum, np.cumprod and np.searchsorted join the graph, as functions and as methods, with NumPy's shapes and types."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6))
+    counts = numpy.arange(1, 7, dtype=numpy.int8)
+    x, n = lazy.asarray(data) + 0, lazy.asarray(counts) + numpy.int8(0)
+    plain = data + 0
+    table, plain_table = numpy.cumsum(numpy.abs(x[0])), numpy.cumsum(numpy.abs(plain[0]))
+    graph.COUNTS.reset()
+    cases = {
+        "all the elements": (numpy.cumsum(x), numpy.cumsum(plain)), "along an axis": (numpy.cumsum(x, axis=1), numpy.cumsum(plain, axis=1)),
+        "an axis by position": (numpy.cumsum(x, 0), numpy.cumsum(plain, 0)), "a method": (x.cumsum(axis=-1), plain.cumsum(axis=-1)),
+        "small integers": (n.cumsum(), counts.cumsum()), "a running product": (numpy.cumprod(n), numpy.cumprod(counts)),
+        "a search": (numpy.searchsorted(table, numpy.abs(x)), numpy.searchsorted(plain_table, numpy.abs(plain))),
+        "a search from the right": (numpy.searchsorted(table, x[1], side="right"), numpy.searchsorted(plain_table, plain[1], side="right")),
+        "a search for one number": (table.searchsorted(1.0), plain_table.searchsorted(1.0)),
+        "a search of an ndarray": (numpy.searchsorted(plain_table, numpy.abs(x[2]), "right"), numpy.searchsorted(plain_table, numpy.abs(plain[2]), "right")),
+        "what a mask selects, summed as it goes": (x[x[:, 0] > 0].cumsum(axis=0), plain[plain[:, 0] > 0].cumsum(axis=0)),
+        "a search for what a mask selects": (numpy.searchsorted(table, x[0][x[0] > 0]), numpy.searchsorted(plain_table, plain[0][plain[0] > 0])),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.dtype == expected.dtype and got.ndim == expected.ndim, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.cumsum(x, axis=2))) == str(raised(lambda: numpy.cumsum(plain, axis=2)))
+    assert same(numpy.sum(plain, (0, 1)), numpy.sum(x, (0, 1)).gather()) and same(numpy.sum(plain, None), numpy.sum(x, None).gather())
+
+    def resample(np, weights, positions):
+        """Pick, for each position, the first weight whose running total reaches it, as a particle filter does."""
+        cumulative = np.cumsum(weights)
+        cumulative[-1] = 1.0
+        return np.asarray(weights)[np.searchsorted(cumulative, positions)]
+
+    weights = numpy.abs(data[0]) / numpy.abs(data[0]).sum()
+    positions = (0.5 + numpy.arange(6)) / 6
+    graph.COUNTS.reset()
+    got = resample(lazy, lazy.asarray(weights) + 0, positions)
+    assert got._node.pending and graph.COUNTS.at_once == {} and same(resample(numpy, weights, positions), got.gather())
 
 
 def test_dot_and_copy_are_deferred():
