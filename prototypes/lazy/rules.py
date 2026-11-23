@@ -50,6 +50,12 @@ VIEWS = frozenset({np.transpose, np.swapaxes, np.reshape, np.expand_dims, np.squ
 REARRANGEMENTS = frozenset({np.reshape, np.ravel})
 # Functions that work element by element and are not ufuncs.
 SELECTIONS = frozenset({np.where})
+# Casts. `x.astype(t)` is ruled as `ndarray`'s own method, called as a function of the
+# array; `np.astype(x, t)` is the same call, where this NumPy has it.
+CASTS = frozenset({np.ndarray.astype, getattr(np, "astype", np.ndarray.astype)})
+# Keywords of a cast that change nothing when they have these values, which are NumPy's
+# defaults. With any other value the cast is made at once.
+CAST_DEFAULTS = {"order": "K", "casting": "unsafe", "subok": True, "device": None}
 # Functions that give their one argument again, as a new array.
 COPIES = frozenset({np.copy})
 # `np.dot` is deferred for operands of these numbers of dimensions, where it
@@ -103,9 +109,9 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
         Exception: Whatever NumPy raises for these shapes and types.
     """
     kind = _kind(operation, args, kwargs)
-    if kind is None or not all(_admissible(operand) for operand in _array_operands(kind, args)):
+    if kind is None or not all(_admissible(operand) for operand in _array_operands(kind, operation, args)):
         return None
-    unknown = not all(graph.is_known(_shape(operand)) for operand in _array_operands(kind, args))
+    unknown = not all(graph.is_known(_shape(operand)) for operand in _array_operands(kind, operation, args))
     if unknown and not _holds_for_any_length(kind, operation, args, kwargs):
         return None
     try:
@@ -217,6 +223,8 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         return ELEMENTWISE if operation.signature is None and operation.nout == 1 else None
     if operation in SELECTIONS:
         return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
+    if operation in CASTS:
+        return ELEMENTWISE if _is_plain_cast(operation, args, kwargs) else None
     if operation in REDUCTIONS:
         return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in POSITIONS:
@@ -234,6 +242,47 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
             return None  # `order=` chooses another arrangement; NumPy's to handle.
         return VIEW if of_a_node else None
     return None
+
+
+def _is_plain_cast(operation: Callable[..., Any], args: tuple, kwargs: dict) -> bool:
+    """Say whether a cast is one this layer defers: one NumPy always answers with a new array.
+
+    Args:
+        operation: `np.ndarray.astype`, standing for the method, or `np.astype`.
+        args: The operand, and the element type when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for one node cast to an element type this layer defers, given
+        once, with `copy=` absent or True, or False when the element type is
+        another than the operand's: NumPy then has to make a new array. With
+        `copy=False` and the operand's own type it returns the array itself,
+        which is not an operation of a graph but another name for memory.
+        False also for `order=`, `casting=`, `subok=` or `device=` with a
+        value other than NumPy's default, for the function on an operand
+        without dimensions (some versions of NumPy refuse a number there,
+        and whether it is one is not known before computing), and for
+        anything NumPy does not read as an element type, whose error is
+        NumPy's to raise.
+    """
+    named = "dtype" in kwargs
+    if len(args) + named != 2 or not isinstance(args[0], Node):
+        return False
+    if operation is not np.ndarray.astype and (named or args[0].shape == ()):
+        return False  # `np.astype` takes the type by position only, and no number.
+    settings = {key: value for key, value in kwargs.items() if key not in ("dtype", "copy")}
+    for key, value in settings.items():
+        if key not in CAST_DEFAULTS or not (isinstance(value, type(CAST_DEFAULTS[key])) and value == CAST_DEFAULTS[key]):
+            return False
+    wanted = kwargs["dtype"] if named else args[1]
+    if isinstance(wanted, Node):
+        return False
+    try:
+        target = np.dtype(wanted)
+    except TypeError:
+        return False
+    copy = kwargs.get("copy", True)
+    return target.kind in DEFERRED_KINDS and (copy is True or (copy is False and target != args[0].dtype))
 
 
 def _names_one_axis(args: tuple, kwargs: dict) -> bool:
@@ -358,18 +407,20 @@ def _is_operand(arg: Any) -> bool:
     return isinstance(arg, (Node, np.generic, *PYTHON_NUMBERS)) or type(arg) is np.ndarray
 
 
-def _array_operands(kind: str, args: tuple) -> tuple:
-    """Return the arguments of a call that are arrays or numbers, not axes or indices.
+def _array_operands(kind: str, operation: Callable[..., Any], args: tuple) -> tuple:
+    """Return the arguments of a call that are arrays or numbers, not axes, indices or element types.
 
     Args:
         kind: The call's kind.
+        operation: The NumPy callable.
         args: Its positional arguments.
 
     Returns:
         Every argument for an element-by-element call or a matrix product;
-        the first alone for a reduction or a view.
+        the first alone for a reduction, a view or a cast. They come first
+        among the arguments, whatever the call.
     """
-    return args if kind in (ELEMENTWISE, MATRIX_PRODUCT) else args[:1]
+    return args if kind in (ELEMENTWISE, MATRIX_PRODUCT) and operation not in CASTS else args[:1]
 
 
 def _admissible(operand: Any) -> bool:
@@ -404,17 +455,17 @@ def _elementwise_shape(operation: Callable[..., Any], args: tuple, kwargs: dict)
     """Shape of an element-by-element call: its operands broadcast together.
 
     Args:
-        operation: The NumPy callable. Not used.
-        args: The operands.
+        operation: The NumPy callable.
+        args: The operands, and for a cast the element type after its one operand.
         kwargs: Not used.
 
     Returns:
-        The broadcast shape.
+        The broadcast shape. For a cast, the shape of its operand.
 
     Raises:
         ValueError: When the shapes do not broadcast.
     """
-    return np.broadcast_shapes(*(_shape(arg) for arg in args))
+    return np.broadcast_shapes(*(_shape(arg) for arg in _array_operands(ELEMENTWISE, operation, args)))
 
 
 def _matmul_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -556,7 +607,8 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
     Returns:
         The operand's type for a view. Otherwise the type of the real call
         made on probes, so `float32 * 2.0` stays `float32` and the sum of
-        `int8` is `int64`, because NumPy says so.
+        `int8` is `int64`, because NumPy says so. Only the array operands
+        are stood in for: an axis or an element type is passed as written.
 
     Raises:
         Exception: Whatever NumPy raises for these types, such as a Python
@@ -566,7 +618,8 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
         return args[0].dtype
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
-        return np.result_type(operation(*(probe(arg) for arg in args), **kwargs))
+        operands = len(_array_operands(kind, operation, args))
+        return np.result_type(operation(*(probe(arg) for arg in args[:operands]), *args[operands:], **kwargs))
 
 
 def probe(operand: Any) -> Any:
