@@ -995,6 +995,65 @@ def test_a_cast_is_deferred():
     assert caught[0].filename == __file__ and caught[0].lineno == line and caught[0].category is expected[0].category
 
 
+def test_partition_is_deferred():
+    """np.partition joins the graph as a new array of its operand's shape and type; a kth that does not fit is NumPy's error on the line."""
+    data = numpy.random.default_rng(SEED).standard_normal((7, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+
+    def gap(np, scores):
+        """Mean gap between the best and the second best of each column."""
+        top = np.partition(scores, -2, axis=0)[-2:]
+        return (top[1] - top[0]).mean()
+
+    graph.COUNTS.reset()
+    cases = {
+        "the last axis": (numpy.partition(x, 2), numpy.partition(plain, 2)),
+        "an axis by keyword": (numpy.partition(x, -2, axis=0), numpy.partition(plain, -2, axis=0)),
+        "an axis by position": (numpy.partition(x, 3, 0), numpy.partition(plain, 3, 0)),
+        "several positions": (numpy.partition(x, (1, 3)), numpy.partition(plain, (1, 3))),
+        "kth by keyword": (numpy.partition(x, kth=1, axis=1), numpy.partition(plain, kth=1, axis=1)),
+        "no axis": (numpy.partition(x, 10, axis=None), numpy.partition(plain, 10, axis=None)),
+        "defaults spelled out": (numpy.partition(x, 2, kind="introselect", order=None), numpy.partition(plain, 2, kind="introselect", order=None)),
+        "integers": (numpy.partition(lazy.arange(35).reshape(7, 5) * 7 % 11, 2), numpy.partition(numpy.arange(35).reshape(7, 5) * 7 % 11, 2)),
+        "through the stand-in": (lazy.partition(x * 2, 1), numpy.partition(plain * 2, 1)),
+        "the two best of each column": (numpy.partition(x, -2, axis=0)[-2:], numpy.partition(plain, -2, axis=0)[-2:]),
+        "the gap between them": (gap(lazy, x), gap(numpy, plain)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert numpy.partition(x, 2)._node.kind == rules.ORDERING
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    wrong = (lambda a: numpy.partition(a, 5), lambda a: numpy.partition(a, 1, axis=2), lambda a: numpy.partition(a, 1.5),
+             lambda a: numpy.partition(a.sum(), 0), lambda a: numpy.partition(a), lambda a: numpy.partition(a, 1, kth=2),
+             lambda a: numpy.partition(a, [1, 9]), lambda a: numpy.partition(a, 1, kind="quick"))
+    for call in wrong:
+        error, expected = raised(lambda: call(x)), raised(lambda: call(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    def program(np, start):
+        """Partition into a new array and write into it and into the operand; then partition the operand in place."""
+        a = np.array(start)
+        parted = np.partition(a, 2)
+        parted[0] = 0.0
+        a += 1.0
+        deferred = graph.COUNTS.at_once == {}
+        a.partition(1)
+        return a, parted, deferred
+
+    graph.COUNTS.reset()
+    a, parted, deferred = program(lazy, data)
+    assert deferred and graph.COUNTS.at_once == {"ndarray.partition": 1}
+    expected = program(numpy, data)
+    assert same(expected[0], a.gather()) and same(expected[1], parted.gather())
+    at_once = {"what a mask selects": (numpy.partition(x[x[:, 0] > -9], 1), numpy.partition(plain, 1)),
+               "a kth to be computed": (numpy.partition(x, lazy.arange(3)[1]), numpy.partition(plain, 1))}
+    for name, (got, expected) in at_once.items():
+        assert not got._node.pending and same(expected, got.gather()), name
+
+
 def kernel_calls(hotkernels) -> dict[str, int]:
     """Return how many calls each kernel of hotkernels has taken since it was installed.
 

@@ -112,7 +112,7 @@ A file is named by its name alone at every level, never by its path. `x.graph()`
 | `id` | The node's number. Negative for an `ndarray` that is not a node of the layer |
 | `kind` | `operation`; `input` for an array from outside this graph that was never an operation of the recording; `earlier` for an operation an earlier graph computed |
 | `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it |
-| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
+| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing`, `ordering` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
 | `dtype`, `shape`, `nbytes` | The element type, shape and size of its result. A length that was not known when the operation was written, how many elements a pending mask selects, is `None` in the shape (`null` in JSON), and the size is then 0 |
 | `where`, `code` | File name and line of the user's code that wrote it, and the text of that line |
 | `operands` | The ids of the nodes it reads |

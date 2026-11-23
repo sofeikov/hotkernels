@@ -183,7 +183,7 @@ class Node:
     # The exception computing this node raised, or inherited from an operand.
     failure: BaseException | None = None
     # For a deferred operation, its kind as `rules` names it: "elementwise",
-    # "matmul", "reduction" or "view". For a leaf, AT_ONCE when it is the
+    # "matmul", "reduction", "view", "indexing", "ordering" or "write". For a leaf, AT_ONCE when it is the
     # result of a call made at once, and empty for an array from outside.
     kind: str = ""
     # True for an array that refuses to give its values without `gather()`:
