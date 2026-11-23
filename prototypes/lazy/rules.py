@@ -46,7 +46,9 @@ REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.pr
 # `intp`, so the element type worked out for what follows could be wrong: there that call is made at once.
 COUNT_IS_A_NUMPY_SCALAR = isinstance(np.count_nonzero(np.zeros(1)), np.generic)
 # Reductions that answer with a position. They take one axis or none, never several.
-POSITIONS = frozenset({np.argmax, np.argmin})
+# `np.nanargmax` and `np.nanargmin` raise for a slice that is all NaN, which depends on
+# the values: that error comes when the graph is computed, with a note naming the line.
+POSITIONS = frozenset({np.argmax, np.argmin, np.nanargmax, np.nanargmin})
 # The only keywords a deferred reduction may carry.
 REDUCTION_KEYWORDS = frozenset({"axis", "keepdims"})
 # Functions NumPy answers with a view of their first argument.
