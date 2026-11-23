@@ -25,6 +25,7 @@ Three devices do the work:
 """
 from __future__ import annotations
 
+import math
 import operator
 import warnings
 from dataclasses import dataclass
@@ -52,6 +53,14 @@ COUNT_IS_A_NUMPY_SCALAR = isinstance(np.count_nonzero(np.zeros(1)), np.generic)
 POSITIONS = frozenset({np.argmax, np.argmin, np.nanargmax, np.nanargmin})
 # The only keywords a deferred reduction may carry.
 REDUCTION_KEYWORDS = frozenset({"axis", "keepdims"})
+# Running totals and running products: one result per element, each depending on those before it.
+SCANS = frozenset({np.cumsum, np.cumprod})
+# The only keyword a deferred running total may carry.
+SCAN_KEYWORDS = frozenset({"axis"})
+# Searches of a sorted array: one position per element looked for.
+SEARCHES = frozenset({np.searchsorted})
+# The values `side` may have in a deferred search.
+SEARCH_SIDES = ("left", "right")
 # Functions NumPy answers with a view of their first argument.
 VIEWS = frozenset({np.transpose, np.swapaxes, np.reshape, np.expand_dims, np.squeeze, np.ravel})
 # The views that put elements in a new arrangement. Their shape is worked out
@@ -102,6 +111,8 @@ ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING = "elementwise", "matmul"
 ORDERING = "ordering"
 # The kind of a call in NONZEROS.
 NONZERO = "nonzero"
+# The kinds of the calls in SCANS and in SEARCHES.
+SCAN, SEARCH = "scan", "search"
 # The kind of a node that is a write into an array: a copy of what the array
 # held, with the write made into it. Not planned here; `array.py` makes it.
 WRITE = "write"
@@ -119,7 +130,7 @@ class Signature:
     shape: tuple[int, ...]
     # Element type of the result.
     dtype: np.dtype
-    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING, ORDERING or NONZERO.
+    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING, ORDERING, NONZERO, SCAN or SEARCH.
     kind: str
 
 
@@ -265,7 +276,7 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         kwargs: Its keyword arguments.
 
     Returns:
-        One of the seven kinds, or None for a call this layer does not defer.
+        One of the kinds named above, or None for a call this layer does not defer.
     """
     operands = all(_is_operand(arg) for arg in args)
     if operation is np.dot:
@@ -298,6 +309,10 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
     if operation is np.count_nonzero:
         counted = COUNT_IS_A_NUMPY_SCALAR or not _reduces_everything(args, kwargs)
         return REDUCTION if counted and _is_plain_reduction(args, kwargs) else None
+    if operation in SCANS:
+        return SCAN if _is_plain_scan(args, kwargs) else None
+    if operation in SEARCHES:
+        return SEARCH if _is_plain_search(args, kwargs) else None
     if operation is operator.getitem:
         if len(args) != 2 or not isinstance(args[0], Node):
             return None
@@ -407,6 +422,49 @@ def _is_plain_ordering(args: tuple, kwargs: dict) -> bool:
     return all(isinstance(item, (int, np.integer)) for item in (*positions, *(() if axis is None else (axis,))))
 
 
+def _is_plain_scan(args: tuple, kwargs: dict) -> bool:
+    """Say whether a running total's arguments are ones this layer defers.
+
+    Args:
+        args: The operand, and the axis when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for one node with at least one dimension as the operand, and one
+        axis or none, given at most once. `dtype=` is NumPy's to handle at
+        once, and so is an operand without dimensions.
+    """
+    if not 1 <= len(args) <= 2 or not isinstance(args[0], Node) or not args[0].shape:
+        return False
+    if len(args) == 2 and "axis" in kwargs:
+        return False
+    return set(kwargs) <= SCAN_KEYWORDS and _names_one_axis(args, kwargs)
+
+
+def _is_plain_search(args: tuple, kwargs: dict) -> bool:
+    """Say whether a search's arguments are ones this layer defers.
+
+    Args:
+        args: The sorted array, what is looked for, and `side` when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for a sorted array of one dimension, something an
+        element-by-element call could take to look for, a node among the
+        two, and at most a `side` of "left" or "right" given once. With
+        `sorter=`, or a sorted array of another number of dimensions, the
+        call and its error are NumPy's.
+    """
+    if not 2 <= len(args) <= 3 or not all(_is_operand(arg) for arg in args[:2]):
+        return False
+    if not any(isinstance(arg, Node) for arg in args[:2]) or len(_shape(args[0])) != 1:
+        return False
+    if (len(args) == 3 and kwargs) or not set(kwargs) <= {"side"}:
+        return False
+    side = args[2] if len(args) == 3 else kwargs.get("side", SEARCH_SIDES[0])
+    return isinstance(side, str) and side in SEARCH_SIDES
+
+
 def _names_one_axis(args: tuple, kwargs: dict) -> bool:
     """Say whether a reduction's axis is one axis or none.
 
@@ -446,9 +504,11 @@ def _holds_for_any_length(kind: str, operation: Callable[..., Any], args: tuple,
         kwargs: Its keyword arguments.
 
     Returns:
-        True for an element-by-element call, a matrix product and a
-        reduction: where their shape rule succeeds on the stand-in, it
-        succeeds on any length. For views: True for the ones that move or add
+        True for an element-by-element call, a matrix product, a
+        reduction, a running total and a search: where their shape rule
+        succeeds on the stand-in, it succeeds on any length, and a running
+        total of all the elements of several dimensions gives a product of
+        lengths, which `_is_sound` turns down. For views: True for the ones that move or add
         axes, and for an index that takes the whole of the axis in question
         with `:`. False for `np.reshape` and `np.ravel`, for `np.squeeze`
         without an axis (the length may be 1), for an index that takes part
@@ -457,7 +517,7 @@ def _holds_for_any_length(kind: str, operation: Callable[..., Any], args: tuple,
         the length, and for the positions of what is not zero, whose mark
         is made for an operand of a known shape.
     """
-    if kind in (ELEMENTWISE, MATRIX_PRODUCT, REDUCTION):
+    if kind in (ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, SCAN, SEARCH):
         return True
     if kind != VIEW or operation in REARRANGEMENTS:
         return False
@@ -555,9 +615,12 @@ def _array_operands(kind: str, operation: Callable[..., Any], args: tuple) -> tu
 
     Returns:
         Every argument for an element-by-element call or a matrix product;
-        the first alone for a reduction, a view, a rounding or a cast. They
-        come first among the arguments, whatever the call.
+        the first two for a search; the first alone for a reduction, a
+        running total, a view, a rounding or a cast. They come first among
+        the arguments, whatever the call.
     """
+    if kind == SEARCH:
+        return args[:2]
     return args if kind in (ELEMENTWISE, MATRIX_PRODUCT) and operation not in ONE_OPERAND else args[:1]
 
 
@@ -653,6 +716,42 @@ def _reduced_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
     if kwargs.get("keepdims", False):
         return tuple(1 if position in reduced else length for position, length in enumerate(shape))
     return tuple(length for position, length in enumerate(shape) if position not in reduced)
+
+
+def _scanned_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
+    """Shape of a running total: the operand's along an axis, or all its elements in one dimension without one.
+
+    Args:
+        operation: The running total. Not used.
+        args: The operand, then the axis if it was given by position.
+        kwargs: `axis` if it was given by keyword.
+
+    Returns:
+        The shape NumPy gives. The number of elements is multiplied as
+        Python integers, which do not overflow on a length that is a stand-in.
+
+    Raises:
+        AxisError: For an axis the operand does not have.
+    """
+    shape, axis = _shape(args[0]), args[1] if len(args) > 1 else kwargs.get("axis")
+    if axis is None:
+        return (math.prod(shape),)
+    normalize_axis_tuple(axis, len(shape))
+    return shape
+
+
+def _searched_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
+    """Shape of a search: one position for each element looked for.
+
+    Args:
+        operation: The search. Not used.
+        args: The sorted array, then what is looked for.
+        kwargs: Not used.
+
+    Returns:
+        The shape of what is looked for, whatever the sorted array's length.
+    """
+    return _shape(args[1])
 
 
 def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -780,7 +879,7 @@ def index_stand_in(item: Any) -> Any:
 # The rule that gives the shape of each kind.
 _SHAPE_RULES = {ELEMENTWISE: _elementwise_shape, MATRIX_PRODUCT: _matmul_shape,
                 REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape, ORDERING: _ordered_shape,
-                NONZERO: _nonzero_shape}
+                NONZERO: _nonzero_shape, SCAN: _scanned_shape, SEARCH: _searched_shape}
 
 
 def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs: dict) -> np.dtype:
@@ -817,13 +916,14 @@ def probe(operand: Any) -> Any:
     """Return a stand-in with an operand's element type and number of dimensions, and one element.
 
     Args:
-        operand: A node, an `ndarray`, a NumPy scalar or a Python number.
+        operand: A node, an `ndarray`, a NumPy scalar or a Python number, or
+            an argument that is no operand: an axis, a tuple of axes, `None`, a `side`.
 
     Returns:
-        An array of zeros of shape (1, ..., 1) for an array; the operand
-        itself for a number, so NumPy sees a Python number as one.
+        An array of zeros of shape (1, ..., 1) for an array; anything else
+        as it is, so NumPy sees a Python number as one and an axis as written.
     """
-    if isinstance(operand, (np.generic, *PYTHON_NUMBERS)):
+    if not isinstance(operand, (Node, np.ndarray)):
         return operand
     return np.zeros((1,) * len(operand.shape), operand.dtype)
 

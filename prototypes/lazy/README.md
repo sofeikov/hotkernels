@@ -15,7 +15,7 @@ Try it from the repository's root with `uv run python`.
 
 ## What it does
 
-- Defers a narrow set of NumPy operations into a graph: element-by-element operations, the matrix product, the common reductions with `argmax` and `argmin`, views, indexing by arrays, and `np.partition`.
+- Defers a narrow set of NumPy operations into a graph: element-by-element operations, the matrix product, the common reductions with `argmax` and `argmin`, running totals, `np.searchsorted`, views, indexing by arrays, and `np.partition`.
 - Defers `x[mask]` for a mask not yet computed, and `np.flatnonzero`, `np.nonzero` and `np.argwhere`: the result has one length that is not known, `shape=(?, 4)`, and what is computed from it stays deferred where the shape of the result does not depend on that length.
 - Makes every other NumPy call at once, on gathered operands, and returns a lazy array that has its values.
 - Makes a write into an array (`w -= step`, `x[i] = v`, `out=x`) a node of the graph, so a loop that updates its arrays in place is one graph. A write into memory the user also holds is made at once.
