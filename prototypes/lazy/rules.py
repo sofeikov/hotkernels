@@ -71,6 +71,12 @@ CAST_DEFAULTS = {"order": "K", "casting": "unsafe", "subok": True, "device": Non
 # The element-by-element calls with one operand: what follows it is a setting (the number
 # of decimals, the element type), passed to NumPy as written and never stood in for.
 ONE_OPERAND = ROUNDINGS | CASTS
+# Functions that give the elements of their first argument again in another order along
+# an axis, as a new array of the same shape and element type.
+ORDERINGS = frozenset({np.partition})
+# Keywords of such a call that change nothing when they have these values, which are
+# NumPy's defaults. With any other value the call is made at once.
+ORDERING_DEFAULTS = {"kind": "introselect", "order": None}
 # Functions that give their one argument again, as a new array.
 COPIES = frozenset({np.copy})
 # `np.dot` is deferred for operands of these numbers of dimensions, where it
@@ -88,6 +94,8 @@ PYTHON_NUMBERS = (bool, int, float, complex)
 
 # The kinds of deferred operation.
 ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING = "elementwise", "matmul", "reduction", "view", "indexing"
+# The kind of a call in ORDERINGS.
+ORDERING = "ordering"
 # The kind of a node that is a write into an array: a copy of what the array
 # held, with the write made into it. Not planned here; `array.py` makes it.
 WRITE = "write"
@@ -105,7 +113,7 @@ class Signature:
     shape: tuple[int, ...]
     # Element type of the result.
     dtype: np.dtype
-    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW or INDEXING.
+    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING or ORDERING.
     kind: str
 
 
@@ -134,7 +142,7 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
     except Exception:
         if unknown:
             return None  # The real length may be one the call is right for: NumPy decides, at once.
-        if kind == INDEXING:
+        if kind in (INDEXING, ORDERING):
             raise  # The rule asked NumPy itself; the exception is NumPy's.
         _let_numpy_raise(operation, args, kwargs)
         return None  # NumPy accepts what the rule refused: the rule is wrong, so do not defer.
@@ -222,7 +230,7 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         kwargs: Its keyword arguments.
 
     Returns:
-        One of the five kinds, or None for a call this layer does not defer.
+        One of the six kinds, or None for a call this layer does not defer.
     """
     operands = all(_is_operand(arg) for arg in args)
     if operation is np.dot:
@@ -242,6 +250,8 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         return ELEMENTWISE if _is_plain_rounding(args, kwargs) else None
     if operation in CASTS:
         return ELEMENTWISE if _is_plain_cast(operation, args, kwargs) else None
+    if operation in ORDERINGS:
+        return ORDERING if _is_plain_ordering(args, kwargs) else None
     if operation in REDUCTIONS:
         return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in POSITIONS:
@@ -328,6 +338,36 @@ def _is_plain_rounding(args: tuple, kwargs: dict) -> bool:
     return isinstance(decimals, (int, np.integer))
 
 
+def _is_plain_ordering(args: tuple, kwargs: dict) -> bool:
+    """Say whether a partition's arguments are ones this layer defers.
+
+    Args:
+        args: The operand, then `kth` and the axis when they were given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for one node as the operand, with `kth` and the axis as whole
+        numbers written in the program (`kth` may be a list or tuple of
+        them, the axis may be None), and `kind=` and `order=` absent or at
+        NumPy's default. Whether `kth` and the axis fit the array, and
+        whether each was given exactly once, is not checked here: the shape
+        rule asks NumPy, which raises its own error. Anything else is made at
+        once: a `kth` that is an array or has to be computed, another
+        `kind=`, an `order=`.
+    """
+    if not args or len(args) > 3 or not isinstance(args[0], Node):
+        return False
+    for key, value in kwargs.items():
+        if key in ("kth", "axis"):
+            continue
+        if key not in ORDERING_DEFAULTS or not (isinstance(value, type(ORDERING_DEFAULTS[key])) and value == ORDERING_DEFAULTS[key]):
+            return False
+    kth = args[1] if len(args) > 1 else kwargs.get("kth", 0)
+    axis = args[2] if len(args) > 2 else kwargs.get("axis")
+    positions = kth if isinstance(kth, (list, tuple)) else (kth,)
+    return all(isinstance(item, (int, np.integer)) for item in (*positions, *(() if axis is None else (axis,))))
+
+
 def _names_one_axis(args: tuple, kwargs: dict) -> bool:
     """Say whether a reduction's axis is one axis or none.
 
@@ -373,8 +413,9 @@ def _holds_for_any_length(kind: str, operation: Callable[..., Any], args: tuple,
         axes, and for an index that takes the whole of the axis in question
         with `:`. False for `np.reshape` and `np.ravel`, for `np.squeeze`
         without an axis (the length may be 1), for an index that takes part
-        of that axis (`x[mask][:5]` has five elements or fewer) and for an
-        index of arrays.
+        of that axis (`x[mask][:5]` has five elements or fewer), for an
+        index of arrays, and for a partition, whose `kth` is checked against
+        the length.
     """
     if kind in (ELEMENTWISE, MATRIX_PRODUCT, REDUCTION):
         return True
@@ -594,6 +635,30 @@ def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tup
     return operation(ghost(args[0]), *args[1:], **kwargs).shape
 
 
+def _ordered_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
+    """Shape of a partition: NumPy's own answer, on an array of no size.
+
+    Args:
+        operation: `np.partition`.
+        args: The node, then `kth` and the axis as written.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        The shape NumPy gives: the operand's, or its elements in one
+        dimension for `axis=None`. The result is a new array, so the
+        stand-in has an element type of no size and takes no memory, as for
+        indexing by arrays. NumPy checks `kth` and the axis before it moves
+        anything, and then still walks the elements, which costs a few
+        nanoseconds each when they have no size.
+
+    Raises:
+        Exception: NumPy's, for a `kth` out of bounds, an axis the array
+            lacks, a `kth` that is not a whole number, or an argument given
+            twice or not at all.
+    """
+    return operation(np.empty(args[0].shape, NO_SIZE), *args[1:], **kwargs).shape
+
+
 def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...] | None:
     """Shape of an array indexed by arrays: NumPy's own answer, on an array of no size.
 
@@ -649,7 +714,7 @@ def index_stand_in(item: Any) -> Any:
 
 # The rule that gives the shape of each kind.
 _SHAPE_RULES = {ELEMENTWISE: _elementwise_shape, MATRIX_PRODUCT: _matmul_shape,
-                REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape}
+                REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape, ORDERING: _ordered_shape}
 
 
 def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs: dict) -> np.dtype:
@@ -662,7 +727,8 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
         kwargs: Its keyword arguments.
 
     Returns:
-        The operand's type for a view. Otherwise the type of the real call
+        The operand's type for a view, a selection by arrays and a
+        partition. Otherwise the type of the real call
         made on probes, so `float32 * 2.0` stays `float32` and the sum of
         `int8` is `int64`, because NumPy says so. Only the array operands
         are stood in for: an axis or an element type is passed as written.
@@ -671,7 +737,7 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
         Exception: Whatever NumPy raises for these types, such as a Python
             integer that does not fit the array's type.
     """
-    if kind in (VIEW, INDEXING):
+    if kind in (VIEW, INDEXING, ORDERING):
         return args[0].dtype
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
