@@ -31,6 +31,13 @@
     ['elementwise', 'element by element'], ['matmul', 'matrix product'], ['reduction', 'reduction'],
     ['view', 'view'], ['write', 'write into an array'], ['input', 'input'], ['atonce', 'made at once'], ['earlier', 'from an earlier graph'],
   ];
+  // The orders the list of graphs can be in: the name kept, the button's text, its tip.
+  const ORDERS = [
+    ['recorded', 'As it ran', 'The graphs in the order the program computed them'],
+    ['largest', 'Largest first', 'The graphs with the most operations at the top (s)'],
+  ];
+  // Where the browser keeps the order chosen, so the next page opens in it.
+  const ORDER_KEY = 'lazy-graphs-order';
   const TRIGGER_TEXT = {
     'gather': call => `computed by ${call}`,
     'at once': call => `computed because ${call} was made at once`,
@@ -57,6 +64,7 @@
 
   const state = {
     index: 0,            // Which graph is shown.
+    order: 'recorded',   // The order of the list of graphs: 'recorded' or 'largest'.
     mode: 'code',        // 'code' for the program's lines, 'graph' for the drawing.
     file: null,          // The file the code view shows.
     flash: null,         // A line the code view was asked to point at.
@@ -895,6 +903,12 @@
 
   // ---- The list of graphs. Graphs that are alike share one entry.
 
+  // How many operations each graph has, by its index.
+  const SIZES = DATA.graphs.map(graph => graph.nodes.filter(node => node.kind === 'operation').length);
+  const LARGEST = Math.max(1, ...SIZES);
+
+  // The entries of the list in the order it is shown in. Each has the
+  // indices of the graphs that are alike, which have one size.
   function families() {
     const found = [];
     const bySignature = new Map();
@@ -905,12 +919,43 @@
       }
       bySignature.get(graph.signature).members.push(index);
     });
+    // The sort keeps the order of equal sizes, so those stay as the program ran them.
+    if (state.order === 'largest') found.sort((one, other) => SIZES[other.members[0]] - SIZES[one.members[0]]);
     return found;
+  }
+
+  // The graph one entry up (-1) or down (+1) the list from the one shown,
+  // or the one shown at either end. As the program ran, that is the graph
+  // before or after; largest first, the next larger or smaller entry.
+  function neighbour(step) {
+    if (state.order === 'recorded') return state.index + step;
+    const shown = families();
+    const at = shown.findIndex(family => family.members.includes(state.index));
+    const entry = shown[clamp(at + step, 0, shown.length - 1)];
+    return entry.members.includes(state.index) ? state.index : entry.members[0];
+  }
+
+  function setOrder(order) {
+    state.order = order;
+    try { localStorage.setItem(ORDER_KEY, order); } catch (error) { /* The choice lasts for this page only. */ }
+    listGraphs();
+    banner();
+    const current = $('graphs').querySelector('.entry.current');
+    if (current) current.scrollIntoView({ block: 'nearest' });
   }
 
   function listGraphs() {
     const list = $('graphs');
     list.replaceChildren();
+    const orders = html('div', 'order');
+    for (const [order, text, title] of ORDERS) {
+      const choice = html('button', state.order === order ? 'current' : '', text);
+      choice.title = title;
+      choice.setAttribute('aria-pressed', String(state.order === order));
+      choice.addEventListener('click', () => setOrder(order));
+      orders.append(choice);
+    }
+    list.append(orders);
     for (const family of families()) {
       const here = family.members.includes(state.index);
       const graph = DATA.graphs[here ? state.index : family.members[0]];
@@ -920,8 +965,12 @@
       // A computation nobody asked for by name is the kind a reader is looking for.
       if (graph.trigger === 'needed') top.append(html('span', 'unasked', 'no gather'));
       if (family.members.length > 1) top.append(html('span', 'alike', `× ${family.members.length} alike`));
-      const operations = graph.nodes.filter(node => node.kind === 'operation').length;
-      entry.append(top, html('div', 'sub', `${graph.where || 'no line'} · ${plural(operations, 'operation')}`));
+      const operations = SIZES[graph.index];
+      // A bar as long as the graph is large beside the largest, so a large one stands out in either order.
+      const size = html('div', 'size');
+      size.append(html('span'));
+      size.firstChild.style.width = `${Math.max(1, Math.round(100 * operations / LARGEST))}%`;
+      entry.append(top, html('div', 'sub', `${graph.where || 'no line'} · ${plural(operations, 'operation')}`), size);
       entry.title = family.members.length > 1
         ? `Graphs ${family.members.map(index => index + 1).join(', ')} are alike in every operation, shape, type and line. Click again for the next.`
         : graph.code;
@@ -944,9 +993,11 @@
       bar.append(tab);
     }
     const back = html('button', '', '‹'), on = html('button', '', '›');
-    back.title = 'The graph before'; on.title = 'The graph after';
-    back.addEventListener('click', () => showGraph(state.index - 1));
-    on.addEventListener('click', () => showGraph(state.index + 1));
+    const largest = state.order === 'largest';
+    back.title = largest ? 'The next larger graph: one up the list' : 'The graph before';
+    on.title = largest ? 'The next smaller graph: one down the list' : 'The graph after';
+    back.addEventListener('click', () => showGraph(neighbour(-1)));
+    on.addEventListener('click', () => showGraph(neighbour(1)));
     const told = (TRIGGER_TEXT[graph.trigger] || (call => call))(graph.call);
     bar.append(back, on, html('b', '', `Graph ${graph.index + 1} of ${DATA.graphs.length}`), html('span', '', `${told}${graph.where ? ' at ' + graph.where : ''}`));
     if (graph.code) bar.append(html('code', '', graph.code));
@@ -1066,6 +1117,7 @@
       'Click a stacked box to unfold it; click the title of an open group to fold it.',
       'Click a node for its line, its arguments and what reads it.',
       'Drag to move, scroll to zoom, f to fit.',
+      'Largest first, above the list, puts the graphs with the most operations at the top; s switches. The bar under an entry is its size beside the largest.',
       'Type / to search; Enter goes to the next match and unfolds what hides it.']) help.append(html('li', '', line));
     panel.append(help);
   }
@@ -1211,6 +1263,7 @@
   document.addEventListener('keydown', event => {
     if (event.target.tagName === 'INPUT' || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'f') fit('whole');
+    else if (event.key === 's') setOrder(state.order === 'largest' ? 'recorded' : 'largest');
     else if (event.key === '/') { event.preventDefault(); $('search').focus(); }
     else if (event.key === 'Escape') select(null);
   });
@@ -1222,7 +1275,11 @@
     $('problem').textContent = 'Nothing was recorded: the block made no lazy operation.';
     return;
   }
-  const operations = DATA.graphs.reduce((total, graph) => total + graph.nodes.filter(node => node.kind === 'operation').length, 0);
+  const operations = SIZES.reduce((total, size) => total + size, 0);
+  try {
+    const kept = localStorage.getItem(ORDER_KEY);
+    if (ORDERS.some(([order]) => order === kept)) state.order = kept;
+  } catch (error) { /* No storage: the list opens as the program ran. */ }
   $('summary').textContent = `${plural(DATA.graphs.length, 'graph')}, ${plural(operations, 'operation')}`;
   legend();
   indexLines();

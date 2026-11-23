@@ -17,7 +17,7 @@ That runs the prototype's three example programs in one recorded block and opens
 - **It is drawn in the page, not by Graphviz.** A layout library places the boxes, and the page draws SVG and answers the pointer: it folds, zooms, searches and shows what a click asks about.
 - **A large graph opens folded.** A group of more than five operations is one stacked box that says what it holds, and a click unfolds it one level. The 954 operations of a 50-step loop open as four operations, three inputs and one box for the loop.
 - **Nothing is hidden for good.** What a folded group reads from outside stays in sight beside it, search finds operations inside folded groups and unfolds what hides them, and the JSON holds every node.
-- **The graphs of a recording are a list down the side,** each with what made the layer compute it and on which line. Graphs that are alike share one entry.
+- **The graphs of a recording are a list down the side,** each with what made the layer compute it and on which line. Graphs that are alike share one entry. The list is in the order the program ran, or with the largest graphs first.
 - **The prototype loads its layout library, ELK, from a CDN,** so its page needs a network connection when opened. The page of the package is to carry the library inside it. Which library ships is an [open question](#open-questions).
 
 ## The code first
@@ -56,7 +56,7 @@ Three areas:
 
 | Area | What is in it |
 |---|---|
-| Left | The graphs of the recording, in order: what triggered each, the line, the number of operations. `× 8 alike` marks graphs that are the same in every operation, shape, type and line. `no gather` marks a graph that was computed because something needed a value and `gather()` was not called |
+| Left | The graphs of the recording, in order: what triggered each, the line, the number of operations. `× 8 alike` marks graphs that are the same in every operation, shape, type and line. `no gather` marks a graph that was computed because something needed a value and `gather()` was not called. The bar under an entry is its number of operations beside the largest graph's. `As it ran` and `Largest first`, above the list, choose its order |
 | Middle | The program's code, or the drawing of the selected graph. Above it, the two tabs, what made the layer compute the graph, the line, and the text of that line |
 | Right | The selected node; or, with nothing selected, the graph: counts, the lines it was written on, and its operations by name |
 
@@ -99,6 +99,9 @@ What is drawn:
 | `Unfold all` | Every group open, except the middle of long loops |
 | `JSON` | The graphs as a file |
 | Click a graph in the list, or `‹` `›` | Another graph. Clicking an entry of several graphs alike goes through them |
+| Click `Largest first` above the list, or press `s` | The list with the most operations at the top. Graphs of one size stay in the order they ran, and each keeps its number. `‹` and `›` then go one entry up and down the list, to the next larger and the next smaller. `As it ran`, or `s` again, puts the list back. The browser keeps the choice for the next page it opens |
+
+**The large graphs are few, and not where the list starts.** A value needed inside a loop is a graph of a few operations at every step, so the page of a real program is mostly entries of three operations with a graph of a hundred somewhere among them: the particle filter's 33 entries start 52, 3, 51, 3. In the order the program ran, finding the large ones is scrolling and reading numbers. Largest first puts them at the top, 140, 60, 52, and the bar under each entry shows a large graph in either order.
 
 ## Folding
 
@@ -162,6 +165,7 @@ In one browser, the pane built into the Claude desktop app, on the page of the t
 - An entry of eight graphs alike going from one to the next, and a name under "Operations by name" setting the search.
 - `Unfold all` on the regression: 86 elements drawn, and `Fit` showing all of them.
 - The dark colours, on one graph.
+- The order of the list, on the particle filter's page of 33 entries. `Largest first` puts the entries of 140, 60 and 52 operations at the top and every entry at or below the one above it; `›` goes down that list and `‹` up; `s` puts it back as the program ran; the entry shown stays in view; a page opened afterwards starts in the order last chosen. The two buttons fit the list at its narrowest, 174 pixels.
 - The `no gather` mark, on a page of seven graphs computed by `float()` in a loop and by `np.asarray`.
 - A graph of 366 operations from one function of a hundred lines, opening as three stretches of lines, and one of them unfolding into eight.
 - The code view on the three example programs: the lines of a selected graph marked and its file brought up; a mark on a line opening the drawing with that line's operation selected; `Show … in the code` going back to the line; one mark, not two, for an eager call that also computed a graph.
