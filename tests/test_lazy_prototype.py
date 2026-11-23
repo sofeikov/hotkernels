@@ -864,6 +864,7 @@ def test_a_reduction_is_called_as_it_was_written():
         "function, bare": (numpy.sum(x), numpy.sum(data), (), {}),
         "function, axis by position": (numpy.max(x, 1), numpy.max(data, 1), (1,), {}),
         "function, keywords": (numpy.std(x, axis=0), numpy.std(data, axis=0), (), {"axis": 0}),
+        "function, two axes by position": (numpy.sum(x, (0, 1)), numpy.sum(data, (0, 1)), ((0, 1),), {}),
     }
     for name, (got, expected, args, kwargs) in cases.items():
         assert got._node.pending and got._node.args[1:] == args and got._node.kwargs == kwargs, name
@@ -936,6 +937,62 @@ def test_any_and_all_are_reductions():
     assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {"A truth test (if, while, and, or, not)": 2}
     hard = strict.asarray(data) + 0
     assert isinstance(raised(lambda: bool((hard > 0).all())), NotGathered) and same((plain > 0).all(), (hard > 0).all().gather())
+
+
+def test_a_cast_is_deferred():
+    """x.astype(t) and np.astype(x, t) join the graph; a cast that may give the array itself is made at once."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6)) * 10
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "to float32": (x.astype(numpy.float32), plain.astype(numpy.float32)),
+        "to integers, by name": ((x * 3).astype("int32"), (plain * 3).astype("int32")),
+        "to booleans": (numpy.trunc(x / 5).astype(bool), numpy.trunc(plain / 5).astype(bool)),
+        "to its own type": (x.astype(float), plain.astype(float)),
+        "the type by keyword": (x.astype(dtype=numpy.int64), plain.astype(dtype=numpy.int64)),
+        "copy=False to another type": (x.astype(numpy.float32, copy=False), plain.astype(numpy.float32, copy=False)),
+        "defaults spelled out": (x.astype(numpy.int16, casting="unsafe", order="K"), plain.astype(numpy.int16, casting="unsafe", order="K")),
+        "np.astype": (numpy.astype(x, numpy.float32), numpy.astype(plain, numpy.float32)),
+        "at the end of an expression": (numpy.exp(-x * numpy.log(2) / 3).astype(numpy.float64), numpy.exp(-plain * numpy.log(2) / 3).astype(numpy.float64)),
+        "a mask read on": (~(x > 0).astype(bool) & (x < 5), ~(plain > 0).astype(bool) & (plain < 5)),
+        "a number": (x.sum().astype(numpy.float32), plain.sum().astype(numpy.float32)),
+        "what a mask selects": (x[x[:, 0] > 0].astype(numpy.float32).sum(axis=0), plain[plain[:, 0] > 0].astype(numpy.float32).sum(axis=0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert x.astype(numpy.float32, copy=False)._node.kwargs == {"copy": False}
+    assert x.astype(float).gather() is not x.gather()
+
+    graph.COUNTS.reset()
+    at_once = {
+        "copy=False to its own type": (x.astype(float, copy=False), plain.astype(float, copy=False)),
+        "another casting": (x.astype(numpy.float32, casting="same_kind"), plain.astype(numpy.float32, casting="same_kind")),
+        "another order": (x.astype(numpy.float32, order="F"), plain.astype(numpy.float32, order="F")),
+        "to strings": (x.astype(str), plain.astype(str)),
+        "np.astype of a number": (numpy.astype((x * 2).sum(), numpy.float32), (plain * 2).sum().astype(numpy.float32)),
+    }
+    for name, (got, expected) in at_once.items():
+        assert not got._node.pending and same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {"ndarray.astype": 4, "np.astype": 1}
+    assert at_once["copy=False to its own type"][0].gather() is x.gather()
+    for wrong in (lambda a: a.astype("nope"), lambda a: a.astype(numpy.int32, casting="safe"), lambda a: a.astype(float, dtype=int)):
+        error, expected = raised(lambda: wrong(x)), raised(lambda: wrong(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    line = sys._getframe().f_lineno + 1
+    real = (x * 1j).astype(float)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        real.gather()
+    with warnings.catch_warnings(record=True) as expected:
+        warnings.simplefilter("always")
+        (plain * 1j).astype(float)
+    assert [str(w.message) for w in caught] == [str(w.message) for w in expected] and len(caught) == 1
+    assert caught[0].filename == __file__ and caught[0].lineno == line and caught[0].category is expected[0].category
 
 
 def kernel_calls(hotkernels) -> dict[str, int]:
