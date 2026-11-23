@@ -66,7 +66,7 @@ The names are provisional. One recording runs at a time; entering a second raise
 | `gather` | `x.gather()` or `hotkernels.gather(...)` | `gather` |
 | `at once` | A call outside the deferred set needed its operands | `np.argsort` |
 | `write` | A write into a lazy array had to be made at once, in memory known outside the layer, and computed everything pending first. A deferred write triggers nothing: it is a node | `x[index] = v`, `x += y` |
-| `needed` | Something needed values and `gather()` was not called | `float()`, `Conversion to an ndarray`, `np.add` |
+| `needed` | Something needed values and `gather()` was not called. A number read from an array that has its values computes nothing and is no graph ([lazy-design.md](lazy-design.md#what-the-layer-says)) | `float()`, `Conversion to an ndarray`, `np.add` |
 | `limit` | Too many nodes were pending | `the limit of pending nodes` |
 | `pending` | Nothing did: the nodes were not computed. The last graph of a recording, and every `x.graph()` | `still pending when the block ended` |
 
@@ -111,7 +111,7 @@ A file is named by its name alone at every level, never by its path. `x.graph()`
 |---|---|
 | `id` | The node's number. Negative for an `ndarray` that is not a node of the layer |
 | `kind` | `operation`; `input` for an array from outside this graph that was never an operation of the recording; `earlier` for an operation an earlier graph computed |
-| `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it |
+| `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it: `array`, `np.zeros`, the call made at once, or `x[index]` for one element read from an array that had its values |
 | `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing`, `ordering`, `nonzero` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
 | `dtype`, `shape`, `nbytes` | The element type, shape and size of its result. A length that was not known when the operation was written, how many elements a pending mask selects, is `None` in the shape (`null` in JSON), and the size is then 0 |
 | `where`, `code` | File name and line of the user's code that wrote it, and the text of that line |
@@ -201,7 +201,7 @@ On the prototype, Apple M1 Pro, CPython 3.12.7, NumPy 2.5.5. `uv run --group dev
 - **What was computed unasked:** a recording's own counts by call and line, its report, and the same as `events` in its data.
 - **How much code:** a page with whole files has every line of the file that was recorded; with lines only, the three that did something; with none, no text of any line anywhere in the page.
 - **A value needed without `gather()`:** a `float()` is a graph of the two operations it needed; an array handed to `np.asarray` is a graph of everything that was pending.
-- **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray` and the result of a call made at once; and `earlier` with the graph's index.
+- **Nodes:** kind, category, type, shape, size, line, text, operands and arguments as written, for operations; what made it and where, for an input from the stand-in, a plain `ndarray`, the result of a call made at once and one element read from an array that had its values; and `earlier` with the graph's index.
 - **Groups:** a call, a line, a loop of four steps as a `repeat` of `step`s whose signatures are one; a loop of 30 steps as two steps, a `rest` and a step; a call of twenty lines as three stretches; a generator expression as a line of its function.
 - **Alike:** a loop that gathers at each step gives one graph per step with one signature from the second on.
 - **A loop that writes in place:** fifty steps with two in-place updates and an assignment each are one graph of 300 operations, 150 of them writes, grouped as one `repeat`, with no write made at once.

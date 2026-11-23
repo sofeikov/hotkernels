@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, rules
+from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, record_graphs, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -23,6 +23,8 @@ SEED = 0
 EXAMPLES, FEATURES, STEPS = 2_000, 12, 30
 # Tokens, width and heads of the transformer block. The feed-forward layer is four times as wide.
 TOKENS, WIDTH, HEADS, WIDENING = 16, 24, 4, 4
+# Players, and figures kept for each, of the roster that a Python loop reads element by element.
+ROSTER, FIGURES = 22, 3
 
 lazy = get_lazy()
 # A stand-in whose arrays refuse to give their values without gather().
@@ -268,6 +270,67 @@ def test_iterating_needs_no_value():
         assert same(data[1] * 2, rows[1].gather())
     assert [float(value) for value in lazy.arange(3.0)] == [0.0, 1.0, 2.0]
     assert str(raised(lambda: iter(lazy.arange(3.0).sum()))) == str(raised(lambda: iter(numpy.array(3.0))))
+
+
+def test_a_loop_over_an_array_that_has_its_values_makes_no_graph_per_element():
+    """One element of an array that has its values is read without a node, so a Python loop over it is not a graph per turn."""
+    rng = numpy.random.default_rng(SEED)
+    away, keeper = rng.random(ROSTER) < 0.3, rng.random(ROSTER) < 0.4
+    figures = rng.integers(0, 9, (ROSTER, FIGURES))
+    names = [f"player {place}" for place in range(ROSTER)]
+    expected = numpy.flatnonzero(~away)
+    graph.COUNTS.reset()
+    with record_graphs() as recording:
+        here = lazy.flatnonzero(~lazy.asarray(away))
+        kept, table = lazy.asarray(keeper), lazy.asarray(figures)
+        elements = list(here)
+        picked = [names[position] for position in here]
+        keepers = [names[position] for position in here if kept[position]]
+        read = [int(table[position, turn % FIGURES]) for turn, position in enumerate(here)]
+        last, typed = table[-1, -1], table[numpy.int64(2), numpy.uint8(1)]
+    # The positions were computed once, when the first loop asked how many there are; nothing after that computed.
+    assert [(each.trigger, each.call) for each in recording.graphs] == [(graph.NEEDED, "The shape of what a mask selects")]
+    assert graph.COUNTS.deferred == 2 and graph.COUNTS.at_once == {}
+    assert graph.COUNTS.needed == {"The shape of what a mask selects": 1}
+    assert len(elements) == len(expected) and all(type(element) is LazyArray and not element._node.pending for element in elements)
+    assert all(same(plain, element.gather()) for plain, element in zip(expected, elements))
+    assert picked == [names[position] for position in expected]
+    assert keepers == [names[position] for position in expected if keeper[position]]
+    assert read == [int(figures[position, turn % FIGURES]) for turn, position in enumerate(expected)]
+    assert same(figures[-1, -1], last.gather()) and same(figures[2, 1], typed.gather())
+    for bad in ((ROSTER, 0), (0, -FIGURES - 1), (0, 0, 0)):
+        assert str(raised(lambda: table[bad])) == str(raised(lambda: figures[bad])), bad
+    # A row is a view and what is pending stays pending: both are deferred as before.
+    assert table[1]._node.pending and (table * 2)[1, 1]._node.pending and table[1, 1, ...]._node.pending
+    assert same(figures[1], table[1].gather()) and same(figures[1, 1, ...], table[1, 1, ...].gather())
+    # A number handed out is counted where something was computed for it; an array handed out, always.
+    graph.COUNTS.reset()
+    assert float(elements[0]) == float(expected[0]) and bool(kept[1]) is bool(keeper[1]) and f"{last:d}" == f"{figures[-1, -1]:d}"
+    assert graph.COUNTS.needed == {}
+    assert same(figures, numpy.asarray(table)) and graph.COUNTS.needed == {"Conversion to an ndarray": 1}
+    assert float((table * 2)[1, 1]) == float(figures[1, 1] * 2) and graph.COUNTS.needed["float()"] == 1
+    # The element is the one that was there when the line ran, as NumPy's is.
+    outside, inside = numpy.arange(4.0), lazy.arange(4.0)
+    before, first = lazy.asarray(outside)[2], inside[2]
+    outside[2], inside[2] = 9.0, 9.0
+    assert same(numpy.float64(2.0), before.gather()) and same(numpy.float64(2.0), first.gather())
+    assert inside[2]._node.pending and same(numpy.float64(9.0), inside[2].gather())
+
+
+def test_an_element_of_a_strict_array_is_strict():
+    """One element of a strict array that has its values is read without a node and gives its value only through gather()."""
+    data = numpy.arange(6.0).reshape(2, 3)
+    x = strict.asarray(data)
+    graph.COUNTS.reset()
+    element, elements = x[1, 2], list(strict.arange(3))
+    assert type(element) is LazyArray and not element._node.pending and element._node.strict
+    assert all(not each._node.pending and each._node.strict for each in elements)
+    for name, way in {"float": lambda: float(element), "if": lambda: 1 if element else 0, "format": lambda: f"{element:.1f}",
+                      "index": lambda: ["a", "b", "c"][elements[1]], "loop": lambda: [range(3)[i] for i in strict.arange(3)]}.items():
+        assert isinstance(raised(way), NotGathered), name
+    assert same(data[1, 2], element.gather()) and same(numpy.int64(1), elements[1].gather())
+    assert same(data[1, 2] * 2, (element * 2).gather()) and (element * 2)._node.strict
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
 
 
 def test_shape_and_type_errors_are_numpys_and_come_at_the_line():

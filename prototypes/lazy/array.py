@@ -45,6 +45,8 @@ WRITING_UFUNC_METHOD = "at"
 
 # In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
 OUT_FUNCTIONS = frozenset({np.clip, np.round, np.around})
+# What a recording calls an element read from an array that has its values, where it is an input of a later graph.
+ELEMENT_SOURCE = "x[index]"
 
 
 @dataclass(eq=False)
@@ -213,6 +215,10 @@ def _strict(*arguments: Any) -> bool:
 def _hand_out(call: str, strict: bool, everything: bool, nodes: list[Node], refusal: str) -> None:
     """Let values leave without `gather()`: refuse for a strict array, otherwise compute and say so.
 
+    A number, a truth value or a string asked of arrays that all have their
+    values is given without a word: nothing is computed for it, and the log
+    and the counters are the places where a graph was cut.
+
     Args:
         call: What needs the values, as the log and a recording name it.
         strict: Whether a strict array is involved.
@@ -226,12 +232,16 @@ def _hand_out(call: str, strict: bool, everything: bool, nodes: list[Node], refu
         refusal: What `NotGathered` says for a strict array.
 
     Raises:
-        NotGathered: For a strict array.
+        NotGathered: For a strict array, whether or not it has its values.
         Exception: What computing raised.
     """
     if strict:
         raise NotGathered(refusal)
-    graph.fallback(graph.NEEDED, call)
+    if everything or any(node.pending for node in nodes):
+        # A number, a truth value or a string read from arrays that have
+        # their values computes nothing and cuts no graph: not counted, not
+        # logged. A loop over the elements of such an array reads one per turn.
+        graph.fallback(graph.NEEDED, call)
     trigger = Trigger(graph.NEEDED, call)
     if everything:
         evaluate.compute_pending(trigger)
@@ -815,6 +825,39 @@ def _select(target: "LazyArray", parts: tuple) -> "LazyArray | None":
     return made
 
 
+def _element(target: "LazyArray", index: Any) -> "LazyArray | None":
+    """Read one element of an array that has its values, without a node.
+
+    `for i in positions:` and `flags[i]` in a Python loop ask for one
+    element per turn. Deferred, each would be a node, and a graph of its own
+    as soon as the element is used as an index or tested. Nothing is pending
+    under an array that has its values, and NumPy's answer for one element is
+    a number, which is a copy and not a view, so nothing is lost by reading it.
+
+    Args:
+        target: The array indexed.
+        index: What was written between the brackets, with every lazy array in it replaced by its values.
+
+    Returns:
+        A lazy array that has its values, holding NumPy's scalar: strict if
+        the array is. None when the array is pending or failed, when its
+        element type is not one the layer defers, or when the index is
+        anything but one whole number for each dimension. Those take the
+        ordinary road.
+
+    Raises:
+        IndexError: NumPy's, for a position out of bounds.
+    """
+    node = target._node
+    items = index if isinstance(index, tuple) else (index,)
+    whole = all(isinstance(item, (int, np.integer)) and not isinstance(item, (bool, np.bool_)) for item in items)
+    if node.pending or node.failure is not None or node.dtype.kind not in rules.DEFERRED_KINDS:
+        return None
+    if not whole or len(items) != len(node.shape):
+        return None
+    return LazyArray(graph.leaf(node.value[index], ELEMENT_SOURCE, strict=node.strict))
+
+
 def _same_index(first: Any, second: Any) -> bool:
     """Say whether two basic indices are the same.
 
@@ -1082,7 +1125,9 @@ class LazyArray:
         """Iterate over the first dimension. No value is needed: each item is a lazy view.
 
         Returns:
-            An iterator of `self[0]`, `self[1]`, ..., each deferred.
+            An iterator of `self[0]`, `self[1]`, ..., each deferred. Over one
+            dimension of an array that has its values, each is an element
+            that has its value, as `_element` says.
 
         Raises:
             TypeError: For an array without dimensions, as NumPy raises.
@@ -1232,12 +1277,16 @@ class LazyArray:
             still pending becomes an operand of the node: an array of
             integers is checked against the bounds when the graph is
             computed, and a mask gives a result whose length along the
-            mask is not known until then.
+            mask is not known until then. One element of an array that has
+            its values is read on the spot, as `_element` says: a lazy array
+            that has its values, and no node.
         """
         parts = _index_parts(index)
         if parts is None or not parts[1]:
             settled = index if parts is None else parts[0](())
-            return _defer_or_call(operator.getitem, "getitem", "x[index]", (self, settled))
+            element = None if parts is None else _element(self, settled)
+            # Not `element or ...`: a truth test of a lazy array would ask for its value.
+            return element if element is not None else _defer_or_call(operator.getitem, "getitem", "x[index]", (self, settled))
         selected = _select(self, parts)
         return selected if selected is not None else _at_once(operator.getitem, "x[index]", (self, index), {})
 
