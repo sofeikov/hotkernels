@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report
+from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -738,6 +738,39 @@ def test_positions_and_ravel_are_deferred():
         assert same(expected, got.gather()), name
 
 
+def test_positions_that_skip_nan_are_deferred():
+    """np.nanargmax and np.nanargmin join the graph as np.argmax does; a slice that is all NaN raises when it is computed."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    data[1, 2] = data[4, 0] = numpy.nan
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "nanargmax": (numpy.nanargmax(x), numpy.nanargmax(plain)),
+        "nanargmin along an axis": (numpy.nanargmin(x, axis=1), numpy.nanargmin(plain, axis=1)),
+        "an axis by position": (numpy.nanargmax(x, 0), numpy.nanargmax(plain, 0)),
+        "keepdims": (numpy.nanargmin(x, axis=0, keepdims=True), numpy.nanargmin(plain, axis=0, keepdims=True)),
+        "through the stand-in": (lazy.nanargmax(x * 2), numpy.nanargmax(plain * 2)),
+        "a selection by pending positions": (numpy.nanargmax(x[lazy.arange(3) * 2, 0]), numpy.nanargmax(plain[numpy.arange(3) * 2, 0])),
+        "what a mask selects": (numpy.nanargmin(x[x[:, 1] > 0], axis=0), numpy.nanargmin(plain[plain[:, 1] > 0], axis=0)),
+        "a row it names": (x[numpy.nanargmax(x[:, 0])], plain[numpy.nanargmax(plain[:, 0])]),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.nanargmax(x, axis=(0, 1)))) == str(raised(lambda: numpy.nanargmax(plain, axis=(0, 1))))
+    assert str(raised(lambda: numpy.nanargmin(x, axis=2))) == str(raised(lambda: numpy.nanargmin(plain, axis=2)))
+
+    blank = numpy.full((2, 3), numpy.nan)
+    late = numpy.nanargmax(lazy.asarray(blank) + 0, axis=1)
+    assert late._node.pending
+    error, expected = raised(late.gather), raised(lambda: numpy.nanargmax(blank, axis=1))
+    assert type(error) is type(expected) is ValueError and str(error) == str(expected)
+    assert "'nanargmax'" in error.__notes__[0] and "test_lazy_prototype.py" in error.__notes__[0]
+
+
 def test_the_stand_in_answers_like_the_module():
     """Arrays made through the stand-in are lazy; types, constants, submodules and ufunc methods are NumPy's."""
     assert type(lazy.zeros(3)) is LazyArray and type(lazy.array([1, 2, 3])) is LazyArray
@@ -837,6 +870,72 @@ def test_a_reduction_is_called_as_it_was_written():
         assert got.shape == numpy.shape(expected) and same(expected, got.gather()), name
     assert type(raised(lambda: x.sum(0, axis=0))) is type(raised(lambda: data.sum(0, axis=0)))
     assert str(raised(lambda: x.sum(axis=2))) == str(raised(lambda: data.sum(axis=2)))
+
+
+def test_count_nonzero_is_a_reduction(monkeypatch):
+    """np.count_nonzero joins the graph of the masks it counts, with axes and keepdims, and its errors are NumPy's."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "two masks": (numpy.count_nonzero((x[:, 0] > 0) & ~(x[:, 1] > 0)), numpy.count_nonzero((plain[:, 0] > 0) & ~(plain[:, 1] > 0))),
+        "numbers": (numpy.count_nonzero(numpy.trunc(x)), numpy.count_nonzero(numpy.trunc(plain))),
+        "along an axis": (numpy.count_nonzero(x > 0, axis=0), numpy.count_nonzero(plain > 0, axis=0)),
+        "an axis by position": (numpy.count_nonzero(x > 0, 1), numpy.count_nonzero(plain > 0, 1)),
+        "two axes": (numpy.count_nonzero(x > 0, axis=(0, 1)), numpy.count_nonzero(plain > 0, axis=(0, 1))),
+        "keepdims": (numpy.count_nonzero(x > 0, axis=1, keepdims=True), numpy.count_nonzero(plain > 0, axis=1, keepdims=True)),
+        "through the stand-in": (lazy.count_nonzero(x < 0), numpy.count_nonzero(plain < 0)),
+        "what a mask selects": (numpy.count_nonzero(x[x[:, 0] > 0] > 0.5, axis=0), numpy.count_nonzero(plain[plain[:, 0] > 0] > 0.5, axis=0)),
+        "in arithmetic": (x.sum() / numpy.count_nonzero(x > 0), plain.sum() / numpy.count_nonzero(plain > 0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.count_nonzero(x, axis=2))) == str(raised(lambda: numpy.count_nonzero(plain, axis=2)))
+    # A NumPy that answers a count without an axis with a Python int: that call is made at once, the others are not.
+    monkeypatch.setattr(rules, "COUNT_IS_A_NUMPY_SCALAR", False)
+    whole, along = numpy.count_nonzero(x > 0), numpy.count_nonzero(x > 0, axis=0)
+    assert not whole._node.pending and along._node.pending and graph.COUNTS.at_once == {"np.count_nonzero": 1}
+    assert same(numpy.count_nonzero(plain > 0), whole.gather())
+
+
+def test_any_and_all_are_reductions():
+    """any and all join the graph, as functions and as methods; a truth test of one is a value needed, not a call made at once."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "any": (numpy.any(x > 1), numpy.any(plain > 1)), "all": (numpy.all(x > -9), numpy.all(plain > -9)),
+        "methods": ((x > 1).any() | (x > 0).all(), (plain > 1).any() | (plain > 0).all()),
+        "along an axis": (numpy.any(x > 1, axis=1), numpy.any(plain > 1, axis=1)),
+        "an axis by position": ((x > 0).all(0), (plain > 0).all(0)),
+        "two axes and keepdims": (numpy.all(x > 0, axis=(0, 1), keepdims=True), numpy.all(plain > 0, axis=(0, 1), keepdims=True)),
+        "numbers": (numpy.trunc(x).any(axis=0), numpy.trunc(plain).any(axis=0)),
+        "a condition of np.where": (numpy.where((x > 1).any(axis=1), x[:, 0], x[:, 1]), numpy.where((plain > 1).any(axis=1), plain[:, 0], plain[:, 1])),
+        "beside another mask": ((x > 0).all(axis=0) & (x[0] > 0), (plain > 0).all(axis=0) & (plain[0] > 0)),
+        "what a mask selects": (x[x[:, 0] > 0].any(axis=0), plain[plain[:, 0] > 0].any(axis=0)),
+        "a mask that selects nothing": ((x[x[:, 0] > 99] > 0).all(), (plain[plain[:, 0] > 99] > 0).all()),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.any(x, axis=2))) == str(raised(lambda: numpy.any(plain, axis=2)))
+    assert str(raised(lambda: x.all(axis=2))) == str(raised(lambda: plain.all(axis=2)))
+    limited = numpy.any(x > 1, where=x > 0)
+    assert not limited._node.pending and same(numpy.any(plain > 1, where=plain > 0), limited.gather())
+
+    graph.COUNTS.reset()
+    found = (x > 1).any()
+    assert found._node.pending and bool(found) is bool((plain > 1).any()) and (not (x > 0).all()) is (not (plain > 0).all())
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {"A truth test (if, while, and, or, not)": 2}
+    hard = strict.asarray(data) + 0
+    assert isinstance(raised(lambda: bool((hard > 0).all())), NotGathered) and same((plain > 0).all(), (hard > 0).all().gather())
 
 
 def kernel_calls(hotkernels) -> dict[str, int]:
