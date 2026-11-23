@@ -1240,6 +1240,7 @@ class LazyArray:
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
     round = _reduction(np.round, "round")
+    astype = _reduction(np.ndarray.astype, "astype")
 
     def ravel(self, *args: Any, **kwargs: Any) -> "LazyArray":
         """Give the elements in one dimension, deferred.
