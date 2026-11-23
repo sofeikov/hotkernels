@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report
+from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -786,6 +786,36 @@ def test_a_reduction_is_called_as_it_was_written():
         assert got.shape == numpy.shape(expected) and same(expected, got.gather()), name
     assert type(raised(lambda: x.sum(0, axis=0))) is type(raised(lambda: data.sum(0, axis=0)))
     assert str(raised(lambda: x.sum(axis=2))) == str(raised(lambda: data.sum(axis=2)))
+
+
+def test_count_nonzero_is_a_reduction(monkeypatch):
+    """np.count_nonzero joins the graph of the masks it counts, with axes and keepdims, and its errors are NumPy's."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "two masks": (numpy.count_nonzero((x[:, 0] > 0) & ~(x[:, 1] > 0)), numpy.count_nonzero((plain[:, 0] > 0) & ~(plain[:, 1] > 0))),
+        "numbers": (numpy.count_nonzero(numpy.trunc(x)), numpy.count_nonzero(numpy.trunc(plain))),
+        "along an axis": (numpy.count_nonzero(x > 0, axis=0), numpy.count_nonzero(plain > 0, axis=0)),
+        "an axis by position": (numpy.count_nonzero(x > 0, 1), numpy.count_nonzero(plain > 0, 1)),
+        "two axes": (numpy.count_nonzero(x > 0, axis=(0, 1)), numpy.count_nonzero(plain > 0, axis=(0, 1))),
+        "keepdims": (numpy.count_nonzero(x > 0, axis=1, keepdims=True), numpy.count_nonzero(plain > 0, axis=1, keepdims=True)),
+        "through the stand-in": (lazy.count_nonzero(x < 0), numpy.count_nonzero(plain < 0)),
+        "what a mask selects": (numpy.count_nonzero(x[x[:, 0] > 0] > 0.5, axis=0), numpy.count_nonzero(plain[plain[:, 0] > 0] > 0.5, axis=0)),
+        "in arithmetic": (x.sum() / numpy.count_nonzero(x > 0), plain.sum() / numpy.count_nonzero(plain > 0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.count_nonzero(x, axis=2))) == str(raised(lambda: numpy.count_nonzero(plain, axis=2)))
+    # A NumPy that answers a count without an axis with a Python int: that call is made at once, the others are not.
+    monkeypatch.setattr(rules, "COUNT_IS_A_NUMPY_SCALAR", False)
+    whole, along = numpy.count_nonzero(x > 0), numpy.count_nonzero(x > 0, axis=0)
+    assert not whole._node.pending and along._node.pending and graph.COUNTS.at_once == {"np.count_nonzero": 1}
+    assert same(numpy.count_nonzero(plain > 0), whole.gather())
 
 
 def kernel_calls(hotkernels) -> dict[str, int]:
