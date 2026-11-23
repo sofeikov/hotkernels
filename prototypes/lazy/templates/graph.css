@@ -115,6 +115,19 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minma
 #graphs { border-right: 1px solid var(--line); }
 #details { border-left: 1px solid var(--line); padding: 14px; }
 
+/* The choice of order stays at the top of the list while it scrolls. */
+#graphs .order {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+#graphs .order button { flex: 1; padding: 2px 6px; font-size: 12px; white-space: nowrap; }
+#graphs .order button.current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .entry {
   display: block;
   width: 100%;
@@ -134,6 +147,9 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minma
 .entry .call + .unasked { margin-left: auto; }
 .entry .alike { margin-left: auto; padding: 0 6px; border-radius: 9px; background: var(--accent); color: var(--panel); font-size: 11px; white-space: nowrap; }
 .entry .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry .size { height: 3px; margin-top: 5px; border-radius: 2px; background: var(--box-fill); }
+.entry .size span { display: block; height: 100%; min-width: 3px; border-radius: 2px; background: var(--edge); }
+.entry.current .size span { background: var(--accent); }
 
 #stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 #banner {
