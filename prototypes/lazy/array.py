@@ -1237,6 +1237,7 @@ class LazyArray:
     std = _reduction(np.std, "std")
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
+    astype = _reduction(np.ndarray.astype, "astype")
 
     def ravel(self, *args: Any, **kwargs: Any) -> "LazyArray":
         """Give the elements in one dimension, deferred.
