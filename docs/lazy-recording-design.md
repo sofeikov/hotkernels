@@ -89,7 +89,7 @@ The prototype's three example programs, run in one recorded block by `uv run pyt
 |---|---|---|
 | The regression that never needs a value, 50 steps | 1 | 954 operations, computed by the one `gather` at the end |
 | The transformer block | 1 | 55 operations |
-| A regression that gathers its loss every fifth step and ends with `np.nanargmax` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.nanargmax` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
+| A regression that gathers its loss every fifth step and ends with `np.median` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.median` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
 
 15 graphs and 1,336 operations in all. A further 78 operations were written and dropped: the losses of the steps that were not reported.
 
