@@ -39,7 +39,9 @@ from .graph import Node
 # separate objects from `np.max` and `np.min` in NumPy 2.
 REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.prod, np.var, np.std})
 # Reductions that answer with a position. They take one axis or none, never several.
-POSITIONS = frozenset({np.argmax, np.argmin})
+# `np.nanargmax` and `np.nanargmin` raise for a slice that is all NaN, which depends on
+# the values: that error comes when the graph is computed, with a note naming the line.
+POSITIONS = frozenset({np.argmax, np.argmin, np.nanargmax, np.nanargmin})
 # The only keywords a deferred reduction may carry.
 REDUCTION_KEYWORDS = frozenset({"axis", "keepdims"})
 # Functions NumPy answers with a view of their first argument.

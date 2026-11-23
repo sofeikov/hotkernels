@@ -36,7 +36,7 @@ Graph 5 of a loop that gathers its loss every fifth step is selected in the list
 | `in graph 3`, `in 11 graphs` | Where the line's operations went. A click opens that graph with the line's operations selected |
 | `gather → 10 graphs` | The line asked for values, and these graphs were computed for it |
 | `needed float() → graph 4`, `write x += y → 75 graphs` | The line made the layer compute a graph early, without `gather()` |
-| `eager np.nanargmax → graph 13`, `eager np.cumsum × 9` | The line made a call the layer cannot defer: NumPy made it at once, this many times. With an arrow, operations that were pending had to be computed for it |
+| `eager np.median → graph 13`, `eager np.cumsum × 9` | The line made a call the layer cannot defer: NumPy made it at once, this many times. With an arrow, operations that were pending had to be computed for it |
 
 - **One tab per file** that wrote an operation or made the layer compute, the file with the most operations first. Selecting a graph brings up the file that holds most of it.
 - **`Code` and `Graph` switch the middle** between the listing and the drawing of the selected graph. The list of graphs and the panel stay.
@@ -82,7 +82,7 @@ What is drawn:
 |---|---|
 | Click `Code` or `Graph` | The middle shows the program's lines, or the drawing of the selected graph |
 | Click a graph in the list while the code is shown | Its lines are marked, and the file that holds most of them comes up |
-| Click a mark on a line: `in graph 3`, `gather → 10 graphs`, `eager np.nanargmax → graph 13` | The drawing of that graph, with the first operation of that line selected and whatever hid it unfolded |
+| Click a mark on a line: `in graph 3`, `gather → 10 graphs`, `eager np.median → graph 13` | The drawing of that graph, with the first operation of that line selected and whatever hid it unfolded |
 | Select a node and click `Show monitor.py:40 in the code` | The listing, at that line |
 | Click a folded group | It unfolds one level, and stays where it was on the screen |
 | Click the title of an open group | It folds |
