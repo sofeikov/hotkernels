@@ -551,14 +551,15 @@ def _is_number(node: Node) -> bool:
         node: A node of shape ().
 
     Returns:
-        True for the result of a ufunc, a reduction, a product or an index:
-        NumPy returns a scalar for those, and `s += v` on a scalar makes a
+        True for the result of a ufunc, a reduction, a product, an index or
+        a search for one value: NumPy returns a scalar for those, and `s += v` on a scalar makes a
         new scalar and changes nothing that exists. False for what may be an
         array without dimensions, such as `np.zeros(())`, which is written in place.
     """
     if not node.pending:
         return isinstance(node.value, np.generic)
-    return (isinstance(node.operation, np.ufunc) or node.kind in (rules.REDUCTION, rules.MATRIX_PRODUCT, rules.INDEXING)
+    return (isinstance(node.operation, np.ufunc)
+            or node.kind in (rules.REDUCTION, rules.MATRIX_PRODUCT, rules.INDEXING, rules.SEARCH)
             or (node.kind == rules.VIEW and node.operation is operator.getitem))
 
 
@@ -1294,6 +1295,9 @@ class LazyArray:
     all = _reduction(np.all, "all")
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
+    cumsum = _reduction(np.cumsum, "cumsum")
+    cumprod = _reduction(np.cumprod, "cumprod")
+    searchsorted = _reduction(np.searchsorted, "searchsorted")
     round = _reduction(np.round, "round")
     astype = _reduction(np.ndarray.astype, "astype")
 

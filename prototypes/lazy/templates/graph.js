@@ -31,6 +31,11 @@
     ['elementwise', 'element by element'], ['matmul', 'matrix product'], ['reduction', 'reduction'],
     ['view', 'view'], ['write', 'write into an array'], ['input', 'input'], ['atonce', 'made at once'], ['earlier', 'from an earlier graph'],
   ];
+  // Kinds of operation that have no colour of their own, and the kind each is
+  // drawn as: a selection by arrays, a partition and the positions of what is
+  // not zero as a view, a running total as a reduction, a search as the
+  // element-by-element answer it gives.
+  const DRAWN_AS = { indexing: 'view', ordering: 'view', nonzero: 'view', scan: 'reduction', search: 'elementwise' };
   // The orders the list of graphs can be in: the name kept, the button's text, its tip.
   const ORDERS = [
     ['recorded', 'As it ran', 'The graphs in the order the program computed them'],
@@ -153,8 +158,7 @@
   function categoryOf(node) {
     if (node.kind === 'earlier') return 'earlier';
     if (node.kind === 'input') return node.category === 'at once' ? 'atonce' : 'input';
-    // A selection by arrays is drawn as a view is, and so are a partition and the positions of what is not zero.
-    return ['indexing', 'ordering', 'nonzero'].includes(node.category) ? 'view' : node.category || 'elementwise';
+    return DRAWN_AS[node.category] || node.category || 'elementwise';
   }
 
   // ---- The model: the graph's JSON with the lookups the script needs.

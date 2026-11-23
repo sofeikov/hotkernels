@@ -156,7 +156,7 @@ needed: np.add at session.py:16
 A call outside the deferred set, which NumPy had to make at once, is a line of another kind, and it is the only kind at `INFO`:
 
 ```text
-eager: np.cumsum at session.py:18
+eager: np.argsort at session.py:18
 ```
 
 The two are apart on purpose. `eager` lines say what the deferred set does not cover yet, and are what one usually opens a log for. The others say where the program's graph was cut. `hotkernels.lazy_report()` has every occurrence of both, ranked; [What the layer says](#what-the-layer-says) has the whole of it.
@@ -275,12 +275,12 @@ Two things are not in this design:
 | Kind | What happens | Which |
 |---|---|---|
 | Deferred | A node joins the graph. Nothing is computed | The set in the next table |
-| Made at once | The lazy operands are gathered, NumPy makes the call, and the result is a lazy array that has its values | Everything else in NumPy that gives arrays back: `np.linalg.solve`, `np.argsort`, `np.concatenate`, `x.cumsum()`, any method or function not listed |
+| Made at once | The lazy operands are gathered, NumPy makes the call, and the result is a lazy array that has its values | Everything else in NumPy that gives arrays back: `np.linalg.solve`, `np.argsort`, `np.concatenate`, `x.astype(np.float32)`, any method or function not listed |
 | A write into a lazy array | A node joins the graph: the array's contents after the write. Nothing is computed. Only where the array's memory is known outside the layer is everything pending computed and the write made at once | `x[i] = v`, `x += y`, `np.multiply(a, 2, out=x)`; see [Writes](#writes) |
 
 The third row is what lets a loop be one graph; [Writes](#writes) says how NumPy's meaning of a write is kept.
 
-**A call made at once is not an error.** It computes its operands without being asked, and nothing leaves the lazy world: the result is a `LazyArray`. Raising here would stop nearly every real program at its first `np.cumsum` until the deferred set had grown to cover it. Each one is logged and counted, and each is a place where the program's graph is cut, which the [debugging tools](#debugging-tools) show.
+**A call made at once is not an error.** It computes its operands without being asked, and nothing leaves the lazy world: the result is a `LazyArray`. Raising here would stop nearly every real program at its first `np.argsort` until the deferred set had grown to cover it. Each one is logged and counted, and each is a place where the program's graph is cut, which the [debugging tools](#debugging-tools) show.
 
 ### The deferred set
 
@@ -290,7 +290,9 @@ Narrow in kinds, not in count. The first build computes each node with NumPy's o
 |---|---|---|
 | Element by element | Every ufunc with one output and no core dimensions (`np.add`, `np.exp`, `np.tanh`, `np.maximum`, `np.less`, ...), on arrays and numbers given by position; the operators that call them: `+ - * / // % **`, unary `-`, `abs`, the six comparisons, `& \| ^ ~`; `np.where(c, a, b)`; `np.copy(x)` and `x.copy()`; `np.round(x, decimals)`, `np.around` and `x.round(decimals)`, with a whole number of decimals by position or as `decimals=`, or none; a cast to a boolean, integer, floating or complex type, `x.astype(t)` and `np.astype(x, t)` | A call with `where=`, `dtype=` or `casting=`; a cast with `copy=False` to the array's own type, which gives the array itself, or with `order=`, `casting=` or `subok=` other than NumPy's default |
 | Matrix product | `@`, `np.matmul`; `np.dot(a, b)` and `a.dot(b)` for arrays of one or two dimensions, where it is the same product | `np.dot` with more dimensions or with a number, where it is another operation; `np.einsum`, `np.linalg` |
-| Reductions | `sum`, `mean`, `max`, `min`, `prod`, `var`, `std`, `any`, `all`, as functions and as methods, with no argument, with an axis by position or as `axis=`, and with `keepdims=`. `argmax` and `argmin` the same way, with one axis or none; `np.nanargmax` and `np.nanargmin` too, whose error for a slice that is all NaN depends on the values and is raised when the graph is computed. `np.count_nonzero`, with the same arguments as `sum`; its element type is `intp` | Any other argument, such as `where=`; `cumsum`; `np.count_nonzero(a)` without an axis on a NumPy before 2.3, which answers it with a Python `int` |
+| Reductions | `sum`, `mean`, `max`, `min`, `prod`, `var`, `std`, `any`, `all`, as functions and as methods, with no argument, with an axis by position or as `axis=`, and with `keepdims=`. `argmax` and `argmin` the same way, with one axis or none; `np.nanargmax` and `np.nanargmin` too, whose error for a slice that is all NaN depends on the values and is raised when the graph is computed. `np.count_nonzero`, with the same arguments as `sum`; its element type is `intp` | Any other argument, such as `where=`; `np.count_nonzero(a)` without an axis on a NumPy before 2.3, which answers it with a Python `int` |
+| Running totals | `np.cumsum` and `np.cumprod`, as functions and as methods, over all the elements or along one axis | With `dtype=`; an array without dimensions |
+| Searches | `np.searchsorted(a, v)` and `a.searchsorted(v)` for a sorted array of one dimension, with `side=` if given | With `sorter=` |
 | Views | `x.T`, `np.transpose`, `np.swapaxes`, `reshape`, `ravel`, `np.expand_dims`, `np.squeeze`, and indexing with integers, slices, `None` and `...` | `ravel` with an `order` |
 | Ordering | `np.partition(a, kth)` with `kth` one whole number or several, along the last axis, another axis or `axis=None`. The result is a new array of the operand's shape and element type, with NumPy's own choice of what lands on each side | `kind=` other than the default, `order=`, a `kth` that has to be computed; `a.partition(kth)`, which writes into `a` ([Writes](#writes)); `np.sort`, `np.argsort`, `np.argpartition` |
 | Indexing by arrays | `x[rows]`, `x[[0, 2, 4]]`, `x[rows, columns]`, `x[1:, columns]`, with arrays or lists of integers, and `x[mask]`, `x[mask, 2:]` with a mask. An array in the index may be a lazy array still pending: `x[np.argmax(w)]`, `x[order[:k]]`, `x[speed > limit]`, `x[np.flatnonzero(m)]`, `w[np.nonzero(m)]` | A pending mask beside another array in one index; positions whose number is not known beside any array but those of the same `np.nonzero`; an index array of another element type |
@@ -316,7 +318,7 @@ So the selection is deferred, and its shape has one length marked as not known:
 LazyArray(float64, shape=(?, 4), pending)
 ```
 
-- **What is computed from it is deferred wherever the result's shape does not depend on the number.** An operation with a number, with an array of length one along that axis, or with another selection by the same mask, which has the same length whatever it is. A matrix product. A reduction: `points[nearest == c].mean(axis=0)` has shape `(2,)`, which is known. A transpose, a new axis, and an index that takes the whole of that axis with `:`.
+- **What is computed from it is deferred wherever the result's shape does not depend on the number.** An operation with a number, with an array of length one along that axis, or with another selection by the same mask, which has the same length whatever it is. A matrix product. A reduction: `points[nearest == c].mean(axis=0)` has shape `(2,)`, which is known. A running total along an axis, and a search, whichever of its two arrays has the length. A transpose, a new axis, and an index that takes the whole of that axis with `:`.
 - **An assignment through the mask is deferred** when what is assigned is a number or was made from a selection by the same mask. `particles[fast, 2:] *= (limit / speed[fast])[:, None]` is six nodes and computes nothing.
 - **Where NumPy's answer depends on the number, the call is made at once:** part of that axis (`x[mask][:5]` has five elements or fewer), one element of it, `reshape` and `ravel`, `np.partition`, whose `kth` has to fit the length, an operation with an array of a known length or with a selection by another mask, `np.zeros_like`. The selection is computed and NumPy decides, with its own error if the lengths do not fit.
 - **Asking for the length is asking for a value.** `x[mask].shape`, `len(x[mask])`, `.size` and iteration compute the selection, and the log says `needed: The shape of what a mask selects`. A strict array raises `NotGathered`. `x.ndim` and `x.dtype` are known as always.
@@ -498,7 +500,7 @@ Not reached, because no lazy array is among the arguments: `np.zeros(3)`, a rand
 
 ### The prototype
 
-Nine modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 51 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 16 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
+Nine modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 52 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 16 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents.
 
 | Program | Deferred | Made at once | Result against eager NumPy |
 |---|---|---|---|
@@ -524,7 +526,7 @@ What the tests hold, each matching a rule of this document:
 - **Writes made at once.** Into an `ndarray` the user handed in, the user's array changes on the line. Into an array that was gathered, the gathered array changes. With a `reshape` or a `ravel` of an array alive, writes into any of them are seen through the others as NumPy shows them.
 - **Errors on the line.** An index out of bounds, too many values, the same through a view, and a result that cannot be cast each raise NumPy's message when the write is written, and the array is unchanged. `int_array += 0.5` raises NumPy's casting error.
 - **Random generators.** `np.random.default_rng()` through the stand-in draws NumPy's numbers as lazy arrays into which a write is deferred.
-- **Calls made at once** (`np.linalg.norm`, `x.cumsum()`, `np.argsort`, `np.concatenate`, `np.dot` of three dimensions, `np.sort`, `ravel` in another order, part of what a pending mask selects) give NumPy's results as computed lazy arrays.
+- **Calls made at once** (`np.linalg.norm`, `x.argsort()`, `np.cumsum` with `dtype=`, `np.searchsorted` with `sorter=`, `np.argsort`, `np.concatenate`, `np.dot` of three dimensions, `np.sort`, `ravel` in another order, part of what a pending mask selects) give NumPy's results as computed lazy arrays.
 - **`np.dot` and copies:** the product of matrices and vectors as a function, as a method and with a plain operand first, and `np.copy` and `x.copy()`, are each deferred and give NumPy's bits; a copy is a copy. Shapes that do not fit raise NumPy's message.
 - **Indexing by integer arrays:** an array, a list, two arrays, a slice with an array, a computed lazy array and a two-dimensional index are each deferred with NumPy's shape and bits; an index out of bounds raises NumPy's message on the line. A pending index, alone and beside an array, a mask that has its values and a list of booleans are deferred too; a pending index out of bounds raises NumPy's message when it is gathered.
 - **A pending mask:** `x[mask]` is a node whose description shows `shape=(?, 3)`. A reduction along the mask and of everything, arithmetic with the same mask's selection, a new axis, a matrix product, a position and a transpose of it are each deferred, with nothing made at once and no value needed, and give NumPy's bits, also when the mask selects nothing. A mask of the wrong shape raises NumPy's message on the line.
@@ -537,6 +539,7 @@ What the tests hold, each matching a rule of this document:
 - **Positions that skip NaN:** `np.nanargmax` and `np.nanargmin`, with an axis by keyword and by position, with `keepdims`, through the stand-in, of a selection by pending positions and of what a pending mask selects, and a row named by one, are each deferred with NumPy's shape, type and bits. Two axes and an axis the array lacks raise NumPy's message on the line. A slice that is all NaN raises NumPy's `ValueError` when it is gathered, with a note naming the line.
 - **Casts:** `x.astype(t)` to `float32`, to integers by name, to booleans and to the array's own type, with the type by keyword, with `copy=False` to another type, with the defaults spelled out, `np.astype(x, t)`, a cast at the end of an expression, of a mask that is read on, of a number and of what a pending mask selects are each deferred with NumPy's shape, type and bits. `copy=False` to the array's own type gives the array itself and is made at once, as are another `casting=` or `order=`, a cast to strings and `np.astype` of a number. A type NumPy does not know, a cast its rule forbids and a type given twice raise NumPy's message on the line. The warning of a cast from complex to real comes at the gather and names the line of the cast.
 - **`np.partition`:** along the last axis, another axis by keyword and by position, with several positions, with `kth` by keyword, with `axis=None`, with the defaults spelled out, through the stand-in, and with the two best of each column read from it and the gap between them, each is deferred with NumPy's shape, type and bits. A `kth` out of bounds, an axis the array lacks, a `kth` that is not a whole number, an array without dimensions and a `kth` given twice or not at all raise NumPy's message on the line. A write into the result is a deferred write that does not reach the operand. Of what a pending mask selects and with a `kth` that has to be computed it is made at once, and `a.partition(kth)` is still a write made at once.
+- **Running totals and searches:** `np.cumsum` over all the elements, along an axis given by keyword and by position, as a method, and on `int8`, whose total is `int64`; `np.cumprod`; `np.searchsorted` as a function and a method, from the right, for one number, with an `ndarray` as the sorted array; a running total of what a pending mask selects and a search for it. Each is deferred with nothing made at once, and gives NumPy's type and bits. An axis the array lacks raises NumPy's message on the line. A resampling written as a particle filter writes it, a running total with its last element assigned and then searched, is one graph. `np.sum(x, (0, 1))` and `np.sum(x, None)`, with the axis by position, give NumPy's result; they raised an `AttributeError` of the layer's own until this test.
 - **An array like another:** `zeros_like`, `ones_like` and `full_like` of a pending array leave it pending and count as nothing computed.
 - **The stand-in:** arrays it makes are lazy, types and constants are NumPy's own objects, `np.linalg.norm` and `np.add.reduce` work through it, `np.asarray(x)` returns a lazy `x` without computing, `np.asarray(a)` holds an `ndarray` by reference, and `np.array(x)` copies.
 - **Nothing is patched:** after `get_lazy()`, `sys.modules["numpy"]` and `numpy.zeros` are the objects they were, and a module that imports the real `numpy` gets plain `ndarray`s from it and lazy arrays from lazy input.
@@ -557,6 +560,7 @@ The same machine, with `hotkernels.install()` as it is by default: 43 of 49 kern
 | The regression's kernel calls. One call of the program is served by a kernel, `(w ** 2).sum()` in the penalty, once per step | Eagerly, `sum_f64` took 50 calls. Lazily it took 100: the 50 at the gather and the 50 dry runs for the element type |
 | `np.where(a > 0, a, b)` through the stand-in and through the real module, `np.clip(a, -1, 1)`, `np.argmax(a)`, `np.searchsorted(table, a)`, `a[a > 0]` and `np.maximum(a, b).sum()`, on lazy `float64` arrays of 100,000 elements | Each result is a lazy array equal to NumPy's, and each call was taken by its kernel: `where_f64`, `clip_f64`, `argmax_f64`, `searchsorted_f64`, `compress_f64`, `sum_f64` |
 | `np.argmax(a)`, `np.argmin(a)`, `a[a > 0]` and `a.ravel().sum()` on a lazy `float64` array of 100,000 elements, each deferred and then gathered | Each equal to NumPy's. The kernels for `np.argmax` and `np.argmin` took two calls each, the dry run for the element type and the gather; the one for `x[mask]` took one; the one for `np.sum` two |
+| `np.cumsum` on `int64` and `np.searchsorted` on `float64`, 100,000 elements, each deferred and then gathered | Each equal to NumPy's, and each kernel took two calls: the dry run and the gather |
 | `np.round(a, 2)` on a lazy `float64` array, deferred and then gathered | Equal to NumPy's. `round_f64` takes arrays of up to 4,096 elements. At 1,000 elements it took two calls, the dry run for the element type and the gather, where the eager call is one; at 100,000 it took the dry run alone, and the eager call none |
 | `np.cumsum` on `int32`, a stable `np.argsort`, `a.astype(np.float32)` and `a += b`, on lazy arrays | Each result is NumPy's. No kernel's count moved for these, for the lazy call or for the eager one; in-place adds are served by a loop the binding does not count |
 
@@ -574,16 +578,16 @@ Run once on the same machine, by a script that is not in the repository. Each pr
 | Veros ocean model, isoneutral mixing, the same grid | 698 | 19 | 119 | Its arrays are the user's, taken in with `np.asarray`: 20 assignments into them are made at once |
 | `delivery/apps/mlp_train.py`, one epoch on 1,280 examples | 516 | 11 | 50 | A step is one graph, ended by `float(loss)` |
 | Karpathy's `min-char-rnn.py`, 3 iterations, with its import line as the one line changed | 3,245 | 27 | 2,059 | Three iterations of training are one graph. The rest are the twenty characters it samples, each needing a value |
-| `delivery/apps/particle_filter.py`, 20 steps | 1,309 | 33 | 140 | A step with its masks is one graph, ended by a test (`if ess < ...:`); `np.cumsum` and `np.searchsorted` where it resamples |
+| `delivery/apps/particle_filter.py`, 20 steps | 1,327 | 24 | 140 | A step with its masks and its resampling is one graph, ended by a test (`if ess < ...:`) |
 | k-means, four clusters of 500 points | 99 | 10 | 19 | An iteration with a mask per cluster is one graph, ended by `np.stack` of the centres and a test for convergence |
 | PCA of 2,000 × 12 | 25 | 3 | 11 | `np.linalg.eigh` and `np.argsort` made at once |
-| A Monte Carlo option price, its data from `np.random.default_rng()` | 12 | 3 | 7 | `np.cumsum` made at once in the middle of it |
+| A Monte Carlo option price, its data from `np.random.default_rng()` | 13 | 2 | 10 | The paths, their running total and the payoff are one graph, ended by the price being formatted |
 
 - **All ten give NumPy's results, bit for bit,** without a line of theirs changed but the one that says what `np` is.
 - **A loop is one graph.** The recurrent network writes into an array at nearly every line of its inner loop, and its three iterations of training are one graph of 2,059 operations. The perceptron's step is one graph of 50. Over the ten programs 40 writes are still made at once: 20 assignments into the ocean routine's arrays, which are the user's, and 20 assignments of a tuple of two lazy arrays, a value whose shape the layer does not look into.
 - **A mask does not end a graph.** The particle filter caps the speed of its particles through a mask at every step, and at most steps the mask selects none of them: the selection, the division and the assignment back are nodes, and a step is one graph of up to 140 operations. k-means takes the mean of the points of each cluster through a mask.
 - **What ends a graph now is a value being needed.** 85 times over the ten programs: a test (`if shift < tolerance:`), a loss turned into a `float`, a number formatted for a line of output, an array handed to a function of NumPy's that the layer does not see into. Those are the program asking, and no rule of the layer removes them.
-- **26 calls are still made at once:** `np.cumsum` (10), `np.searchsorted` (9), `np.stack` (4), and `np.concatenate`, `np.linalg.eigh` and `np.argsort` once each.
+- **7 calls are still made at once:** `np.stack` (4), and `np.concatenate`, `np.linalg.eigh` and `np.argsort` once each.
 - **A long function needed a group of its own.** The equation of state is one function of a hundred lines that are not alike, and it opened as 366 boxes. A call of many members is now cut into stretches of lines ([lazy-recording-design.md](lazy-recording-design.md#groups)).
 
 ## Design
@@ -616,7 +620,7 @@ The prototype stays outside the package on purpose. Inside `hotkernels/` it woul
 | Operation | The callable the user wrote: a ufunc, a function such as `np.sum`, a method such as `x.sum`, or indexing. Empty once the node is computed |
 | Operands | Other nodes, `ndarray`s held by reference, and every other argument exactly as written: which were given, by position or by keyword, and Python numbers as Python numbers. NumPy's rule for a Python `2.0` (it does not widen a `float32` array) is then applied by NumPy, and a call reaches the code that serves that spelling ([With `hotkernels.install()`](#with-hotkernelsinstall)) |
 | Shape, element type | Worked out when the node is made |
-| Kind | Element by element, matrix product, reduction, view, indexing by arrays, ordering, positions of what is not zero, or a write: which rule deferred it. What a fusible group is read from, and what the page colours by |
+| Kind | Element by element, matrix product, reduction, view, indexing by arrays, ordering, positions of what is not zero, running total, search, or a write: which rule deferred it. What a fusible group is read from, and what the page colours by |
 | Strict | Whether the array refuses to give its values without `gather()`. True for an array a strict stand-in made, and for anything computed from a strict array |
 | Exposed | Whether the memory of the value may be known outside the layer. A write into such memory is made at once ([Writes](#writes)) |
 | Written at | File and line of the user's code, and that module's record of warnings already shown |
@@ -628,7 +632,7 @@ A lazy array is a handle on one node. A leaf is a node born with its value. Node
 
 ### Shape and element type without computing
 
-- **The shape comes from a rule,** one per kind: NumPy's `np.broadcast_shapes` for element-by-element operations; the matrix product's rule; the axes removed for a reduction. For a view, the operation is made on a stand-in that has the operand's shape and no memory (`np.broadcast_to` of one zero), which NumPy answers without touching data. Indexing by arrays makes a new array, which a stand-in of the operand's type would pay for in memory; there the stand-in has an element type of no size, and NumPy gives the shape, and its own error for an index out of bounds, for no memory at all. `np.partition` is asked the same way: NumPy checks `kth` and the axis against the stand-in and raises its own error on the line. It then walks elements of no size, a few nanoseconds each, which the first build accepts.
+- **The shape comes from a rule,** one per kind: NumPy's `np.broadcast_shapes` for element-by-element operations; the matrix product's rule; the axes removed for a reduction; the operand's shape for a running total along an axis, and its number of elements without one; the shape of what is looked for, for a search. For a view, the operation is made on a stand-in that has the operand's shape and no memory (`np.broadcast_to` of one zero), which NumPy answers without touching data. Indexing by arrays makes a new array, which a stand-in of the operand's type would pay for in memory; there the stand-in has an element type of no size, and NumPy gives the shape, and its own error for an index out of bounds, for no memory at all. `np.partition` is asked the same way: NumPy checks `kth` and the axis against the stand-in and raises its own error on the line. It then walks elements of no size, a few nanoseconds each, which the first build accepts.
 - **A lazy array in an index is stood in for** while NumPy works the shape out: an array of integers by zeros of its shape, which are in bounds whatever the array indexed, and a mask by one that selects nothing, which NumPy checks against the array's shape.
 - **A length that is not known is a mark in the shape.** NumPy's answer for a mask that selects nothing has one length of zero; the mark of that mask's node is put there, so two selections by one mask carry the same mark. The positions of what is not zero in a node carry that node's mark, and an index of such positions is stood in for by no positions, with the mark put where NumPy's answer has its zero. A rule treats it as a length like any other where its answer holds for every length: broadcasting it with itself, with 1 or with a number, a product, a reduction, moving axes. The call is made at once where that fails: when the rule does not accept the mark as it stands, when two marks would be in one shape, for part of the axis the mark is on, and for `reshape` and `ravel`, whose shape is arithmetic on lengths. When the node is computed, its shape becomes the real one. The prototype's mark is an integer larger than any array this machine can hold, so that NumPy's own shape arithmetic carries it; the package is to have a type of its own for it.
 - **The element type comes from NumPy itself:** the real call is made on arrays with one element per dimension, with the Python numbers as written, and with what is not an operand (an axis, an element type) as written too. That costs a microsecond or two and cannot disagree with NumPy about promotion. For a method such as `x.sum()` the dry run uses NumPy's function of the same name, `np.sum`.
@@ -680,19 +684,19 @@ Three things happen without being asked, and they are not the same to a reader:
 
 - **Which is seen is ordinary logging configuration.** `logging.getLogger("hotkernels.lazy").setLevel(logging.INFO)` shows the eager calls and nothing else, which is the list of what the deferred set should cover next. `DEBUG` adds the places where a graph was cut. Either logger can be set by itself. Nothing is shown until one of them is turned on.
 - **A line is short and each line of code gets one:** the word, the call, the file and the line. The layer keeps the set of what it has reported.
-- **Every occurrence is counted by line,** whether or not anything is logged, and `hotkernels.lazy_report()` ranks the counts: the call a program makes six hundred times at once is at the top. A recording keeps the same counts for its block (`recording.report()`). For twenty steps of the repository's particle filter:
+- **Every occurrence is counted by line,** whether or not anything is logged, and `hotkernels.lazy_report()` ranks the counts: the call a program makes six hundred times at once is at the top. A recording keeps the same counts for its block (`recording.report()`). For k-means on four clusters:
 
   ```text
   Made at once by NumPy: not in the deferred set
-         9  np.cumsum                   particle_filter.py:93 × 9
-         9  np.searchsorted             particle_filter.py:95 × 9
+         4  np.stack                    kmeans.py:18 × 4
+         1  np.concatenate              kmeans.py:12
 
   A graph computed early: a write into a lazy array
-        20  x[index] = v                particle_filter.py:76 × 20
+         none
 
   A graph computed early: a value needed without gather()
-        20  np.add                      particle_filter.py:75 × 20
-        20  A truth test (if, while, and, or, not)  particle_filter.py:145 × 20
+         4  A truth test (if, while, and, or, not)  kmeans.py:21 × 4
+         1  Formatting with '.2f'       kmeans.py:25
   ```
 
 - **More can go under the same name.** How long a graph took or how much memory it held would be further loggers of `hotkernels.lazy`, chosen the same way. None is designed.
@@ -712,7 +716,7 @@ All of this is for a person reading a run, and each part has its lever: which lo
 
 ### What an unknown attribute gets
 
-A lazy array answers a method it does not define with `ndarray`'s, made at once: `x.cumsum()`, `x.clip(0, 1)`, `x.argsort()`. Two limits keep that from becoming a way out:
+A lazy array answers a method it does not define with `ndarray`'s, made at once: `x.clip(0, 1)`, `x.argsort()`, `x.repeat(2)`. Two limits keep that from becoming a way out:
 
 - **No double-underscore name is passed on.** `__array_interface__` and `__array_struct__` would hand NumPy the memory behind the layer's back; see [Strict arrays](#strict-arrays).
 - **An attribute that is not a method is the values themselves:** `x.flat`, `x.real`, `x.data`. The array is computed, with everything else pending, and the attribute of the result is returned; a strict array raises.
@@ -835,7 +839,7 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 
 - *The table under [The deferred set](#the-deferred-set)* (the prototype): seven kinds, enough that the regression and the transformer block run without one call made at once. Since each node is computed by the call as written, a wider set costs shape rules only.
 - *Narrower, element by element and matrix product only:* less to get right first, but reductions, transposes and slices would each cut the graph, and the two programs would be made of many small graphs instead of a few whole ones.
-- *Wider, by what programs log* ([Ten programs with one changed line](#ten-programs-with-one-changed-line)): `np.cumsum` and `np.searchsorted`, whose shapes are known, then `np.stack` and `np.concatenate`. Each costs a shape rule.
+- *Wider, by what programs log* ([Ten programs with one changed line](#ten-programs-with-one-changed-line)): `np.stack` and `np.concatenate`, whose shapes follow from their arguments'. Each costs a shape rule.
 
 **A length that is not known.**
 
