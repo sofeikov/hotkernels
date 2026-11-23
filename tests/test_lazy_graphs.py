@@ -139,6 +139,12 @@ def test_a_node_is_plain_data_and_says_where_it_came_from():
     assert (read["sum"].kind, read["sum"].graph, read["sum"].operands) == (EARLIER, 0, ())
     assert (read["np.argsort"].kind, read["np.argsort"].category) == (INPUT, graph.AT_ONCE)
     json.dumps(recording.to_dict())
+    with record_graphs() as elements:
+        (lazy.arange(4.0)[2] * 2.0).gather()
+    # One element of an array that has its values is read without a node: it is an input of what reads it.
+    assert len(elements.graphs) == 1 and [node.name for node in elements.graphs[0].nodes] == ["x[index]", "multiply"]
+    element = elements.graphs[0].nodes[0]
+    assert (element.kind, element.category, element.shape, element.dtype) == (INPUT, record.ARRAY, (), "float64")
 
 
 def test_groups_follow_lines_calls_and_loops():
