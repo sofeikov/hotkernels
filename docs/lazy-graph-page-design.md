@@ -70,7 +70,7 @@ One of the graphs of a loop that gathers its loss every fifth step. The three da
 
 What is drawn:
 
-- **An operation** is a box with its name and, under it, the shape and element type of its result. A length that was not known when the operation was written is shown as `?`: `(?, 4) float64` for what a pending mask selects. Its colour is its kind: element by element, matrix product, reduction, view, or a write into an array; indexing by arrays is drawn as a view is, and so is `np.partition`. That makes a chain of element-by-element operations ending in a reduction visible at a glance, which is the first thing fusing would look for.
+- **An operation** is a box with its name and, under it, the shape and element type of its result. A length that was not known when the operation was written is shown as `?`: `(?, 4) float64` for what a pending mask selects. Its colour is its kind: element by element, matrix product, reduction, view, or a write into an array; indexing by arrays is drawn as a view is, and so are `np.partition` and the positions of what is not zero. That makes a chain of element-by-element operations ending in a reduction visible at a glance, which is the first thing fusing would look for.
 - **An input** is a pill: `np.zeros`, `np.asarray`, `ndarray`. A result of a call made at once has a colour of its own, since it marks a cut.
 - **An open group** is a frame with a title: a line of code, `softmax()`, `× 50`.
 - **A folded group** is a stack of cards with its title and how many operations it holds.
