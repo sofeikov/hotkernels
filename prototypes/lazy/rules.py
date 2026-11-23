@@ -59,6 +59,9 @@ VIEWS = frozenset({np.transpose, np.swapaxes, np.reshape, np.expand_dims, np.squ
 REARRANGEMENTS = frozenset({np.reshape, np.ravel})
 # Functions that work element by element and are not ufuncs.
 SELECTIONS = frozenset({np.where})
+# Functions that round each element of their first argument. Not ufuncs: they take
+# the number of decimals as a second argument, which is a setting and not an array.
+ROUNDINGS = frozenset({np.round, np.around})
 # Functions that give their one argument again, as a new array.
 COPIES = frozenset({np.copy})
 # `np.dot` is deferred for operands of these numbers of dimensions, where it
@@ -226,6 +229,8 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         return ELEMENTWISE if operation.signature is None and operation.nout == 1 else None
     if operation in SELECTIONS:
         return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
+    if operation in ROUNDINGS:
+        return ELEMENTWISE if _is_plain_rounding(args, kwargs) else None
     if operation in REDUCTIONS:
         return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in POSITIONS:
@@ -246,6 +251,30 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
             return None  # `order=` chooses another arrangement; NumPy's to handle.
         return VIEW if of_a_node else None
     return None
+
+
+def _is_plain_rounding(args: tuple, kwargs: dict) -> bool:
+    """Say whether a rounding's arguments are ones this layer defers.
+
+    Args:
+        args: The operand, and the number of decimals when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True for one node as the operand and, at most once, a whole number of
+        decimals, by position or as `decimals=`. The result then has the
+        operand's shape, which is what the element-by-element rule gives:
+        it broadcasts the decimals as it does any number written in the
+        program. Anything else is NumPy's to handle at once: `out=`, which is
+        a write, decimals given twice, and decimals that are not a whole
+        number, for which NumPy raises.
+    """
+    if not 1 <= len(args) <= 2 or not isinstance(args[0], Node) or not set(kwargs) <= {"decimals"}:
+        return False
+    if len(args) == 2 and kwargs:
+        return False
+    decimals = args[1] if len(args) == 2 else kwargs.get("decimals", 0)
+    return isinstance(decimals, (int, np.integer))
 
 
 def _names_one_axis(args: tuple, kwargs: dict) -> bool:

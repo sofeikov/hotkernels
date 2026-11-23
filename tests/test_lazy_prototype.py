@@ -528,6 +528,57 @@ def test_dot_and_copy_are_deferred():
     assert str(raised(lambda: numpy.dot(x, x))) == str(raised(lambda: numpy.dot(data, data)))
 
 
+def test_rounding_is_deferred():
+    """np.round, np.around and x.round() join the graph element by element, and with out= they are a write."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6)) * 100
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    single, whole = lazy.asarray(data.astype(numpy.float32)) * 2, lazy.arange(24).reshape(4, 6) * 7
+    plain_single, plain_whole = data.astype(numpy.float32) * 2, numpy.arange(24).reshape(4, 6) * 7
+    graph.COUNTS.reset()
+    cases = {
+        "np.round": (numpy.round(x), numpy.round(plain)),
+        "decimals by position": (numpy.round(x * 0.37, 2), numpy.round(plain * 0.37, 2)),
+        "decimals by keyword": (numpy.round(x, decimals=1), numpy.round(plain, decimals=1)),
+        "np.around, to tens": (numpy.around(x, -1), numpy.around(plain, -1)),
+        "method": (x.round(), plain.round()), "method with decimals": (x.round(3), plain.round(3)),
+        "method, a NumPy integer by keyword": (x.round(decimals=numpy.int64(1)), plain.round(decimals=numpy.int64(1))),
+        "float32": (numpy.round(single, 2), numpy.round(plain_single, 2)), "integers": (whole.round(-1), plain_whole.round(-1)),
+        "a number": (numpy.round(x.sum(), 2), numpy.round(plain.sum(), 2)),
+        "through the stand-in": (lazy.round(x / 3, 2), numpy.round(plain / 3, 2)),
+        "what a mask selects": (numpy.round(x[x[:, 0] > 0], 1).sum(axis=0), numpy.round(plain[plain[:, 0] > 0], 1).sum(axis=0)),
+        "read from afterwards": (numpy.round(x @ x.T, 2)[:, :2] + 1, numpy.round(plain @ plain.T, 2)[:, :2] + 1),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    # The call is kept as it was written, for whatever looks at how it is spelled.
+    assert numpy.round(x, 2)._node.args[1:] == (2,) and x.round(decimals=1)._node.kwargs == {"decimals": 1}
+    for wrong in (lambda a: numpy.round(a, 1.5), lambda a: numpy.round(a, 1, decimals=2), lambda a: a.round(1, None, 3)):
+        error, expected = raised(lambda: wrong(x)), raised(lambda: wrong(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    def program(np, start):
+        """Round into the array that is read, into another, and through a view."""
+        a = np.array(start)
+        b, c = a * 3, a / 7
+        np.round(b, 1, out=b)
+        np.around(a / 7, 2, out=a)
+        np.round(c[1], out=c[1])
+        return a, b, c
+
+    graph.COUNTS.reset()
+    written = program(lazy, data)
+    assert all(each._node.pending for each in written) and graph.COUNTS.at_once == {}
+    for name, expected, got in zip(("a", "b", "c"), program(numpy, data), written, strict=True):
+        assert same(expected, got.gather()), name
+    into, plain_into = lazy.arange(6), numpy.arange(6)
+    assert str(raised(lambda: numpy.round(x[0], 1, out=into))) == str(raised(lambda: numpy.round(plain[0], 1, out=plain_into)))
+    assert same(plain_into, into.gather())
+
+
 def test_an_array_like_another_needs_no_value():
     """zeros_like, ones_like and full_like use the shape and type of a lazy array and do not compute it."""
     pending = lazy.arange(6.0).reshape(2, 3) * 2
