@@ -89,7 +89,7 @@ The prototype's three example programs, run in one recorded block by `uv run pyt
 |---|---|---|
 | The regression that never needs a value, 50 steps | 1 | 954 operations, computed by the one `gather` at the end |
 | The transformer block | 1 | 55 operations |
-| A regression that gathers its loss every fifth step and ends with `np.nanargmax` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.nanargmax` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
+| A regression that gathers its loss every fifth step and ends with `np.median` ([`programs/monitor.py`](../prototypes/lazy/programs/monitor.py)) | 13 | The first loss with the standardising of the features, 8 operations. The second, 32. Eight more of 32 that are alike. One of 25 computed because `np.median` was made at once. One of 4 for the final weights. And 2 operations still pending when the block ended |
 
 15 graphs and 1,336 operations in all. A further 78 operations were written and dropped: the losses of the steps that were not reported.
 
@@ -112,7 +112,7 @@ A file is named by its name alone at every level, never by its path. `x.graph()`
 | `id` | The node's number. Negative for an `ndarray` that is not a node of the layer |
 | `kind` | `operation`; `input` for an array from outside this graph that was never an operation of the recording; `earlier` for an operation an earlier graph computed |
 | `name` | The operation's name (`add`, `matmul`, `getitem`); for an input, what made it |
-| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing`, `nonzero` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
+| `category` | For an operation, its kind in the layer's rules: `elementwise`, `matmul`, `reduction`, `view`, `indexing`, `ordering`, `nonzero` or `write`. A `write` is a write into a lazy array that was deferred: its first operand is what the array held For an input, `array`, or `at once` when it is the result of a call made at once |
 | `dtype`, `shape`, `nbytes` | The element type, shape and size of its result. A length that was not known when the operation was written, how many elements a pending mask selects, is `None` in the shape (`null` in JSON), and the size is then 0 |
 | `where`, `code` | File name and line of the user's code that wrote it, and the text of that line |
 | `operands` | The ids of the nodes it reads |
