@@ -788,6 +788,42 @@ def test_a_reduction_is_called_as_it_was_written():
     assert str(raised(lambda: x.sum(axis=2))) == str(raised(lambda: data.sum(axis=2)))
 
 
+def test_any_and_all_are_reductions():
+    """any and all join the graph, as functions and as methods; a truth test of one is a value needed, not a call made at once."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "any": (numpy.any(x > 1), numpy.any(plain > 1)), "all": (numpy.all(x > -9), numpy.all(plain > -9)),
+        "methods": ((x > 1).any() | (x > 0).all(), (plain > 1).any() | (plain > 0).all()),
+        "along an axis": (numpy.any(x > 1, axis=1), numpy.any(plain > 1, axis=1)),
+        "an axis by position": ((x > 0).all(0), (plain > 0).all(0)),
+        "two axes and keepdims": (numpy.all(x > 0, axis=(0, 1), keepdims=True), numpy.all(plain > 0, axis=(0, 1), keepdims=True)),
+        "numbers": (numpy.trunc(x).any(axis=0), numpy.trunc(plain).any(axis=0)),
+        "a condition of np.where": (numpy.where((x > 1).any(axis=1), x[:, 0], x[:, 1]), numpy.where((plain > 1).any(axis=1), plain[:, 0], plain[:, 1])),
+        "beside another mask": ((x > 0).all(axis=0) & (x[0] > 0), (plain > 0).all(axis=0) & (plain[0] > 0)),
+        "what a mask selects": (x[x[:, 0] > 0].any(axis=0), plain[plain[:, 0] > 0].any(axis=0)),
+        "a mask that selects nothing": ((x[x[:, 0] > 99] > 0).all(), (plain[plain[:, 0] > 99] > 0).all()),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.any(x, axis=2))) == str(raised(lambda: numpy.any(plain, axis=2)))
+    assert str(raised(lambda: x.all(axis=2))) == str(raised(lambda: plain.all(axis=2)))
+    limited = numpy.any(x > 1, where=x > 0)
+    assert not limited._node.pending and same(numpy.any(plain > 1, where=plain > 0), limited.gather())
+
+    graph.COUNTS.reset()
+    found = (x > 1).any()
+    assert found._node.pending and bool(found) is bool((plain > 1).any()) and (not (x > 0).all()) is (not (plain > 0).all())
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {"A truth test (if, while, and, or, not)": 2}
+    hard = strict.asarray(data) + 0
+    assert isinstance(raised(lambda: bool((hard > 0).all())), NotGathered) and same((plain > 0).all(), (hard > 0).all().gather())
+
+
 def kernel_calls(hotkernels) -> dict[str, int]:
     """Return how many calls each kernel of hotkernels has taken since it was installed.
 
