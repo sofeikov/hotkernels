@@ -118,7 +118,7 @@ class GraphNode:
     # "np.zeros", "ndarray", "np.argmax".
     name: str
     # For an operation its kind in `rules`: "elementwise", "matmul",
-    # "reduction", "view", "indexing", "ordering" or "write". For an input, ARRAY, or graph.AT_ONCE when it is
+    # "reduction", "view", "indexing", "ordering", "nonzero" or "write". For an input, ARRAY, or graph.AT_ONCE when it is
     # the result of a call made at once.
     category: str
     # Element type of the result, as NumPy prints it.
