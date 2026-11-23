@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report
+from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -652,6 +652,92 @@ def test_an_assignment_through_a_pending_mask_is_a_node():
     x[x > 0] = numpy.arange((plain > 0).sum(), dtype=float)
     plain[plain > 0] = numpy.arange((plain > 0).sum(), dtype=float)
     assert graph.COUNTS.at_once == {"x[index] = v": 1} and same(plain, x.gather())
+
+
+def test_the_positions_of_what_is_not_zero_have_a_length_that_is_not_known():
+    """np.flatnonzero, np.nonzero and np.argwhere are nodes of shape (?,) and (?, n); an index of them stays pending as x[mask] does."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    mask, plain_mask = x > 0, plain > 0
+    graph.COUNTS.reset()
+    flat, both, where = numpy.flatnonzero(mask[:, 0]), numpy.nonzero(mask), numpy.argwhere(mask)
+    assert repr(flat) == "LazyArray(int64, shape=(?,), pending)" and repr(where) == "LazyArray(int64, shape=(?, 2), pending)"
+    assert type(both) is tuple and [repr(each) for each in both] == [repr(flat)] * 2
+    assert flat._node.kind == rules.NONZERO and both[1]._node.name == "nonzero[1]"
+    cases = {
+        "flatnonzero": (flat, numpy.flatnonzero(plain_mask[:, 0])),
+        "flatnonzero of two dimensions": (numpy.flatnonzero(mask), numpy.flatnonzero(plain_mask)),
+        "flatnonzero of numbers": (numpy.flatnonzero(numpy.trunc(x)), numpy.flatnonzero(numpy.trunc(plain))),
+        "nonzero, rows": (both[0], numpy.nonzero(plain_mask)[0]), "nonzero, columns": (both[1], numpy.nonzero(plain_mask)[1]),
+        "the method": ((x > 0.5).nonzero()[1], (plain > 0.5).nonzero()[1]),
+        "argwhere": (where, numpy.argwhere(plain_mask)),
+        "through the stand-in": (lazy.flatnonzero(x[0] < 0), numpy.flatnonzero(plain[0] < 0)),
+        "arithmetic and a reduction": ((flat + 1).max(), (numpy.flatnonzero(plain_mask[:, 0]) + 1).max()),
+        "rows by positions": (x[flat], plain[numpy.flatnonzero(plain_mask[:, 0])]),
+        "rows by positions, and a slice": (x[flat, 1:], plain[numpy.flatnonzero(plain_mask[:, 0]), 1:]),
+        "one row by positions": (x[2, numpy.flatnonzero(mask[2])], plain[2, numpy.flatnonzero(plain_mask[2])]),
+        "elements by nonzero": (x[both], plain[numpy.nonzero(plain_mask)]),
+        "the same length as the mask selects": (x[both] * 2 - x[mask], plain[numpy.nonzero(plain_mask)] * 2 - plain[plain_mask]),
+        "nothing is not zero": (x[numpy.flatnonzero(x[:, 0] > 99)].sum(axis=0), plain[numpy.flatnonzero(plain[:, 0] > 99)].sum(axis=0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.ndim == expected.ndim and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+
+    def program(np, start):
+        """Write through the positions of what is not zero: a number, what was read through them, and a known array."""
+        p = np.array(start)
+        low = np.flatnonzero(p[:, 0] < 0)
+        p[low, 0] = 0.0
+        high = np.flatnonzero(p[:, 1] > 0)
+        p[high] = p[high] * 3
+        cells = np.nonzero(p > 2)
+        p[cells] = 2.0
+        deferred = graph.COUNTS.at_once == {}
+        some = np.flatnonzero(p[:, 2] > -99)
+        p[some, 4] = np.arange(6.0)
+        return p, deferred
+
+    graph.COUNTS.reset()
+    got, deferred = program(lazy, data)
+    assert deferred and graph.COUNTS.at_once == {"x[index] = v": 1} and same(program(numpy, data)[0], got.gather())
+
+    # Asking for the length is asking for a value, as for what a mask selects.
+    graph.COUNTS.reset()
+    late = numpy.flatnonzero(x[0] > 0)
+    assert len(late) == len(numpy.flatnonzero(plain[0] > 0)) and [int(i) for i in late] == list(numpy.flatnonzero(plain[0] > 0))
+    assert graph.COUNTS.needed["The shape of what a mask selects"] == 1 and graph.COUNTS.at_once == {}
+    hard = strict.asarray(data) + 0
+    assert isinstance(raised(lambda: len(numpy.flatnonzero(hard[0] > 0))), NotGathered)
+    assert same(numpy.flatnonzero(plain[0] > 0), numpy.flatnonzero(hard[0] > 0).gather())
+
+    # Where NumPy's answer depends on the number, the call is made at once and is NumPy's.
+    at_once = {
+        "positions of two masks in one index": (x[numpy.flatnonzero(x[:, 0] > -99), numpy.flatnonzero(x[0] > -99)[:1]], plain[numpy.arange(6), :1].ravel()),
+        "positions beside a known array": (x[numpy.flatnonzero(x[:, 0] > -99), numpy.zeros(6, int)], plain[:, 0]),
+        "part of the positions": (numpy.flatnonzero(mask)[:3], numpy.flatnonzero(plain_mask)[:3]),
+        "of what a pending mask selects": (numpy.flatnonzero(x[x > 0] > 1), numpy.flatnonzero(plain[plain > 0] > 1)),
+        "of a number": (numpy.flatnonzero(x.sum()), numpy.flatnonzero(plain.sum())),
+        "np.where with one argument": (numpy.where(mask)[0], numpy.where(plain_mask)[0]),
+    }
+    for name, (got, expected) in at_once.items():
+        assert not got._node.pending and same(expected, got.gather()), name
+    for wrong in (lambda a: numpy.nonzero(a.sum()), lambda a: a.sum().nonzero(), lambda a: numpy.nonzero(a, 1)):
+        error, expected = raised(lambda: wrong(x)), raised(lambda: wrong(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+    # A pending mask beside an array in one index: whether they fit depends on the mask, so NumPy makes the write.
+    def beside(np):
+        """Assign through a mask that selects three rows and an array of three columns."""
+        p = np.array(data)
+        p[p[:, 0] > numpy.sort(data[:, 0])[2], numpy.array([0, 1, 2])] = -1.0
+        return p
+
+    assert same(beside(numpy), beside(lazy).gather())
+    beyond = x[:3][numpy.flatnonzero(x[:, 0] > -99)]
+    assert beyond._node.pending and str(raised(beyond.gather)) == str(raised(lambda: plain[:3][numpy.flatnonzero(plain[:, 0] > -99)]))
 
 
 def test_positions_and_ravel_are_deferred():

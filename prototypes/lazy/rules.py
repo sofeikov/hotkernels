@@ -6,8 +6,9 @@ answers None when the call is not one this layer defers: the caller then
 makes it at once. When in doubt the answer is None; no shape or type is ever
 guessed.
 
-One length may be not known: how many elements a pending mask selects. The
-shape of `x[mask]` has a stand-in there (`graph.unknown_length`), and so has
+One length may be not known: how many elements a pending mask selects, or how
+many elements of an array are not zero. The shape of `x[mask]` and of
+`np.flatnonzero(a)` has a stand-in there (`graph.unknown_length`), and so has
 what is computed from it. Such an operand is deferred only where the result's
 shape does not depend on the real length, and an error the real length would
 cause is raised when the graph is computed, not on the line.
@@ -50,6 +51,9 @@ VIEWS = frozenset({np.transpose, np.swapaxes, np.reshape, np.expand_dims, np.squ
 REARRANGEMENTS = frozenset({np.reshape, np.ravel})
 # Functions that work element by element and are not ufuncs.
 SELECTIONS = frozenset({np.where})
+# Functions that answer with the positions of the elements that are not zero. How many
+# there are depends on the values, so the result has a length that is not known.
+NONZEROS = frozenset({np.nonzero, np.flatnonzero, np.argwhere})
 # Functions that give their one argument again, as a new array.
 COPIES = frozenset({np.copy})
 # `np.dot` is deferred for operands of these numbers of dimensions, where it
@@ -67,6 +71,8 @@ PYTHON_NUMBERS = (bool, int, float, complex)
 
 # The kinds of deferred operation.
 ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING = "elementwise", "matmul", "reduction", "view", "indexing"
+# The kind of a call in NONZEROS.
+NONZERO = "nonzero"
 # The kind of a node that is a write into an array: a copy of what the array
 # held, with the write made into it. Not planned here; `array.py` makes it.
 WRITE = "write"
@@ -84,7 +90,7 @@ class Signature:
     shape: tuple[int, ...]
     # Element type of the result.
     dtype: np.dtype
-    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW or INDEXING.
+    # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING or NONZERO.
     kind: str
 
 
@@ -97,7 +103,9 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
         kwargs: Its keyword arguments.
 
     Returns:
-        The signature of the result, or None when the call must be made at once.
+        The signature of the result, or None when the call must be made at
+        once. For `np.nonzero`, whose result is a tuple with one array per
+        dimension of its operand, the signature of each of those arrays.
 
     Raises:
         Exception: Whatever NumPy raises for these shapes and types.
@@ -131,21 +139,28 @@ def is_array_index(index: Any) -> bool:
 
     Returns:
         True when every item is an integer, a slice, `None`, `...` or an
-        array, and the arrays are either arrays of integers and masks that
-        have their values (`ndarray`s, lists) and pending arrays of integers,
-        or one pending mask alone. With a pending mask the result has a
-        length that is not known; anything it would have to broadcast with
-        is left to NumPy.
+        array, and the arrays are one of three things: arrays of integers
+        and masks that have their values (`ndarray`s, lists) with pending
+        arrays of integers; one pending mask alone; or pending positions in
+        one dimension whose number is not known, all with the same mark,
+        as the arrays of `np.nonzero(a)` are. In the last two cases the
+        result has a length that is not known; anything it would have to
+        broadcast with is left to NumPy.
     """
     items = index if isinstance(index, tuple) else (index,)
     arrays = masks = 0
+    marks = set()
     for item in items:
         if isinstance(item, list):
             item = np.asarray(item)
         if isinstance(item, Node):
-            if item.dtype.kind not in "biu" or not graph.is_known(item.shape) or 0 in item.shape:
+            if item.dtype.kind not in "biu" or 0 in item.shape:
                 return False
-            if item.dtype.kind == "b":
+            if not graph.is_known(item.shape):
+                if item.dtype.kind == "b" or len(item.shape) != 1:
+                    return False
+                marks.add(item.shape[0])
+            elif item.dtype.kind == "b":
                 if not item.shape:
                     return False  # A boolean without dimensions adds a dimension; NumPy's to handle.
                 masks += 1
@@ -157,7 +172,27 @@ def is_array_index(index: Any) -> bool:
             arrays += 1
         elif not is_basic_index(item):
             return False
+    if marks:
+        return len(marks) == 1 and arrays == 0 and masks == 0
     return (arrays > 0 and masks == 0) or (masks == 1 and arrays == 0)
+
+
+def index_mark(item: Any) -> int | None:
+    """Return the mark of the length that one item of an index selects, when that length is not known.
+
+    Args:
+        item: An item of an index.
+
+    Returns:
+        For a pending mask, the stand-in for how many elements it selects.
+        For pending positions whose number is not known, the mark their own
+        shape carries. None for anything else.
+    """
+    if not isinstance(item, Node):
+        return None
+    if item.dtype.kind == "b":
+        return graph.unknown_length(item)
+    return None if graph.is_known(item.shape) else item.shape[0]
 
 
 def is_doubtful_view(index: Any) -> bool:
@@ -201,7 +236,7 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         kwargs: Its keyword arguments.
 
     Returns:
-        One of the five kinds, or None for a call this layer does not defer.
+        One of the six kinds, or None for a call this layer does not defer.
     """
     operands = all(_is_operand(arg) for arg in args)
     if operation is np.dot:
@@ -217,6 +252,10 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         return ELEMENTWISE if operation.signature is None and operation.nout == 1 else None
     if operation in SELECTIONS:
         return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
+    if operation in NONZEROS:
+        # Of an array with dimensions only: NumPy refuses `np.nonzero` of a number, and has
+        # answers of its own for the other two.
+        return NONZERO if len(args) == 1 and not kwargs and isinstance(args[0], Node) and args[0].shape != () else None
     if operation in REDUCTIONS:
         return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in POSITIONS:
@@ -267,8 +306,9 @@ def _holds_for_any_length(kind: str, operation: Callable[..., Any], args: tuple,
         axes, and for an index that takes the whole of the axis in question
         with `:`. False for `np.reshape` and `np.ravel`, for `np.squeeze`
         without an axis (the length may be 1), for an index that takes part
-        of that axis (`x[mask][:5]` has five elements or fewer) and for an
-        index of arrays.
+        of that axis (`x[mask][:5]` has five elements or fewer), for an
+        index of arrays, and for the positions of what is not zero, whose
+        mark is made for an operand of a known shape.
     """
     if kind in (ELEMENTWISE, MATRIX_PRODUCT, REDUCTION):
         return True
@@ -486,6 +526,26 @@ def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tup
     return operation(ghost(args[0]), *args[1:], **kwargs).shape
 
 
+def _nonzero_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
+    """Shape of the positions of what is not zero: one length that is not known.
+
+    Args:
+        operation: `np.nonzero`, `np.flatnonzero` or `np.argwhere`.
+        args: The one node.
+        kwargs: Not used.
+
+    Returns:
+        `(?,)` for `np.flatnonzero`, and for each array of the tuple
+        `np.nonzero` gives; `(?, ndim)` for `np.argwhere`. The mark is the
+        operand's, the same for all three: it stands for how many of the
+        node's elements are not zero. For a mask that is how many it
+        selects, so `x[mask]` and `np.flatnonzero(mask)` carry one mark and
+        are known to have one length.
+    """
+    count = graph.unknown_length(args[0])
+    return (count, len(args[0].shape)) if operation is np.argwhere else (count,)
+
+
 def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...] | None:
     """Shape of an array indexed by arrays: NumPy's own answer, on an array of no size.
 
@@ -505,8 +565,10 @@ def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
         mask is stood in for by one that selects nothing, so NumPy checks
         its shape against the array's, and the one length of 0 in the answer
         is where the number selected goes: the mask's stand-in is put there.
-        None when that place cannot be told apart, because a slice of the
-        index selects nothing as well.
+        Pending positions whose number is not known are stood in for by no
+        positions at all, and their mark is put where the 0 is in the same
+        way. None when that place cannot be told apart, because a slice of
+        the index selects nothing as well.
 
     Raises:
         IndexError: NumPy's, for an index out of bounds, index arrays that do
@@ -516,12 +578,12 @@ def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
     items = index if isinstance(index, tuple) else (index,)
     stood_in = tuple(index_stand_in(item) for item in items)
     shape = np.broadcast_to(np.zeros((), NO_SIZE), args[0].shape)[stood_in if isinstance(index, tuple) else stood_in[0]].shape
-    mask = next((item for item in items if isinstance(item, Node) and item.dtype.kind == "b"), None)
-    if mask is None:
+    mark = next((index_mark(item) for item in items if index_mark(item) is not None), None)
+    if mark is None:
         return shape
     if shape.count(0) != 1:
         return None
-    return tuple(graph.unknown_length(mask) if length == 0 else length for length in shape)
+    return tuple(mark if length == 0 else length for length in shape)
 
 
 def index_stand_in(item: Any) -> Any:
@@ -532,8 +594,11 @@ def index_stand_in(item: Any) -> Any:
 
     Returns:
         For a pending array, one zero or one False broadcast to its shape,
-        which takes no memory; anything else as it is.
+        which takes no memory; for pending positions whose number is not
+        known, no positions; anything else as it is.
     """
+    if isinstance(item, Node) and not graph.is_known(item.shape):
+        return np.zeros(0, np.intp)
     if isinstance(item, Node):
         return np.broadcast_to(np.zeros((), np.bool_ if item.dtype.kind == "b" else np.intp), item.shape)
     return item
@@ -541,7 +606,7 @@ def index_stand_in(item: Any) -> Any:
 
 # The rule that gives the shape of each kind.
 _SHAPE_RULES = {ELEMENTWISE: _elementwise_shape, MATRIX_PRODUCT: _matmul_shape,
-                REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape}
+                REDUCTION: _reduced_shape, VIEW: _view_shape, INDEXING: _indexed_shape, NONZERO: _nonzero_shape}
 
 
 def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs: dict) -> np.dtype:
@@ -564,6 +629,8 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
     """
     if kind in (VIEW, INDEXING):
         return args[0].dtype
+    if kind == NONZERO:
+        return np.flatnonzero(probe(args[0])).dtype  # The three answer with one type, and `np.nonzero` with a tuple.
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
         return np.result_type(operation(*(probe(arg) for arg in args), **kwargs))

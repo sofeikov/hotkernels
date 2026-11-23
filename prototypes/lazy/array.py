@@ -280,6 +280,51 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
     return made
 
 
+def _part(operation: Callable[..., Any], place: int) -> Callable[..., Any]:
+    """Build a function that makes a call and gives one item of the tuple it returns.
+
+    Args:
+        operation: A callable that returns a tuple, such as `np.nonzero`.
+        place: Which item of the tuple.
+
+    Returns:
+        A function with the arguments of `operation`.
+    """
+    def call(*args, **kwargs):
+        """Make the call and take the item."""
+        return operation(*args, **kwargs)[place]
+    return call
+
+
+def _defer_nonzero(operation: Callable[..., Any], name: str, args: tuple,
+                   ruled_as: Callable[..., Any] | None = None) -> "tuple[LazyArray, ...] | None":
+    """Add `np.nonzero(a)` to the graph if the rules allow it: one node for each array of the tuple.
+
+    A node has one value, and `np.nonzero` gives a tuple with an array per
+    dimension of its operand. Each of those arrays is a node of its own that
+    makes the call and keeps its item, so the first build calls `np.nonzero`
+    once per dimension. They carry one mark for their length.
+
+    Args:
+        operation: `np.nonzero`, or the method written on a lazy array.
+        name: What to call the nodes; each adds its place, as in "nonzero[1]".
+        args: The one operand.
+        ruled_as: `np.nonzero` when `operation` is the method. None when it is the function.
+
+    Returns:
+        A tuple of pending lazy arrays, or None when the call has to be made at once.
+    """
+    unwrapped = _unwrapped(args)
+    signature = rules.plan(ruled_as or operation, unwrapped, {})
+    if signature is None:
+        return None
+    if graph.pending_count() >= graph.PENDING_LIMIT:
+        evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
+    return tuple(LazyArray(graph.deferred(_part(operation, place), f"{name}[{place}]", unwrapped, {}, signature.shape,
+                                          signature.dtype, signature.kind, _strict(args)))
+                 for place in range(len(unwrapped[0].shape)))
+
+
 def _defer_or_call(operation: Callable[..., Any], name: str, call: str, args: tuple) -> Any:
     """Defer a call if the rules allow it, and make it at once if they do not.
 
@@ -654,9 +699,10 @@ def _index_parts(index: Any) -> tuple[Callable[[tuple], Any], list["LazyArray"],
         arrays still pending, the index's items with a `_Slot` for each of
         them). A lazy array that has its values is replaced by them. A
         pending one may be a mask or an array of integers; what the integers
-        are is checked against the bounds when the graph is computed. None
-        when the index holds a pending lazy array of another type, or a lazy
-        array inside a list.
+        are is checked against the bounds when the graph is computed. Which
+        of those an index may hold together is for `rules.is_array_index`
+        to say. None when the index holds a pending lazy array of another
+        type, or a lazy array inside a list.
     """
     items = index if isinstance(index, tuple) else (index,)
     pending: list[LazyArray] = []
@@ -668,7 +714,7 @@ def _index_parts(index: Any) -> tuple[Callable[[tuple], Any], list["LazyArray"],
             template.append(item)
         elif not item._node.pending:
             template.append(item._node.value)
-        elif item.dtype.kind not in "biu" or not graph.is_known(item._node.shape):
+        elif item.dtype.kind not in "biu":
             return None
         else:
             template.append(_Slot(len(pending)))
@@ -696,11 +742,14 @@ def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
         value: What is assigned.
 
     Returns:
-        False for a value the layer does not know the shape of. Through a
-        mask that is still pending, True for a number, and for an array made
-        from a selection by the same mask (`x[mask] = f(y[mask])`), which has
-        as many elements as the mask selects whatever that number is; False
-        for any other array, which fits or not depending on the mask's values.
+        False for a value the layer does not know the shape of, and for an
+        index of pending arrays that `rules.is_array_index` does not accept.
+        Through a mask that is still pending, True for a number, and for an
+        array made from a selection by the same mask (`x[mask] = f(y[mask])`),
+        which has as many elements as the mask selects whatever that number
+        is; False for any other array, which fits or not depending on the
+        mask's values. Through pending positions whose number is not known,
+        such as `np.flatnonzero(m)`, the same.
 
     Raises:
         Exception: NumPy's, for an index out of bounds or a value that does not fit.
@@ -709,12 +758,15 @@ def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
     shape = _shape_of(value)
     if shape is None or not graph.is_known(target._cell.node.shape):
         return False
+    nodes = tuple(lazy._node for lazy in pending)
+    if nodes and not rules.is_array_index(fill(nodes)):
+        return False
     if not graph.is_known(shape):
-        if len(pending) != 1 or graph.unknown_length(pending[0]._node) not in shape:
+        if len(pending) != 1 or rules.index_mark(nodes[0]) not in shape:
             return False
         # The mask is stood in for by one that selects nothing; so is the value's length along it.
         shape = tuple(length if graph.is_known((length,)) else 0 for length in shape)
-    elif shape != () and any(lazy._node.dtype.kind == "b" for lazy in pending):
+    elif shape != () and any(rules.index_mark(node) is not None for node in nodes):
         return False
     ghost = np.empty(target._cell.node.shape, rules.NO_SIZE)
     for step in target._steps:
@@ -1159,6 +1211,9 @@ class LazyArray:
             # those are known: the new array is made without computing it.
             like = rules.ghost(args[0]._node)
             return LazyArray(graph.leaf(func(like, *args[1:], **kwargs), call, strict=args[0]._node.strict))
+        if func is np.nonzero and not kwargs:
+            parts = _defer_nonzero(func, func.__name__, args)
+            return parts if parts is not None else _at_once(func, call, args, kwargs)
         deferred = _try_defer(func, func.__name__, args, kwargs)
         return deferred if deferred is not None else _at_once(func, call, args, kwargs)
 
@@ -1237,6 +1292,18 @@ class LazyArray:
     std = _reduction(np.std, "std")
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
+
+    def nonzero(self) -> "tuple[LazyArray, ...]":
+        """Give the positions of the elements that are not zero, deferred.
+
+        Returns:
+            One pending lazy array per dimension, each of a length that is
+            not known until it is computed. For an array without dimensions
+            the call is made at once, and NumPy raises.
+        """
+        method = _method("nonzero")
+        parts = _defer_nonzero(method, "nonzero", (self,), ruled_as=np.nonzero)
+        return parts if parts is not None else _at_once(method, "ndarray.nonzero", (self,), {})
 
     def ravel(self, *args: Any, **kwargs: Any) -> "LazyArray":
         """Give the elements in one dimension, deferred.
