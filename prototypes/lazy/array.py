@@ -1235,6 +1235,8 @@ class LazyArray:
     prod = _reduction(np.prod, "prod")
     var = _reduction(np.var, "var")
     std = _reduction(np.std, "std")
+    any = _reduction(np.any, "any")
+    all = _reduction(np.all, "all")
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
 

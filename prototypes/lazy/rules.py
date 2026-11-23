@@ -36,8 +36,10 @@ from . import graph
 from .graph import Node
 
 # Reductions that are deferred, as functions. `np.amax` and `np.amin` are
-# separate objects from `np.max` and `np.min` in NumPy 2.
-REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.prod, np.var, np.std})
+# separate objects from `np.max` and `np.min` in NumPy 2. `np.any` and `np.all`
+# are reductions like the others: the same shape rule, and NumPy's answer on a
+# probe for the element type, which is `bool`.
+REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.prod, np.var, np.std, np.any, np.all})
 # `np.count_nonzero` is a reduction with the shape rule of the others, and one condition of its own.
 # Without an axis NumPy 2.3 and later answer with a NumPy scalar, as `np.sum` does. Earlier versions
 # answer with a Python `int`, which the rest of an expression promotes by other rules than it does an
