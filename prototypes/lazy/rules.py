@@ -68,6 +68,9 @@ CASTS = frozenset({np.ndarray.astype, getattr(np, "astype", np.ndarray.astype)})
 # Keywords of a cast that change nothing when they have these values, which are NumPy's
 # defaults. With any other value the cast is made at once.
 CAST_DEFAULTS = {"order": "K", "casting": "unsafe", "subok": True, "device": None}
+# The element-by-element calls with one operand: what follows it is a setting (the number
+# of decimals, the element type), passed to NumPy as written and never stood in for.
+ONE_OPERAND = ROUNDINGS | CASTS
 # Functions that give their one argument again, as a new array.
 COPIES = frozenset({np.copy})
 # `np.dot` is deferred for operands of these numbers of dimensions, where it
@@ -312,9 +315,8 @@ def _is_plain_rounding(args: tuple, kwargs: dict) -> bool:
     Returns:
         True for one node as the operand and, at most once, a whole number of
         decimals, by position or as `decimals=`. The result then has the
-        operand's shape, which is what the element-by-element rule gives:
-        it broadcasts the decimals as it does any number written in the
-        program. Anything else is NumPy's to handle at once: `out=`, which is
+        operand's shape; the decimals are a setting, not an operand
+        (`ONE_OPERAND`). Anything else is NumPy's to handle at once: `out=`, which is
         a write, decimals given twice, and decimals that are not a whole
         number, for which NumPy raises.
     """
@@ -472,10 +474,10 @@ def _array_operands(kind: str, operation: Callable[..., Any], args: tuple) -> tu
 
     Returns:
         Every argument for an element-by-element call or a matrix product;
-        the first alone for a reduction, a view or a cast. They come first
-        among the arguments, whatever the call.
+        the first alone for a reduction, a view, a rounding or a cast. They
+        come first among the arguments, whatever the call.
     """
-    return args if kind in (ELEMENTWISE, MATRIX_PRODUCT) and operation not in CASTS else args[:1]
+    return args if kind in (ELEMENTWISE, MATRIX_PRODUCT) and operation not in ONE_OPERAND else args[:1]
 
 
 def _admissible(operand: Any) -> bool:
@@ -511,11 +513,11 @@ def _elementwise_shape(operation: Callable[..., Any], args: tuple, kwargs: dict)
 
     Args:
         operation: The NumPy callable.
-        args: The operands, and for a cast the element type after its one operand.
+        args: The operands, and for a rounding or a cast the setting after its one operand.
         kwargs: Not used.
 
     Returns:
-        The broadcast shape. For a cast, the shape of its operand.
+        The broadcast shape. For a rounding or a cast, the shape of its operand.
 
     Raises:
         ValueError: When the shapes do not broadcast.
