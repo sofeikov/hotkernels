@@ -36,10 +36,19 @@ from . import graph
 from .graph import Node
 
 # Reductions that are deferred, as functions. `np.amax` and `np.amin` are
-# separate objects from `np.max` and `np.min` in NumPy 2.
-REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.prod, np.var, np.std})
+# separate objects from `np.max` and `np.min` in NumPy 2. `np.any` and `np.all`
+# are reductions like the others: the same shape rule, and NumPy's answer on a
+# probe for the element type, which is `bool`.
+REDUCTIONS = frozenset({np.sum, np.mean, np.max, np.min, np.amax, np.amin, np.prod, np.var, np.std, np.any, np.all})
+# `np.count_nonzero` is a reduction with the shape rule of the others, and one condition of its own.
+# Without an axis NumPy 2.3 and later answer with a NumPy scalar, as `np.sum` does. Earlier versions
+# answer with a Python `int`, which the rest of an expression promotes by other rules than it does an
+# `intp`, so the element type worked out for what follows could be wrong: there that call is made at once.
+COUNT_IS_A_NUMPY_SCALAR = isinstance(np.count_nonzero(np.zeros(1)), np.generic)
 # Reductions that answer with a position. They take one axis or none, never several.
-POSITIONS = frozenset({np.argmax, np.argmin})
+# `np.nanargmax` and `np.nanargmin` raise for a slice that is all NaN, which depends on
+# the values: that error comes when the graph is computed, with a note naming the line.
+POSITIONS = frozenset({np.argmax, np.argmin, np.nanargmax, np.nanargmin})
 # The only keywords a deferred reduction may carry.
 REDUCTION_KEYWORDS = frozenset({"axis", "keepdims"})
 # Functions NumPy answers with a view of their first argument.
@@ -226,6 +235,9 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
         return REDUCTION if _is_plain_reduction(args, kwargs) else None
     if operation in POSITIONS:
         return REDUCTION if _is_plain_reduction(args, kwargs) and _names_one_axis(args, kwargs) else None
+    if operation is np.count_nonzero:
+        counted = COUNT_IS_A_NUMPY_SCALAR or not _reduces_everything(args, kwargs)
+        return REDUCTION if counted and _is_plain_reduction(args, kwargs) else None
     if operation is operator.getitem:
         if len(args) != 2 or not isinstance(args[0], Node):
             return None
@@ -278,6 +290,20 @@ def _names_one_axis(args: tuple, kwargs: dict) -> bool:
     """
     axis = args[1] if len(args) > 1 else kwargs.get("axis")
     return axis is None or (isinstance(axis, (int, np.integer)) and not isinstance(axis, bool))
+
+
+def _reduces_everything(args: tuple, kwargs: dict) -> bool:
+    """Say whether a reduction is written so that NumPy answers with one number, not an array.
+
+    Args:
+        args: The operand, and the axis when it was given by position.
+        kwargs: Keyword arguments as written.
+
+    Returns:
+        True with no axis, or `None` for it, and no `keepdims`.
+    """
+    axis = args[1] if len(args) > 1 else kwargs.get("axis")
+    return axis is None and not kwargs.get("keepdims", False)
 
 
 def _holds_for_any_length(kind: str, operation: Callable[..., Any], args: tuple, kwargs: dict) -> bool:

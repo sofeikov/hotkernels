@@ -3,7 +3,7 @@
 It is here for the recording mode. `regression.fit` never needs a value, so
 it leaves one graph. This one gathers its loss every few steps, and each
 gather is a graph of its own, alike from one to the next; and it ends with
-`np.nanargmax`, a call outside the deferred set, which is made at once and so
+`np.median`, a call outside the deferred set, which is made at once and so
 cuts the graph a second way.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ LEARNING_RATE = 0.05
 REPORT_EVERY = 5
 
 
-def fit(np: Any, features: Any, targets: Any, steps: int) -> tuple[Any, list[float], int]:
+def fit(np: Any, features: Any, targets: Any, steps: int) -> tuple[Any, list[float], float]:
     """Fit a linear regression by gradient descent, reporting the loss as it goes.
 
     Args:
@@ -27,8 +27,7 @@ def fit(np: Any, features: Any, targets: Any, steps: int) -> tuple[Any, list[flo
 
     Returns:
         (the coefficients as an `ndarray`, the loss at every REPORT_EVERY-th
-        step, the index of the example with the largest residual at the last
-        step).
+        step, the median size of a residual at the last step).
     """
     X, y = np.asarray(features), np.asarray(targets)
     X = (X - X.mean(axis=0)) / X.std(axis=0)
@@ -40,5 +39,5 @@ def fit(np: Any, features: Any, targets: Any, steps: int) -> tuple[Any, list[flo
         w = w - LEARNING_RATE * (2 / len(y)) * (X.T @ residual)
         if step % REPORT_EVERY == 0:
             history.append(float(loss.gather()))
-    worst = np.nanargmax(np.abs(residual))
-    return w.gather(), history, int(worst.gather())
+    typical = np.median(np.abs(residual))
+    return w.gather(), history, float(typical.gather())
