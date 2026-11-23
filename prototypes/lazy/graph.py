@@ -183,7 +183,7 @@ class Node:
     # The exception computing this node raised, or inherited from an operand.
     failure: BaseException | None = None
     # For a deferred operation, its kind as `rules` names it: "elementwise",
-    # "matmul", "reduction" or "view". For a leaf, AT_ONCE when it is the
+    # "matmul", "reduction", "view", "indexing", "nonzero" or "write". For a leaf, AT_ONCE when it is the
     # result of a call made at once, and empty for an array from outside.
     kind: str = ""
     # True for an array that refuses to give its values without `gather()`:
@@ -318,8 +318,11 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
 def unknown_length(mask: Node) -> int:
     """Return the stand-in for the number of elements a pending mask selects.
 
+    The same stand-in serves for how many elements of any node are not zero
+    (`np.flatnonzero(a)`), which for a mask is the number it selects.
+
     Args:
-        mask: The node of a boolean array.
+        mask: The node of a boolean array, or of any array whose elements that are not zero are counted.
 
     Returns:
         An integer at or above UNKNOWN_FLOOR: the same one each time for the
