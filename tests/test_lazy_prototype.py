@@ -528,6 +528,57 @@ def test_dot_and_copy_are_deferred():
     assert str(raised(lambda: numpy.dot(x, x))) == str(raised(lambda: numpy.dot(data, data)))
 
 
+def test_rounding_is_deferred():
+    """np.round, np.around and x.round() join the graph element by element, and with out= they are a write."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6)) * 100
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    single, whole = lazy.asarray(data.astype(numpy.float32)) * 2, lazy.arange(24).reshape(4, 6) * 7
+    plain_single, plain_whole = data.astype(numpy.float32) * 2, numpy.arange(24).reshape(4, 6) * 7
+    graph.COUNTS.reset()
+    cases = {
+        "np.round": (numpy.round(x), numpy.round(plain)),
+        "decimals by position": (numpy.round(x * 0.37, 2), numpy.round(plain * 0.37, 2)),
+        "decimals by keyword": (numpy.round(x, decimals=1), numpy.round(plain, decimals=1)),
+        "np.around, to tens": (numpy.around(x, -1), numpy.around(plain, -1)),
+        "method": (x.round(), plain.round()), "method with decimals": (x.round(3), plain.round(3)),
+        "method, a NumPy integer by keyword": (x.round(decimals=numpy.int64(1)), plain.round(decimals=numpy.int64(1))),
+        "float32": (numpy.round(single, 2), numpy.round(plain_single, 2)), "integers": (whole.round(-1), plain_whole.round(-1)),
+        "a number": (numpy.round(x.sum(), 2), numpy.round(plain.sum(), 2)),
+        "through the stand-in": (lazy.round(x / 3, 2), numpy.round(plain / 3, 2)),
+        "what a mask selects": (numpy.round(x[x[:, 0] > 0], 1).sum(axis=0), numpy.round(plain[plain[:, 0] > 0], 1).sum(axis=0)),
+        "read from afterwards": (numpy.round(x @ x.T, 2)[:, :2] + 1, numpy.round(plain @ plain.T, 2)[:, :2] + 1),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    # The call is kept as it was written, for whatever looks at how it is spelled.
+    assert numpy.round(x, 2)._node.args[1:] == (2,) and x.round(decimals=1)._node.kwargs == {"decimals": 1}
+    for wrong in (lambda a: numpy.round(a, 1.5), lambda a: numpy.round(a, 1, decimals=2), lambda a: a.round(1, None, 3)):
+        error, expected = raised(lambda: wrong(x)), raised(lambda: wrong(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    def program(np, start):
+        """Round into the array that is read, into another, and through a view."""
+        a = np.array(start)
+        b, c = a * 3, a / 7
+        np.round(b, 1, out=b)
+        np.around(a / 7, 2, out=a)
+        np.round(c[1], out=c[1])
+        return a, b, c
+
+    graph.COUNTS.reset()
+    written = program(lazy, data)
+    assert all(each._node.pending for each in written) and graph.COUNTS.at_once == {}
+    for name, expected, got in zip(("a", "b", "c"), program(numpy, data), written, strict=True):
+        assert same(expected, got.gather()), name
+    into, plain_into = lazy.arange(6), numpy.arange(6)
+    assert str(raised(lambda: numpy.round(x[0], 1, out=into))) == str(raised(lambda: numpy.round(plain[0], 1, out=plain_into)))
+    assert same(plain_into, into.gather())
+
+
 def test_an_array_like_another_needs_no_value():
     """zeros_like, ones_like and full_like use the shape and type of a lazy array and do not compute it."""
     pending = lazy.arange(6.0).reshape(2, 3) * 2
@@ -773,6 +824,39 @@ def test_positions_and_ravel_are_deferred():
         assert same(expected, got.gather()), name
 
 
+def test_positions_that_skip_nan_are_deferred():
+    """np.nanargmax and np.nanargmin join the graph as np.argmax does; a slice that is all NaN raises when it is computed."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    data[1, 2] = data[4, 0] = numpy.nan
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "nanargmax": (numpy.nanargmax(x), numpy.nanargmax(plain)),
+        "nanargmin along an axis": (numpy.nanargmin(x, axis=1), numpy.nanargmin(plain, axis=1)),
+        "an axis by position": (numpy.nanargmax(x, 0), numpy.nanargmax(plain, 0)),
+        "keepdims": (numpy.nanargmin(x, axis=0, keepdims=True), numpy.nanargmin(plain, axis=0, keepdims=True)),
+        "through the stand-in": (lazy.nanargmax(x * 2), numpy.nanargmax(plain * 2)),
+        "a selection by pending positions": (numpy.nanargmax(x[lazy.arange(3) * 2, 0]), numpy.nanargmax(plain[numpy.arange(3) * 2, 0])),
+        "what a mask selects": (numpy.nanargmin(x[x[:, 1] > 0], axis=0), numpy.nanargmin(plain[plain[:, 1] > 0], axis=0)),
+        "a row it names": (x[numpy.nanargmax(x[:, 0])], plain[numpy.nanargmax(plain[:, 0])]),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.nanargmax(x, axis=(0, 1)))) == str(raised(lambda: numpy.nanargmax(plain, axis=(0, 1))))
+    assert str(raised(lambda: numpy.nanargmin(x, axis=2))) == str(raised(lambda: numpy.nanargmin(plain, axis=2)))
+
+    blank = numpy.full((2, 3), numpy.nan)
+    late = numpy.nanargmax(lazy.asarray(blank) + 0, axis=1)
+    assert late._node.pending
+    error, expected = raised(late.gather), raised(lambda: numpy.nanargmax(blank, axis=1))
+    assert type(error) is type(expected) is ValueError and str(error) == str(expected)
+    assert "'nanargmax'" in error.__notes__[0] and "test_lazy_prototype.py" in error.__notes__[0]
+
+
 def test_the_stand_in_answers_like_the_module():
     """Arrays made through the stand-in are lazy; types, constants, submodules and ufunc methods are NumPy's."""
     assert type(lazy.zeros(3)) is LazyArray and type(lazy.array([1, 2, 3])) is LazyArray
@@ -866,12 +950,194 @@ def test_a_reduction_is_called_as_it_was_written():
         "function, bare": (numpy.sum(x), numpy.sum(data), (), {}),
         "function, axis by position": (numpy.max(x, 1), numpy.max(data, 1), (1,), {}),
         "function, keywords": (numpy.std(x, axis=0), numpy.std(data, axis=0), (), {"axis": 0}),
+        "function, two axes by position": (numpy.sum(x, (0, 1)), numpy.sum(data, (0, 1)), ((0, 1),), {}),
     }
     for name, (got, expected, args, kwargs) in cases.items():
         assert got._node.pending and got._node.args[1:] == args and got._node.kwargs == kwargs, name
         assert got.shape == numpy.shape(expected) and same(expected, got.gather()), name
     assert type(raised(lambda: x.sum(0, axis=0))) is type(raised(lambda: data.sum(0, axis=0)))
     assert str(raised(lambda: x.sum(axis=2))) == str(raised(lambda: data.sum(axis=2)))
+
+
+def test_count_nonzero_is_a_reduction(monkeypatch):
+    """np.count_nonzero joins the graph of the masks it counts, with axes and keepdims, and its errors are NumPy's."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "two masks": (numpy.count_nonzero((x[:, 0] > 0) & ~(x[:, 1] > 0)), numpy.count_nonzero((plain[:, 0] > 0) & ~(plain[:, 1] > 0))),
+        "numbers": (numpy.count_nonzero(numpy.trunc(x)), numpy.count_nonzero(numpy.trunc(plain))),
+        "along an axis": (numpy.count_nonzero(x > 0, axis=0), numpy.count_nonzero(plain > 0, axis=0)),
+        "an axis by position": (numpy.count_nonzero(x > 0, 1), numpy.count_nonzero(plain > 0, 1)),
+        "two axes": (numpy.count_nonzero(x > 0, axis=(0, 1)), numpy.count_nonzero(plain > 0, axis=(0, 1))),
+        "keepdims": (numpy.count_nonzero(x > 0, axis=1, keepdims=True), numpy.count_nonzero(plain > 0, axis=1, keepdims=True)),
+        "through the stand-in": (lazy.count_nonzero(x < 0), numpy.count_nonzero(plain < 0)),
+        "what a mask selects": (numpy.count_nonzero(x[x[:, 0] > 0] > 0.5, axis=0), numpy.count_nonzero(plain[plain[:, 0] > 0] > 0.5, axis=0)),
+        "in arithmetic": (x.sum() / numpy.count_nonzero(x > 0), plain.sum() / numpy.count_nonzero(plain > 0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.count_nonzero(x, axis=2))) == str(raised(lambda: numpy.count_nonzero(plain, axis=2)))
+    # A NumPy that answers a count without an axis with a Python int: that call is made at once, the others are not.
+    monkeypatch.setattr(rules, "COUNT_IS_A_NUMPY_SCALAR", False)
+    whole, along = numpy.count_nonzero(x > 0), numpy.count_nonzero(x > 0, axis=0)
+    assert not whole._node.pending and along._node.pending and graph.COUNTS.at_once == {"np.count_nonzero": 1}
+    assert same(numpy.count_nonzero(plain > 0), whole.gather())
+
+
+def test_any_and_all_are_reductions():
+    """any and all join the graph, as functions and as methods; a truth test of one is a value needed, not a call made at once."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "any": (numpy.any(x > 1), numpy.any(plain > 1)), "all": (numpy.all(x > -9), numpy.all(plain > -9)),
+        "methods": ((x > 1).any() | (x > 0).all(), (plain > 1).any() | (plain > 0).all()),
+        "along an axis": (numpy.any(x > 1, axis=1), numpy.any(plain > 1, axis=1)),
+        "an axis by position": ((x > 0).all(0), (plain > 0).all(0)),
+        "two axes and keepdims": (numpy.all(x > 0, axis=(0, 1), keepdims=True), numpy.all(plain > 0, axis=(0, 1), keepdims=True)),
+        "numbers": (numpy.trunc(x).any(axis=0), numpy.trunc(plain).any(axis=0)),
+        "a condition of np.where": (numpy.where((x > 1).any(axis=1), x[:, 0], x[:, 1]), numpy.where((plain > 1).any(axis=1), plain[:, 0], plain[:, 1])),
+        "beside another mask": ((x > 0).all(axis=0) & (x[0] > 0), (plain > 0).all(axis=0) & (plain[0] > 0)),
+        "what a mask selects": (x[x[:, 0] > 0].any(axis=0), plain[plain[:, 0] > 0].any(axis=0)),
+        "a mask that selects nothing": ((x[x[:, 0] > 99] > 0).all(), (plain[plain[:, 0] > 99] > 0).all()),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert str(raised(lambda: numpy.any(x, axis=2))) == str(raised(lambda: numpy.any(plain, axis=2)))
+    assert str(raised(lambda: x.all(axis=2))) == str(raised(lambda: plain.all(axis=2)))
+    limited = numpy.any(x > 1, where=x > 0)
+    assert not limited._node.pending and same(numpy.any(plain > 1, where=plain > 0), limited.gather())
+
+    graph.COUNTS.reset()
+    found = (x > 1).any()
+    assert found._node.pending and bool(found) is bool((plain > 1).any()) and (not (x > 0).all()) is (not (plain > 0).all())
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {"A truth test (if, while, and, or, not)": 2}
+    hard = strict.asarray(data) + 0
+    assert isinstance(raised(lambda: bool((hard > 0).all())), NotGathered) and same((plain > 0).all(), (hard > 0).all().gather())
+
+
+def test_a_cast_is_deferred():
+    """x.astype(t) and np.astype(x, t) join the graph; a cast that may give the array itself is made at once."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 6)) * 10
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+    graph.COUNTS.reset()
+    cases = {
+        "to float32": (x.astype(numpy.float32), plain.astype(numpy.float32)),
+        "to integers, by name": ((x * 3).astype("int32"), (plain * 3).astype("int32")),
+        "to booleans": (numpy.trunc(x / 5).astype(bool), numpy.trunc(plain / 5).astype(bool)),
+        "to its own type": (x.astype(float), plain.astype(float)),
+        "the type by keyword": (x.astype(dtype=numpy.int64), plain.astype(dtype=numpy.int64)),
+        "copy=False to another type": (x.astype(numpy.float32, copy=False), plain.astype(numpy.float32, copy=False)),
+        "defaults spelled out": (x.astype(numpy.int16, casting="unsafe", order="K"), plain.astype(numpy.int16, casting="unsafe", order="K")),
+        "np.astype": (numpy.astype(x, numpy.float32), numpy.astype(plain, numpy.float32)),
+        "at the end of an expression": (numpy.exp(-x * numpy.log(2) / 3).astype(numpy.float64), numpy.exp(-plain * numpy.log(2) / 3).astype(numpy.float64)),
+        "a mask read on": (~(x > 0).astype(bool) & (x < 5), ~(plain > 0).astype(bool) & (plain < 5)),
+        "a number": (x.sum().astype(numpy.float32), plain.sum().astype(numpy.float32)),
+        "what a mask selects": (x[x[:, 0] > 0].astype(numpy.float32).sum(axis=0), plain[plain[:, 0] > 0].astype(numpy.float32).sum(axis=0)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert x.astype(numpy.float32, copy=False)._node.kwargs == {"copy": False}
+    assert x.astype(float).gather() is not x.gather()
+
+    graph.COUNTS.reset()
+    at_once = {
+        "copy=False to its own type": (x.astype(float, copy=False), plain.astype(float, copy=False)),
+        "another casting": (x.astype(numpy.float32, casting="same_kind"), plain.astype(numpy.float32, casting="same_kind")),
+        "another order": (x.astype(numpy.float32, order="F"), plain.astype(numpy.float32, order="F")),
+        "to strings": (x.astype(str), plain.astype(str)),
+        "np.astype of a number": (numpy.astype((x * 2).sum(), numpy.float32), (plain * 2).sum().astype(numpy.float32)),
+    }
+    for name, (got, expected) in at_once.items():
+        assert not got._node.pending and same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {"ndarray.astype": 4, "np.astype": 1}
+    assert at_once["copy=False to its own type"][0].gather() is x.gather()
+    for wrong in (lambda a: a.astype("nope"), lambda a: a.astype(numpy.int32, casting="safe"), lambda a: a.astype(float, dtype=int)):
+        error, expected = raised(lambda: wrong(x)), raised(lambda: wrong(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    line = sys._getframe().f_lineno + 1
+    real = (x * 1j).astype(float)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        real.gather()
+    with warnings.catch_warnings(record=True) as expected:
+        warnings.simplefilter("always")
+        (plain * 1j).astype(float)
+    assert [str(w.message) for w in caught] == [str(w.message) for w in expected] and len(caught) == 1
+    assert caught[0].filename == __file__ and caught[0].lineno == line and caught[0].category is expected[0].category
+
+
+def test_partition_is_deferred():
+    """np.partition joins the graph as a new array of its operand's shape and type; a kth that does not fit is NumPy's error on the line."""
+    data = numpy.random.default_rng(SEED).standard_normal((7, 5))
+    x = lazy.asarray(data) + 0
+    plain = data + 0
+
+    def gap(np, scores):
+        """Mean gap between the best and the second best of each column."""
+        top = np.partition(scores, -2, axis=0)[-2:]
+        return (top[1] - top[0]).mean()
+
+    graph.COUNTS.reset()
+    cases = {
+        "the last axis": (numpy.partition(x, 2), numpy.partition(plain, 2)),
+        "an axis by keyword": (numpy.partition(x, -2, axis=0), numpy.partition(plain, -2, axis=0)),
+        "an axis by position": (numpy.partition(x, 3, 0), numpy.partition(plain, 3, 0)),
+        "several positions": (numpy.partition(x, (1, 3)), numpy.partition(plain, (1, 3))),
+        "kth by keyword": (numpy.partition(x, kth=1, axis=1), numpy.partition(plain, kth=1, axis=1)),
+        "no axis": (numpy.partition(x, 10, axis=None), numpy.partition(plain, 10, axis=None)),
+        "defaults spelled out": (numpy.partition(x, 2, kind="introselect", order=None), numpy.partition(plain, 2, kind="introselect", order=None)),
+        "integers": (numpy.partition(lazy.arange(35).reshape(7, 5) * 7 % 11, 2), numpy.partition(numpy.arange(35).reshape(7, 5) * 7 % 11, 2)),
+        "through the stand-in": (lazy.partition(x * 2, 1), numpy.partition(plain * 2, 1)),
+        "the two best of each column": (numpy.partition(x, -2, axis=0)[-2:], numpy.partition(plain, -2, axis=0)[-2:]),
+        "the gap between them": (gap(lazy, x), gap(numpy, plain)),
+    }
+    for name, (got, expected) in cases.items():
+        assert got._node.pending and got.shape == numpy.shape(expected) and got.dtype == expected.dtype, name
+    assert numpy.partition(x, 2)._node.kind == rules.ORDERING
+    for name, (got, expected) in cases.items():
+        assert same(expected, got.gather()), name
+    assert graph.COUNTS.at_once == {} and graph.COUNTS.needed == {}
+    wrong = (lambda a: numpy.partition(a, 5), lambda a: numpy.partition(a, 1, axis=2), lambda a: numpy.partition(a, 1.5),
+             lambda a: numpy.partition(a.sum(), 0), lambda a: numpy.partition(a), lambda a: numpy.partition(a, 1, kth=2),
+             lambda a: numpy.partition(a, [1, 9]), lambda a: numpy.partition(a, 1, kind="quick"))
+    for call in wrong:
+        error, expected = raised(lambda: call(x)), raised(lambda: call(plain))
+        assert type(error) is type(expected) and str(error) == str(expected)
+
+    def program(np, start):
+        """Partition into a new array and write into it and into the operand; then partition the operand in place."""
+        a = np.array(start)
+        parted = np.partition(a, 2)
+        parted[0] = 0.0
+        a += 1.0
+        deferred = graph.COUNTS.at_once == {}
+        a.partition(1)
+        return a, parted, deferred
+
+    graph.COUNTS.reset()
+    a, parted, deferred = program(lazy, data)
+    assert deferred and graph.COUNTS.at_once == {"ndarray.partition": 1}
+    expected = program(numpy, data)
+    assert same(expected[0], a.gather()) and same(expected[1], parted.gather())
+    at_once = {"what a mask selects": (numpy.partition(x[x[:, 0] > -9], 1), numpy.partition(plain, 1)),
+               "a kth to be computed": (numpy.partition(x, lazy.arange(3)[1]), numpy.partition(plain, 1))}
+    for name, (got, expected) in at_once.items():
+        assert not got._node.pending and same(expected, got.gather()), name
 
 
 def kernel_calls(hotkernels) -> dict[str, int]:

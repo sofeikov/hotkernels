@@ -43,8 +43,8 @@ WRITING_METHODS = frozenset({"sort", "fill", "put", "partition", "resize", "item
 WRITING_UFUNC_METHOD = "at"
 
 
-# In-place ufunc calls and `np.clip` take `out=`; these functions are deferred as writes when they do.
-OUT_FUNCTIONS = frozenset({np.clip})
+# In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
+OUT_FUNCTIONS = frozenset({np.clip, np.round, np.around})
 
 
 @dataclass(eq=False)
@@ -1290,8 +1290,12 @@ class LazyArray:
     prod = _reduction(np.prod, "prod")
     var = _reduction(np.var, "var")
     std = _reduction(np.std, "std")
+    any = _reduction(np.any, "any")
+    all = _reduction(np.all, "all")
     argmax = _reduction(np.argmax, "argmax")
     argmin = _reduction(np.argmin, "argmin")
+    round = _reduction(np.round, "round")
+    astype = _reduction(np.ndarray.astype, "astype")
 
     def nonzero(self) -> "tuple[LazyArray, ...]":
         """Give the positions of the elements that are not zero, deferred.

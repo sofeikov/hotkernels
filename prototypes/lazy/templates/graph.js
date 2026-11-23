@@ -153,8 +153,8 @@
   function categoryOf(node) {
     if (node.kind === 'earlier') return 'earlier';
     if (node.kind === 'input') return node.category === 'at once' ? 'atonce' : 'input';
-    // A selection by arrays is drawn as a view is, and so are the positions of what is not zero.
-    return ['indexing', 'nonzero'].includes(node.category) ? 'view' : node.category || 'elementwise';
+    // A selection by arrays is drawn as a view is, and so are a partition and the positions of what is not zero.
+    return ['indexing', 'ordering', 'nonzero'].includes(node.category) ? 'view' : node.category || 'elementwise';
   }
 
   // ---- The model: the graph's JSON with the lookups the script needs.
