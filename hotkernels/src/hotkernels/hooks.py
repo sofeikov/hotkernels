@@ -224,6 +224,12 @@ def describe(value: object) -> tuple:
     element; anything else is its type and its repr, so the Python int 1
     differs from np.intp(1), and the Python float 0.0 from -0.0.
 
+    Unlike `delivery check`, it compares every byte of a long double: no
+    probe makes one. On x86-64 a long double is an 80-bit value in 16 bytes
+    whose 6 bytes of padding NumPy leaves as they were, so a probe that made
+    one would need to compare only its first 10 bytes, as
+    delivery/check.py's `_value_bytes` does.
+
     Args:
         value: What a probe's calls gave.
 
