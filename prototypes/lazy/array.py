@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 10
+CORE_VERSION = 11
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -814,6 +814,27 @@ class _Select:
         """
         parts = tuple(found[part.place] if isinstance(part, _Slot) else part for part in self.template)
         return base[parts if self.whole else parts[0]]
+
+
+@dataclass(eq=False, slots=True)
+class _AssignThrough:
+    """Makes `view[index] = assigned` for an index that held pending arrays: what `_Write` performs for such an assignment."""
+
+    # The index's items, with a `_Slot` where a pending array's value goes.
+    template: tuple
+    # True when the index was written as a tuple, False for one item.
+    whole: bool
+
+    def __call__(self, view: np.ndarray, assigned: Any, *found: Any) -> None:
+        """Assign into the part of the copy the target is a view of, through the computed index.
+
+        Args:
+            view: That part.
+            assigned: The value assigned.
+            *found: The values of the index's pending arrays, in the order of their slots.
+        """
+        parts = tuple(found[part.place] if isinstance(part, _Slot) else part for part in self.template)
+        view[parts if self.whole else parts[0]] = assigned
 
 
 def _is_number(node: Node) -> bool:
@@ -1749,13 +1770,8 @@ class LazyArray:
                     if len(_assignable) >= FIT_MEMORY_LIMIT:
                         _assignable.clear()
                     _assignable.add(key)
-                fill = parts[0]
-
-                def assign(view: np.ndarray, assigned: Any, *found: Any) -> None:
-                    """Assign into the part of the copy the target is a view of, through the computed index."""
-                    view[fill(found)] = assigned
-
-                _defer_write(self, "setitem", assign, (value, *parts[1]))
+                assign = _AssignThrough(tuple(parts[2]), isinstance(index, tuple))
+                _defer_write(self, "setitem", assign, (value, *parts[1]), sys._getframe(1))
                 return
         _write(operator.setitem, "x[index] = v", (self, index, value), {}, (self,))
 
@@ -1912,7 +1928,8 @@ def _set_up(core: Any) -> None:
                admissible=rules._admissible_specs, caller=graph.caller, errstate=graph.errstate, view_kind=rules.VIEW,
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
                getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
-               slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, fitting=_fitting,
+               slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, AssignThrough=_AssignThrough,
+               assignable=_assignable, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
 
 

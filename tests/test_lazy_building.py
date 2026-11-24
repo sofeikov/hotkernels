@@ -696,6 +696,29 @@ def test_a_selection_is_strict_if_its_index_or_its_array_is():
     assert neither.gather().tobytes() == data[data[:, 0] > 3].tobytes()
 
 
+def test_an_assignment_through_pending_indices_is_remembered_by_what_decides_it():
+    """`x[rows, columns] = v` and `x[mask] = y[mask]` are deferred each time alike, and a value selected by another mask is not."""
+    data = numpy.arange(24.0).reshape(6, 4)
+    for _ in range(3):
+        x, plain = lazy.zeros((6, 4)), numpy.zeros((6, 4))
+        x += 1.0
+        plain += 1.0
+        source = lazy.asarray(data) + 0
+        # Two pending arrays of positions in one index: each goes to its own place.
+        # (In a row the masks below leave alone, so that the assignment shows in the result.)
+        x[numpy.argmax(source, axis=1) % 2, numpy.argmin(source, axis=1)] = 5.0
+        plain[numpy.argmax(data, axis=1) % 2, numpy.argmin(data, axis=1)] = 5.0
+        # What one mask selects, assigned through the same mask: as many elements as it selects, whatever that is.
+        first, other = source[:, 0] > 7, source[:, 1] > 5
+        x[first] = source[first] * 2
+        plain[data[:, 0] > 7] = data[data[:, 0] > 7] * 2
+        assert x._node.pending
+        # Through another mask's selection it fits only if the two select as many: NumPy decides, at once.
+        x[first] = source[other] * 3
+        plain[data[:, 0] > 7] = data[data[:, 1] > 5] * 3
+        assert not x._node.pending and plain.tobytes() == x.gather().tobytes()
+
+
 class Heard:
     """Hears what the layer does and writes it down in a form two runs of one program can be compared in."""
 
