@@ -1,4 +1,9 @@
-"""Boolean mask selection: `x[mask]` for 16-bit data (int16 and uint16 by their bits)."""
+"""Boolean mask selection: `x[mask]` for 16-bit data (int16 and uint16 by their bits).
+
+Every mask byte is 0 or 1. NumPy takes any non-zero byte of a boolean array
+as True; a caller that may hold other bytes checks for them before the call,
+and the binding sends such a mask to NumPy.
+"""
 import numpy as np
 
 from judge.spec import USED_RETURN, In, Kernel, Out, Size
