@@ -7,8 +7,9 @@ a gather, so the time is the building alone: the operators, the rules that
 give each node its shape and element type, the node. It does not depend on
 the size of the arrays, which are never read. Beside it is the time NumPy
 takes to compute the same program on the arrays used here, which are small,
-for a sense of scale: on arrays this small, computing is quicker than
-writing down. A second table times single operations, each made and dropped.
+for a sense of scale. A second table times single operations, each made and
+dropped. Nodes are written by the layer's C core where it is built
+(`python -m prototypes.lazy.build_core`), and by Python with `--no-core`.
 
 Timings are only meaningful on a machine that is doing nothing else.
 """
@@ -25,7 +26,7 @@ import numpy
 import typer
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from prototypes.lazy import get_lazy, graph
+from prototypes.lazy import array, get_lazy, graph
 from prototypes.lazy.programs import attention, regression
 
 log = logging.getLogger(__name__)
@@ -273,17 +274,22 @@ def render(program_rows: list[ProgramTime], operation_rows: list[OperationTime],
     """
     environment = Environment(loader=FileSystemLoader(TEMPLATES), undefined=StrictUndefined, trim_blocks=True, lstrip_blocks=True)
     return environment.get_template(TABLE_TEMPLATE).render(programs=program_rows, operations=operation_rows, runs=runs,
-                                                           examples=EXAMPLES, features=FEATURES, tokens=TOKENS, width=WIDTH).strip("\n")
+                                                           examples=EXAMPLES, features=FEATURES, tokens=TOKENS, width=WIDTH,
+                                                           core=array.core_in_use()).strip("\n")
 
 
 @app.command()
-def main(runs: int = typer.Option(9, help="How many times each timing is taken; the quickest counts.")) -> None:
+def main(runs: int = typer.Option(9, help="How many times each timing is taken; the quickest counts."),
+         core: bool = typer.Option(True, help="Write nodes with the C core if it is built; --no-core for Python alone.")) -> None:
     """Time the building of the example programs' graphs and of single operations, and print both tables.
 
     Args:
         runs: How many times each timing is taken; the quickest counts.
+        core: Whether the C core writes the nodes, where it is built. Without it, or with False, Python does.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if not core:
+        array.use_core(None)
     log.info("%s", render(programs(runs), operations(runs), runs))
 
 
