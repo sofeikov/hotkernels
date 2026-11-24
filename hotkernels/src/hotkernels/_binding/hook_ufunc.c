@@ -462,10 +462,42 @@ done:
 
 // ---------------------------------------------------------------- the lane
 
+// On x86-64, the x87 status word's flags for invalid (0x01), divide by zero
+// (0x04), overflow (0x08) and underflow (0x10): the same bits as MXCSR's.
+#define LANE_X87_REPORTED 0x1d
+
+// The x87 status word. NumPy's loops compute in SSE and AVX, but where a
+// loop finds an error itself (an integer that overflows or divides by zero,
+// a float32 exp whose vector code detects overflow) it raises the flag with
+// the C library's feraiseexcept, and glibc on x86-64 raises overflow and
+// underflow by setting them in the x87 status word, not in MXCSR (invalid
+// and divide by zero it raises with an SSE division). NumPy's fetestexcept
+// reads both registers; so must the lane.
+#if defined(__x86_64__)
+static inline unsigned int lane_x87_status(void) {
+    unsigned short status;
+    __asm__ volatile("fnstsw %0" : "=m"(status) : : "memory");
+    return status;
+}
+#endif
+
+// Clear the floating-point flags NumPy reports, in every register NumPy's
+// loops may raise them in: as NumPy does before calling a loop, so a flag an
+// earlier call left in the x87 status word is not reported for this one.
+// Each register is written only when one of the flags is set.
+static inline void lane_clear_float_errors(void) {
+    hk_clear_reported_float_flags();
+#if defined(__x86_64__)
+    // fnclex clears every x87 exception flag, the precision flag among them,
+    // which NumPy does not report.
+    if (lane_x87_status() & LANE_X87_REPORTED) __asm__ volatile("fnclex" : : : "memory");
+#endif
+}
+
 // The floating-point exceptions NumPy reports that are raised now, as NumPy's
-// NPY_FPE_* bits, read from the status register directly (see
-// hk_clear_float_flags for why not the C library). The flags are left as
-// they are.
+// NPY_FPE_* bits, read from the status registers directly (see
+// hk_clear_float_flags for why not the C library; on x86-64 that is MXCSR and
+// the x87 status word, see lane_x87_status). The flags are left as they are.
 static inline int lane_float_errors(void) {
 #if defined(__aarch64__)
     uint64_t fpsr;
@@ -475,9 +507,9 @@ static inline int lane_float_errors(void) {
     return ((fpsr & 0x1) ? NPY_FPE_INVALID : 0) | ((fpsr & 0x2) ? NPY_FPE_DIVIDEBYZERO : 0) |
            ((fpsr & 0x4) ? NPY_FPE_OVERFLOW : 0) | ((fpsr & 0x8) ? NPY_FPE_UNDERFLOW : 0);
 #elif defined(__x86_64__)
-    const unsigned int csr = _mm_getcsr();
-    // MXCSR: IE (invalid) bit 0, ZE (divide by zero) bit 2, OE (overflow)
-    // bit 3, UE (underflow) bit 4.
+    const unsigned int csr = _mm_getcsr() | (lane_x87_status() & LANE_X87_REPORTED);
+    // MXCSR and the x87 status word alike: IE (invalid) bit 0, ZE (divide by
+    // zero) bit 2, OE (overflow) bit 3, UE (underflow) bit 4.
     return ((csr & 0x01) ? NPY_FPE_INVALID : 0) | ((csr & 0x04) ? NPY_FPE_DIVIDEBYZERO : 0) |
            ((csr & 0x08) ? NPY_FPE_OVERFLOW : 0) | ((csr & 0x10) ? NPY_FPE_UNDERFLOW : 0);
 #else
@@ -650,7 +682,7 @@ static PyObject *call_lane(HK_VECTORCALL_PARAMETERS) {
     lane_call_info *info = entry->info;
     PyObject *capsule = Py_NewRef(entry->capsule);
     const bool test_flags = !info->no_floatingpoint_errors;
-    if (test_flags) hk_clear_reported_float_flags();
+    if (test_flags) lane_clear_float_errors();
     npy_intp count = total;
     PyThreadState *released = total > LANE_THREADS_ELEMENTS ? PyEval_SaveThread() : NULL;
     const int status = info->strided_loop(info->context, data, &count, strides, info->auxdata);
@@ -668,7 +700,7 @@ static PyObject *call_lane(HK_VECTORCALL_PARAMETERS) {
     if (test_flags) {
         const int raised = lane_float_errors();
         if (raised != 0) {
-            hk_clear_reported_float_flags();
+            lane_clear_float_errors();
             // NumPy's own handler: warns, raises, calls or ignores as
             // np.errstate says, with the ufunc's name in the message.
             if (PyUFunc_GiveFloatingpointErrors(ufunc->name ? ufunc->name : "<unnamed>", raised) < 0) {
