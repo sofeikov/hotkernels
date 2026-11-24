@@ -17,7 +17,7 @@
 // Attributes:
 //   data-view  "loop" (default) or "table": the view the figure opens on
 
-import { h, s, seg, button, stat, rng, reducedMotion } from "./util.js";
+import { h, s, seg, button, stat, rng } from "./util.js";
 
 const VALUES = [3.1, 0.7, 5.2, 1.4, 9.0, 2.6, 7.3, 4.8];
 const N = VALUES.length;
@@ -142,7 +142,7 @@ export default async function mount(el) {
     }
     first.set(`${state.pos} of ${N}`);
     kept.set(done ? String(k) : "–");
-    stepButton.disabled = playButton.disabled = done;
+    stepButton.disabled = done;
     if (done) stop();
   }
 
@@ -188,9 +188,12 @@ export default async function mount(el) {
 
   const step = () => { state.pos += 1; render(); };
   const stepButton = button("Step", () => { stop(); step(); });
+  // Play steps through on a timer whatever the reduced-motion setting: each
+  // step is a redraw, not a movement, and the reader asked for it. From the
+  // last step it starts again from the first.
   const playButton = button("Play", () => {
     if (timer) return stop();
-    if (reducedMotion) { state.pos = N; return render(); }
+    if (state.pos === N) { state.pos = 0; render(); }
     playButton.textContent = "Pause";
     timer = setInterval(step, STEP_MS);
   }, "primary");

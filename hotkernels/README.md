@@ -41,7 +41,7 @@ hotkernels.uninstall()          # NumPy is exactly as it was
 
 - `hotkernels.install(inexact=True)` also installs `np.cumsum` on `float32` and `float64`, which are within a declared tolerance of NumPy rather than bit-identical.
 - `hotkernels.install(bottleneck=False)` leaves bottleneck's functions alone.
-- `with hotkernels.enabled():` installs for the duration of a block.
+- `with hotkernels.enabled():` installs for the duration of a block, and puts hotkernels back as it found it when the block ends; it takes the same arguments as `install()`.
 
 ## Without changing your code
 

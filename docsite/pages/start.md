@@ -60,10 +60,12 @@ That is the whole interface:
 | `hotkernels.install(inexact=True)` | Also installs the two that do not: `np.cumsum` on float32 and float64 |
 | `hotkernels.install(bottleneck=False)` | Leaves bottleneck's functions alone: see [What gets faster](#what-gets-faster) |
 | `hotkernels.uninstall()` | Puts every pointer back |
-| `with hotkernels.enabled():` | Installs for the duration of a block |
+| `with hotkernels.enabled():` | Installs for the duration of a block, and on leaving it puts hotkernels back as the block found it. Takes `inexact` and `bottleneck` as `install()` does |
 | `hotkernels.report()` | What is installed, and how often each kernel ran |
 
-Importing the package changes nothing; only `install()` does. Calling it twice is harmless, and so is `uninstall()` without `install()`.
+Importing the package changes nothing; only `install()` does. Calling it twice with the same arguments is harmless, and so is `uninstall()` without `install()`. Calling it with other arguments, `install(inexact=True)` after `install()` for instance, takes every hook out and puts them all back with the new arguments, and the counts in `report()` start again. So does `enabled()` with arguments that differ from the installation in force; `with hotkernels.enabled(inexact=True):` inside an `install()` turns the inexact kernels on for the block only.
+
+`install()` never raises because of the machine, the Python or the NumPy it finds. It logs on the `hotkernels` logger: one line at the `INFO` level saying how many hooks are in place, or why there are none, and a warning for each hook that could not be applied or failed its self-test. `report()` lists the same hooks.
 
 ::: note It covers the whole process
 `install()` changes NumPy itself, so every thread and every library that calls NumPy gets the kernels, not only your own code. That is the point: pandas, scikit-learn or your own helpers speed up without knowing. It also means `with hotkernels.enabled():` is a way to limit hotkernels in time, not to one thread.
@@ -92,7 +94,9 @@ np.sum             uint8    assembly  exact                        1            
 
 **Left to NumPy** is the column to read when nothing got faster. It counts calls that reached a hook and did not meet a kernel's conditions: another element type, a strided array, an argument the kernel does not implement. A large number there tells you what your arrays look like.
 
-Both columns count the calls you wrote. `np.argmax(m, axis=1)` is one call, however many rows NumPy splits it into, whether a kernel took its rows or NumPy did. The rows marked C are loops built into hotkernels rather than kernels; the first line does not count them among the kernels.
+Both columns count the calls you wrote. `np.argmax(m, axis=1)` is one call, however many rows NumPy splits it into, whether a kernel took its rows or NumPy did. The rows marked C are loops built into hotkernels rather than kernels; the first line does not count them among the kernels. Nor does it count the row `elementwise ufuncs`, marked NumPy: NumPy's own loops, which hotkernels calls directly for small elementwise calls (see [Things worth knowing](#things-worth-knowing)). Its "Left to NumPy" counts every other ufunc call that reached the hook, including the ones NumPy's own Python functions make inside your calls.
+
+`report()` returns a `hotkernels.Report`, which printing renders as the table. Its fields can be read too: `installed`, `inexact`, `unsupported` (why `install()` did nothing, or `None`), `version`, `numpy_version`, `problems` (one line per hook not in place), and `kernels`, one entry per row, with the same columns as fields: `name`, `numpy_call`, `elements`, `implementation`, `result`, `installed`, `note`, `calls` and `left_to_numpy`. A test that must know a kernel ran can compare `calls` before and after.
 
 ## What gets faster
 
@@ -136,7 +140,7 @@ A kernel takes a call only when the array is a plain, contiguous `ndarray` of th
 
 "Contiguous" means any shape for the operations that work element by element or reduce the whole array: a contiguous 40 by 25 array reaches the `clip` kernel as one run of 1,000 elements.
 
-How much faster each one is, from Python and at three sizes, is in [the results]([[ root ]]report/results/).
+How much faster each one is, from Python and at three sizes, is in [the results]([[ root ]]report/results/). Which hooks each of these calls meets on its way, and exactly what each hook changes inside NumPy, is in [Into NumPy]([[ root ]]report/delivery/#each-hook-exactly), with a figure that traces any of them.
 
 ## Things worth knowing
 
@@ -180,6 +184,7 @@ How much faster each one is, from Python and at three sizes, is in [the results]
 - **bottleneck's own functions are served too, when bottleneck is installed.** pandas and empyrical, among others, send NaN-aware reductions to [bottleneck](https://github.com/pydata/bottleneck) instead of NumPy, so no NumPy hook sees them. hotkernels serves `nanmean`, `nanstd`, `nanmin` and `nanmax` along one axis of a two-dimensional float64 array, with bottleneck's result bit for bit, however your code or the library got hold of the function. At 252 × 4,789, the rolling windows of a year over twenty years of daily returns, they are about 4x to 7x faster than bottleneck on an Apple M1 Pro. hotkernels never imports bottleneck: if it is not imported when you call `install()`, its functions are served from the moment it is, and `report()` says "waiting" until then. `install(bottleneck=False)` leaves them alone. In `report()` they are the `bn.*` rows, and on those rows "Left to NumPy" counts calls left to bottleneck, such as one-dimensional arrays, `axis=None`, float32 and pandas' `Series.std()`. If your bottleneck was built so that it rounds `nanstd` differently from the kernel, which `install()` checks against bottleneck's own answer, `nanstd` stays with bottleneck and `report()` lists it under the hooks that are not in place.
 - **Free-threaded Python is not supported.** `install()` does nothing there, and `report()` says so.
 - **NumPy 2.0 to 2.2 are not supported.** They answer a few calls differently from later releases (`np.clip` drops the sign of a zero on 2.0, and `np.count_nonzero(x)` gives a Python `int` before 2.3), and the kernels give the later answer. Installing hotkernels brings NumPy 2.3 or later; with an older NumPy in place `install()` does nothing, and `report()` says so.
+- **`x[mask]` is served as syntax.** `x[mask]`, `x[mask] = v` and `operator.getitem(x, mask)` reach the kernels. `x.__getitem__(mask)` and `x.__setitem__(mask, v)`, written out, do not: they call NumPy's own functions directly, and get NumPy's speed.
 - **Subclasses mostly stay with NumPy.** `x[mask]`, the methods and the hooked functions take a kernel only for a plain `ndarray`; masked arrays, memory maps and your own subclasses go to NumPy there. `clip` and `argmax` are also hooked beneath NumPy's own handling of array types, so for a subclass they serve whatever plain buffer NumPy hands them, and NumPy wraps the result as it always did.
 
 ## Checking it yourself
@@ -188,7 +193,7 @@ From a clone of the repository:
 
 ```bash
 uv run delivery demo          # run examples/workload.py with and without hotkernels, and compare
-uv run delivery check         # 302,364 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
+uv run delivery check         # 403,023 calls, NumPy's and bottleneck's, both ways; results, errors and warnings must agree
 uv run delivery time          # time each statement from Python on your machine
 uv run delivery numpy-tests   # NumPy's own test suite, both ways; a minute or two
 ```

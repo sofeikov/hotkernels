@@ -394,8 +394,13 @@ def enabled(inexact: bool = False, bottleneck: bool = True) -> Iterator[None]:
     """Install hotkernels for the duration of a `with` block.
 
     The kernels are installed for the whole process while the block runs, not
-    only for the thread that entered it. If hotkernels was already installed,
-    the block leaves it installed.
+    only for the thread that entered it. On leaving the block hotkernels is as
+    it was on entering it: not installed if it was not, and installed with the
+    same arguments if it was. So `enabled(inexact=True)` inside an
+    `install()` turns the inexact kernels on for the block only. A block whose
+    arguments differ from the installation it finds re-applies every hook on
+    entering and on leaving, which starts `report()`'s counts again, as
+    `install()` with new arguments does.
 
     Args:
         inexact: As for `install()`.
@@ -405,13 +410,16 @@ def enabled(inexact: bool = False, bottleneck: bool = True) -> Iterator[None]:
         A context manager that yields nothing.
     """
     with _lock:
-        was_installed = _state.installed
+        # The arguments of the installation the block finds, or None when it finds none.
+        found = (_state.inexact, _state.bottleneck) if _state.installed else None
         install(inexact, bottleneck)
     try:
         yield
     finally:
-        if not was_installed:
+        if found is None:
             uninstall()
+        else:
+            install(*found)
 
 
 def report() -> Report:

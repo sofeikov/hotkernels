@@ -514,7 +514,7 @@ def installation_checks() -> Summary:
         A summary with one failure per statement that does not hold: NumPy's
         objects keep their identity, uninstall() leaves no hook behind, a
         second install() changes nothing, enabled() restores the state it
-        found, float cumsum is only taken under install(inexact=True), and
+        found, arguments included, float cumsum is only taken under install(inexact=True), and
         one Python call of argmax counts once in report() however many
         times NumPy calls the type slot for it.
     """
@@ -548,6 +548,12 @@ def installation_checks() -> Summary:
     with hotkernels.enabled():
         pass
     checks.append(("enabled() leaves an existing installation in place", hotkernels.report().installed))
+    with hotkernels.enabled(inexact=True):
+        np.cumsum(np.ones(1000))
+        checks.append(("enabled(inexact=True) inside install() takes float cumsum",
+                       binding.counters()[0]["cumsum_f64"] == 1))
+    checks.append(("enabled(inexact=True) inside install() puts install()'s arguments back",
+                   hotkernels.report().installed and not hotkernels.report().inexact))
 
     hotkernels.uninstall()
     hotkernels.install(bottleneck=False)

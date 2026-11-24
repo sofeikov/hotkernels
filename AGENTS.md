@@ -19,18 +19,22 @@ This file is for coding agents. The first half applies to any work here; the sec
 
 The documentation and the explanations written for users are part of the change, not a follow-up. Update them in the same pull request as the code, every time, without being asked.
 
-**Find what the change made untrue.** Search the repository for the kernel's name, the NumPy call, and any count or figure the change moves (`grep -rn "20 of the 22" --include='*.md' .`). A statement that was true before the change and is false after it is a defect of the change, wherever it is written.
+**Find what the change made untrue.** Search the repository for the kernel's name, the NumPy call, and any count or figure the change moves (`grep -rn "20 of the 22" --include='*.md' .`). A statement that was true before the change and is false after it is a defect of the change, wherever it is written. The interactive figures in `docsite/static/widgets/` hold rules and numbers as code, so search them too (`grep -rn "compress_f32" docsite/`).
 
 **Where to look.**
 
 | The change affects | Update |
 |---|---|
-| Which NumPy calls a kernel takes, or the conditions for it | `docsite/pages/start.md` ("What gets faster", "Things worth knowing"), `hotkernels/README.md`, the hook table in `docs/delivery-design.md`, `docsite/pages/report/delivery.md` |
+| Which NumPy calls a kernel takes, or the conditions for it | `docsite/pages/start.md` ("What gets faster", "Things worth knowing"), `hotkernels/README.md`, the hook table in `docs/delivery-design.md`, `docsite/pages/report/delivery.md` (the table in "One call, several hooks"), and the figure that traces a call through the hooks, `docsite/static/widgets/router.js`: a new call gets an entry there, and a changed condition, element type or kernel changes its entry |
+| A hook: one added or removed, a new kind of hook, what a hook changes inside NumPy, CPython or another library, which spellings reach it, or whether it releases the interpreter lock | `docsite/pages/report/delivery.md` (the diagram and the table of kinds in "Where the hooks sit", "Each hook, exactly", "One call, several hooks", "Threads", "Installing is a test"), the kinds and entries in `docsite/static/widgets/router.js`, the hook table in `docs/delivery-design.md`, the header comment of the hook's file in `hotkernels/src/hotkernels/_binding/` |
+| The Python interface: an argument or behaviour of `install()`, `uninstall()`, `enabled()` or `report()`, a field of `Report`, what is logged | The interface table and "See what it did" in `docsite/pages/start.md`, `hotkernels/README.md`, the "Using hotkernels" section of `README.md`, "What the user gets" in `docs/delivery-design.md`, "Installing is a test" in `docsite/pages/report/delivery.md` |
+| What `delivery check` runs: cases or operations added or removed | The total it prints, in `README.md` ("Checked from Python"), `docsite/pages/start.md` ("Checking it yourself"), `docsite/pages/report/delivery.md` ("Testing the binding") and the diagram in `docsite/pages/report/index.md` |
 | How many kernels exist, are installed, or are bit-identical | `README.md`, `hotkernels/README.md`, `docsite/pages/index.md`, the report chapters under `docsite/pages/report/` that quote the count |
 | A speed figure | `README.md` (the docsite reads its tables from there), `docs/kernel-findings.md`, `delivery/results/` for figures taken from Python. Only figures from native hardware, with the size they were measured at |
 | How a kernel works, what it requires of its caller, or a limit it has | `docs/kernel-findings.md`, the kernel's chapter under `docsite/pages/report/`, the header comment of its `kernel.s` |
 | The judge: the spec format, a command, a field of a case description | `docs/judge-design.md`, `kernels/README.md`, the kernel half of this file, `docsite/pages/report/judge.md` |
 | What `report()` prints | The sample output in `docsite/pages/start.md` |
+| An interactive figure's subject: anything a figure in `docsite/static/widgets/` encodes, which its header comment names | The figure itself. Open the page after `uv run docsite serve` and try the controls, on a narrow window as well, and the Play button where there is one |
 | The tools: a command added, renamed or removed | The "Using ..." section of `README.md` |
 
 **Design documents.** A design in `docs/` is written before the code. When the building departs from it, say so in the document in the same pull request (a "What changed in the building" section, as in `docs/delivery-design.md`), and resolve what it listed as open. Do not leave a design that describes something other than what was built.

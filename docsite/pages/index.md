@@ -58,5 +58,5 @@ The report walks through all of it from the ground up. It assumes you know NumPy
 <a class="card" href="[[ root ]]report/judge/"><h3>The judge</h3><p>Guard pages, thousands of generated cases per kernel, and a bootstrap test that decides what counts as faster.</p><span class="more">Chapter 3 →</span></a>
 <a class="card" href="[[ root ]]report/loop/"><h3>Agents in a loop</h3><p>[[ data.attempts.total ]] logged attempts, [[ data.attempts.reverted ]] of them thrown away. Browse every one.</p><span class="more">Chapter 4 →</span></a>
 <a class="card" href="[[ root ]]report/selection/"><h3>The kernels</h3><p>How <code>x[mask]</code> runs without a branch, why float <code>cumsum</code> cannot be both exact and fast, and a histogram that replaces arithmetic with a proof.</p><span class="more">Chapters 5 and 6 →</span></a>
-<a class="card" href="[[ root ]]report/delivery/"><h3>Into NumPy</h3><p>Five kinds of hook that route unmodified code to the kernels, including <code>x[mask]</code>, which is not a function at all.</p><span class="more">Chapter 7 →</span></a>
+<a class="card" href="[[ root ]]report/delivery/"><h3>Into NumPy</h3><p>Seven kinds of hook that route unmodified code to the kernels, including <code>x[mask]</code>, which is not a function at all, and <code>a + b</code>.</p><span class="more">Chapter 7 →</span></a>
 </div>
