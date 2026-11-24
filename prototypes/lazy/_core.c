@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 9
+#define CORE_VERSION 10
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -75,6 +75,8 @@ static Py_ssize_t node_at[N_FIELDS], lazy_at[L_FIELDS], cell_at[C_FIELDS], step_
 static PyTypeObject *Node, *Lazy, *Cell, *Step, *Ufunc, *Ndarray, *Write, *Assign, *StandInCall, *StandInModule;
 static PyObject *fitting;            /* `array._fitting` */
 static PyTypeObject *Select;         /* `array._Select` */
+static PyTypeObject *Into;           /* `array._Into` */
+static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
 static PyObject *write_kind;         /* `rules.WRITE` */
 static PyObject *graph_names;        /* `graph.__dict__`: names a test or the layer rebinds are read from it each time. */
@@ -1264,11 +1266,11 @@ writable(PyObject *target)
     return held;
 }
 
-/* `array._defer_write(target, name, perform, (operand,))`: the cell gets a new node, the contents after the
- * write. `operand` is what the write reads; `read` is it with a node for a lazy array. 0, or -1 with an error set,
+/* `array._defer_write(target, name, perform, operands)`: the cell gets a new node, the contents after the
+ * write. `reads` is a tuple of what the write reads, with a node for each lazy array. 0, or -1 with an error set,
  * or 1 for "ask Python" (the pending set is full). */
 static int
-defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *read, PyFrameObject *frame)
+defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads, PyFrameObject *frame)
 {
     int full = at_the_limit();
     if (full != 0) {
@@ -1276,9 +1278,15 @@ defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *read,
     }
     PyObject *cell = SLOT(target, lazy_at[L_CELL]);
     PyObject *held = SLOT(cell, cell_at[C_NODE]);
-    int strict = SLOT(held, node_at[N_STRICT]) == Py_True || (Py_TYPE(read) == Node && SLOT(read, node_at[N_STRICT]) == Py_True);
+    int strict = SLOT(held, node_at[N_STRICT]) == Py_True;
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(reads); place++) {
+        PyObject *read = PyTuple_GET_ITEM(reads, place);
+        strict = strict || (Py_TYPE(read) == Node && SLOT(read, node_at[N_STRICT]) == Py_True);
+    }
     PyObject *run = Write->tp_alloc(Write, 0);
-    PyObject *args = run ? PyTuple_Pack(2, held, read) : NULL;
+    PyObject *first = run ? PyTuple_Pack(1, held) : NULL;
+    PyObject *args = first ? PySequence_Concat(first, reads) : NULL;
+    Py_XDECREF(first);
     PyObject *kwargs = args ? PyDict_New() : NULL;
     PyObject *node = NULL;
     if (kwargs != NULL) {
@@ -1335,7 +1343,9 @@ in_place(PyObject *target, PyObject *other, PyObject *apply, PyObject *name, PyO
         goto fail;
     }
     if (fits) {
-        int written = defer_write(target, name, perform, read, frame);
+        PyObject *reads = PyTuple_Pack(1, read);
+        int written = reads ? defer_write(target, name, perform, reads, frame) : -1;
+        Py_XDECREF(reads);
         if (written < 0) {
             goto fail;
         }
@@ -1424,7 +1434,9 @@ set_item(PyObject *target, PyObject *index, PyObject *value, PyFrameObject *fram
         goto fail;
     }
     SLOT(assign, assign_at[A_INDEX]) = Py_NewRef(index);
-    int written = defer_write(target, s_setitem, assign, read, frame);
+    PyObject *reads = PyTuple_Pack(1, read);
+    int written = reads ? defer_write(target, s_setitem, assign, reads, frame) : -1;
+    Py_XDECREF(reads);
     if (written < 0) {
         goto fail;
     }
@@ -1443,6 +1455,72 @@ fail:
     Py_XDECREF(shape);
     Py_XDECREF(assign);
     return NULL;
+}
+
+/* A call that writes its result into `out=`, for a write that is known to fit: the quick road of
+ * `array._write_out`. `function` is the ufunc or the NumPy function, `inputs` its `count` positional arguments.
+ * Returns `target` (new reference), `Miss`, or NULL. */
+static PyObject *
+write_out(PyObject *function, PyObject *const *inputs, Py_ssize_t count, PyObject *target, PyFrameObject *frame)
+{
+    if (Py_TYPE(target) != Lazy || writable(target) == NULL) {
+        return Miss;
+    }
+    PyObject *result = Miss, *aim = NULL, *into = NULL, *name = NULL;
+    PyObject *reads = PyTuple_New(count), *key = PyTuple_New(count + 2);
+    if (reads == NULL || key == NULL) {
+        goto fail;
+    }
+    /* What `array._fit_key` writes: the function, each operand, the target; read in that order. */
+    PyTuple_SET_ITEM(key, 0, Py_NewRef(function));
+    for (Py_ssize_t place = 0; place <= count; place++) {
+        PyObject *read = place == count ? node_of(target) : Py_TYPE(inputs[place]) == Lazy ? node_of(inputs[place]) : Py_NewRef(inputs[place]);
+        if (read == NULL) {
+            goto fail;
+        }
+        if (place == count) {
+            aim = read;
+        } else {
+            PyTuple_SET_ITEM(reads, place, read);
+        }
+        PyObject *part = operand_part(read, NULL);
+        if (part == NULL) {
+            goto fail;
+        }
+        if (part == Miss) {
+            goto done;
+        }
+        PyTuple_SET_ITEM(key, 1 + place, part);
+    }
+    int fits = PySet_Contains(fitting, key);
+    if (fits < 0) {
+        goto fail;
+    }
+    if (fits) {
+        into = Into->tp_alloc(Into, 0);
+        name = into ? PyObject_GetAttr(function, s_dunder_name) : NULL;
+        if (name == NULL) {
+            goto fail;
+        }
+        SLOT(into, into_function_at) = Py_NewRef(function);
+        int written = defer_write(target, name, into, reads, frame);
+        if (written < 0) {
+            goto fail;
+        }
+        if (written == 0) {
+            result = Py_NewRef(target);
+        }
+    }
+done:
+    Py_XDECREF(reads);
+    Py_XDECREF(key);
+    Py_XDECREF(aim);
+    Py_XDECREF(into);
+    Py_XDECREF(name);
+    return result;
+fail:
+    result = NULL;
+    goto done;
 }
 
 /* ---- A road: what stands on `LazyArray` where a method stood, takes the calls it can, and hands the others
@@ -1545,8 +1623,16 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         result = try_defer(road->operation, road->name, operands, kwargs, NULL, frame);
         break;
     case ARRAY_UFUNC:
-        /* (self, ufunc, method, *inputs), and any keyword sends it to Python: `out=`, `where=`. */
-        if (named || count < 3 || !PyUnicode_CheckExact(args[2]) || PyUnicode_Compare(args[2], s_call) != 0) {
+        /* (self, ufunc, method, *inputs). `out=` alone is a write; any other keyword sends it to Python. */
+        if (count < 3 || !PyUnicode_CheckExact(args[2]) || PyUnicode_Compare(args[2], s_call) != 0) {
+            goto python;
+        }
+        if (named == 1 && PyUnicode_Compare(PyTuple_GET_ITEM(kwnames, 0), s_out) == 0 && PyTuple_CheckExact(args[count])
+            && PyTuple_GET_SIZE(args[count]) == 1) {
+            result = write_out(args[1], args + 3, count - 3, PyTuple_GET_ITEM(args[count], 0), frame);
+            break;
+        }
+        if (named) {
             goto python;
         }
         operands = PyTuple_New(count - 3);
@@ -1571,6 +1657,12 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             goto python;
         }
         PyObject *out = PyDict_GetItemWithError(args[4], s_out);
+        if (!apart && out != NULL && out != Py_None && PyDict_GET_SIZE(args[4]) == 1 && road->ruled_as != NULL
+            && PySet_Contains(road->ruled_as, args[1]) == 1) {
+            /* `np.clip(x, lo, hi, out=x)` and the roundings: a write. */
+            result = write_out(args[1], &PyTuple_GET_ITEM(args[3], 0), PyTuple_GET_SIZE(args[3]), out, frame);
+            break;
+        }
         if (apart || (out != NULL && out != Py_None) || PyErr_Occurred()) {
             PyErr_Clear();
             goto python;
@@ -1957,6 +2049,15 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Select = (PyTypeObject *)Py_NewRef(select);
+    PyObject *into = PyDict_GetItemString(given, "Into");
+    static const char *const INTO_FIELDS[1] = {"function"};
+    if (into == NULL || !PyType_Check(into) || offsets((PyTypeObject *)into, INTO_FIELDS, 1, &into_function_at)) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_KeyError, "setup() was not given the class 'Into'");
+        }
+        return NULL;
+    }
+    Into = (PyTypeObject *)Py_NewRef(into);
     Py_RETURN_NONE;
 }
 
