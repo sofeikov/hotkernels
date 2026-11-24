@@ -849,6 +849,23 @@ Kernels from [sort-design.md](sort-design.md), which took them from the applicat
 - **Ordered input.** A radix sort takes the same time whatever the order. The binding answers sorted and strictly descending arrays itself and leaves nearly sorted ones to NumPy ([delivery-design.md](delivery-design.md#which-hook-serves-which-kernel)).
 - **Between 17 and 255 elements** the kernel is correct and no faster than NumPy's insertion sort. The binding takes calls from 256.
 
+### Elementwise ufuncs on small arrays: NumPy's loops without NumPy's call path
+
+Not a kernel. `a + b` on 16 float64 elements is about 250 ns from Python and the addition a few of them; the rest is NumPy's call path. The ufunc lane ([ufunc-lane-design.md](ufunc-lane-design.md)) hooks the call pointer of every NumPy ufunc and, for plain contiguous arrays of one shape, an array and a row of it, or an array and a number, calls the inner loop NumPy itself would have called, fetched once per ufunc and operand types through `ufunc._resolve_dtypes_and_context` and `ufunc._get_strided_loop`. `uv run delivery time --only ufunc` on the Apple M1 Pro, load average 4.05:
+
+| Statement | Elements | 16 | 4,096 |
+|---|---|---|---|
+| `a + b` | float64 | 1.98x | 1.18x |
+| `a * 2.0` | float64 | 2.58x | 1.42x |
+| `a > 0` | float64 | 3.20x | 1.24x |
+| `np.exp(a)` | float64 | 1.60x | 1.00x |
+| `a * 2.0` | float32 | 3.20x | 1.85x |
+| `i + 1` | int64 | 3.06x | 1.61x |
+| `np.maximum(x, y, out=x)` | float64 | 2.39x | 1.18x |
+| `m - row`, 4 columns | float64 | 3.75x | 1.50x |
+
+Above 16,384 elements the call is NumPy's; at a million elements every one of these is within 0.4% of NumPy. A call the lane declines costs 3 to 4 ns more. What is left of a small call is about 125 ns, of which 83 ns is NumPy allocating and freeing the result and about 20 ns Python reaching the ufunc. On whole programs the gain is what their small elementwise calls cost them: shap's explainers 2% to 7%, where NumPy has a quarter to a third of the time. x86-64 is not measured.
+
 ## Where the result is narrower than the number
 
 The second item is about the reference and holds on every architecture. The others describe the ARM64 kernels and do not arise on x86-64, which has its own, listed after them.

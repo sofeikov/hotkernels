@@ -1,6 +1,51 @@
 # The ufunc lane: elementwise calls on small arrays through NumPy's own loops
 
-A proposal. Every figure is from an Apple M1 Pro, CPython 3.13.12 and NumPy 2.5.5, taken from Python with the two sides alternating and the best of seven or nine batches, while other work ran on the machine (load average about 3). Read the ratios more than the nanoseconds.
+Proposed, and now built: `hotkernels/src/hotkernels/_binding/hook_ufunc.c`. [Status](#status) holds the result and [What changed in the building](#what-changed-in-the-building) says where the building departed from the proposal; the rest of the text stands as proposed. Every figure is from an Apple M1 Pro, CPython 3.13.12 and NumPy 2.5.5, taken from Python with the two sides alternating and the best of seven or nine batches, while other work ran on the machine (load average 3 to 6). Read the ratios more than the nanoseconds.
+
+## Status
+
+Against the [exit criterion](#exit-criterion):
+
+| Criterion | Result |
+|---|---|
+| `delivery check` passes, with the `ufunc` operation | Met on ARM64: 403,021 cases, none failing. The `ufunc` operation has 100,657, of which the lane must take 49,922 and took 51,766 (the rest of what it took are cases where only the results are compared). x86-64: CI |
+| NumPy's own test suite has the same outcome with and without `install()` | See the pull request |
+| `a + b` at least 1.8x and `a * 2.0` at least 2.5x faster at 16 float64 elements | Met: 1.98x and 2.58x in `delivery time`; 1.92x and 2.87x in alternating batches of `timeit` |
+| No case of `delivery time` the lane serves is slower than NumPy | Met. An earlier run, at load average 5.2, read `np.exp(a)` at 4,096 elements as 0.96x; the run below has it at 1.00x, and alternating batches put it level (14.97 against 14.74 µs best, 15.50 against 15.64 µs median) |
+| A call that falls back costs at most 2 ns more | Not met: 3 to 4 ns, about 1.3% of the cheapest such call. 1.3 ns of it is the count of calls left to NumPy, which was kept ([below](#what-changed-in-the-building)) |
+
+`uv run delivery time --only ufunc`, load average 4.05. At a million elements every statement is left to NumPy, and the column says how much that costs:
+
+| Statement | Elements | 16 | 4,096 | 1,048,576, left to NumPy |
+|---|---|---|---|---|
+| `a + b` | float64 | 246 → 124 ns, 1.98x | 807 → 686 ns, 1.18x | -0.2% |
+| `a * 2.0` | float64 | 419 → 163 ns, 2.58x | 890 → 628 ns, 1.42x | +0.1% |
+| `a > 0` | float64 | 531 → 166 ns, 3.20x | 1.95 → 1.58 µs, 1.24x | -0.0% |
+| `np.exp(a)` | float64 | 253 → 158 ns, 1.60x | 16.1 → 16.0 µs, 1.00x | +0.0% |
+| `a * 2.0` | float32 | 518 → 162 ns, 3.20x | 798 → 432 ns, 1.85x | +0.4% |
+| `i + 1` | int64 | 500 → 163 ns, 3.06x | 910 → 566 ns, 1.61x | +0.0% |
+| `np.maximum(x, y, out=x)` | float64 | 236 → 99 ns, 2.39x | 911 → 772 ns, 1.18x | +0.1% |
+| `m - row`, 4 columns | float64 | 554 → 148 ns, 3.75x | 6.83 → 4.55 µs, 1.50x | +0.1% |
+| `a + b`, strided, declined | float64 | +1.3% | +0.4% | +2.0% |
+| `a + b`, declined | float16 | +1.1% | +0.1% | -0.0% |
+
+From Python in alternating batches at 16 float64 elements: `a + b` 250 → 130 ns (1.92x), `a - b` 1.91x, `a > b` 1.90x, `-a` 1.85x, `a * 2.0` 406 → 141 ns (2.87x), `a > 0` 509 → 145 ns (3.51x), `a * np.float64(2)` 2.63x, `np.add(x, b, out=x)` 212 → 72 ns (2.97x), and `M - w` on a 100 x 12 matrix 1,076 → 573 ns (1.88x). `np.isclose(a, b)`, a Python function of several ufunc calls, is 1.25x faster without a hook of its own. Calls the lane declines: a strided `a + b` +3.4 ns, float16 +4.4 ns, `np.add(a, b, where=True)` +3.4 ns, complex `a + 1j` within noise.
+
+x86-64 was not measured: there is no such machine here. The lane is the same C there, and the call path it skips is NumPy's on both.
+
+## What changed in the building
+
+- **Floating-point errors go to NumPy's own handler, and nothing is computed twice.** Proposed: throw the result away and let NumPy compute the call again, which needed the inputs untouched and so a buffer for a given output. Built: after the loop the lane reads the four flags NumPy reports and, if any is set, clears them and calls `PyUFunc_GiveFloatingpointErrors(name, flags)`, the function of NumPy's C API its own ufuncs call after their loops. It warns, raises, calls or does nothing as `np.errstate` says, with NumPy's message. The loop writes straight into a given output, `x += y` included, as NumPy's does, and an output keeps what the loop wrote when the call raises, as NumPy's does. A Python exception the loop sets, such as an integer power's `ValueError` for a negative exponent, is raised as it is. Under `np.errstate(all="ignore")` NumPy leaves the flags set after the call and the lane clears them; nothing in Python can tell. A call that raises is not counted as taken.
+- **A row against a matrix is one loop call over a tiled row, not one call per row.** Spying on NumPy's loop (a replacement of the float64 `add` loop that records each call's count and strides) showed that NumPy's buffered iterator copies the row, repeated, into its buffer and calls the loop over chunks of whole rows: one call of 72 elements for 12 rows of 6, two calls of 8,190 and 3,810 for 2,000 rows of 6, one call per row only for rows longer than the buffer. The lane does the same: it repeats the row into a buffer (on the stack up to 2 KB) and makes one call, and it takes such a call only when NumPy too makes one, that is when the result has at most as many elements as the whole rows that fit in NumPy's default buffer of 8,192. With one call, an error stops both at the same element: per row, the lane went on to the rows after one that raised, where NumPy stops. A row of one element is left to NumPy, whose iterator drops the dimension of one. `np.setbufsize` changes NumPy's chunks and not the lane's; an elementwise result does not depend on them.
+- **`np.maximum` and `np.minimum` with an output given positionally go to NumPy**, which deprecates that spelling from 2.5 and warns. The warning was the only difference the first sweep found once the rest was right.
+- **The table evicts.** Proposed: a full table sends new combinations to NumPy. `delivery check` alone made more than 1,024 combinations and the lane stopped serving the later ones. Built: 2,048 entries, and a combination that finds no room within eight slots takes the first one's place. A call already running holds the capsule of its loop, so evicting its entry frees nothing it uses.
+- **A replaced loop is noticed.** NumPy's own suite has a test that calls `np.negative`, replaces its float64 loop with `PyUFunc_ReplaceLoopBySignature`, and expects the next call to use the new loop. The lane had kept the loop it was given and failed it, the one difference in NumPy's 47,248 tests. Built: when NumPy's loop wraps a legacy loop, the entry also keeps which entry of the ufunc's type table that is and the function it held; every call compares that function with the one the table holds now, one load and a comparison, and asks NumPy again if it changed. That also covers hotkernels' own inner-loop hooks, which replace loops the same way.
+- **The ufuncs are found in the module's dictionary**, not through `dir()` and `getattr`: NumPy imports a submodule on first access to its name, and `install()` should not.
+- **The self-test's flags probe checks the error, not the counter.** `a / 0.0` under `np.errstate(divide="raise")` must raise `FloatingPointError`, which shows the flag reached NumPy's handler, and give infinities under `divide="ignore"`. A plain call after them moves the counter.
+- **A call that falls back costs 3 to 4 ns, not 2.** The decline path tests an exact `ndarray` first and settles it by its own checks, and looks at keywords and outputs only when there are any. What is left is the call through the lane and the count of calls left to NumPy, 1.3 ns of the total. The count was kept: it is what `report()` shows of the calls the lane did not serve, and it is what told shap's calls apart in [What it does for whole programs](#what-it-does-for-whole-programs).
+- **`report()` shows the lane as NumPy's.** Its row is "elementwise ufuncs", element type "numeric", and "NumPy" in the Kernel column, not "C", because the loops are NumPy's; a line under the table says what its columns count.
+- **`delivery check` builds a case's arguments before it reads the counters.** The judge's value classes make ufunc calls of their own, which the lane counts. Building the arguments first, then reading the counters, then making the call, leaves every other operation as it was.
+- **NumPy can be nondeterministic itself.** `np.power` on int64 with a negative exponent into a float32 output gave two different outputs over six runs of plain NumPy: after the loop raises, its buffered cast copies what was left in its buffer. Those cases are left out of `delivery check`.
 
 ## Summary
 
@@ -8,7 +53,7 @@ A proposal. Every figure is from an Apple M1 Pro, CPython 3.13.12 and NumPy 2.5.
 - **Proposed: a lane through NumPy's own loops.** One hook on the call pointer of each of NumPy's ufunc objects, as the function hook does for `np.argmax`. A call whose operands are plain contiguous arrays of one shape, or such an array and a number, takes a short path. It allocates the output, or uses the `out` it was given, and calls the inner loop NumPy itself would have called. Anything else goes to NumPy unchanged.
 - **The loop is NumPy's, so the bytes are NumPy's.** The lane asks NumPy once per operand types which loop it would use, through the interface NumPy provides for this to other compilers (`ufunc._resolve_dtypes_and_context` and `ufunc._get_strided_loop`, the route numba takes). It then calls that loop with the same element count and strides NumPy would pass. No arithmetic in the binding, no kernel, and nothing for the judge.
 - **What it gives, from a throwaway prototype.** About 2x on `a + b` at 16 float64 elements, 3x on `a * 2.0` and 3.5x on `a > 0`; 1.7x at 1,024 elements; nothing measurable above about 16,384. A sweep of 5,317 calls over every one- and two-operand NumPy ufunc, seven element types, Python and NumPy numbers on either side and special values gave the same bytes, types, warnings and errors with and without it.
-- **What it cannot give.** The lane's own floor is about 105 ns on 16 elements, and 83 ns of that is NumPy allocating and freeing the result. A whole program gains only as much as its NumPy calls cost. In shap's explainers NumPy is a quarter to a third of the time, and the prototype made them 2% to 7% faster ([What it does for whole programs](#what-it-does-for-whole-programs)).
+- **What it cannot give.** The lane's own floor is about 125 ns from Python on 16 elements: about 20 ns for Python to reach the ufunc at all, and 83 ns for NumPy to allocate and free the result. A whole program gains only as much as its NumPy calls cost. In shap's explainers NumPy is a quarter to a third of the time, and the prototype made them 2% to 7% faster ([What it does for whole programs](#what-it-does-for-whole-programs)).
 
 ## What a small call costs
 
@@ -47,7 +92,7 @@ A C extension of about 300 lines, in the session's scratch space and not in the 
 
 At 16 elements: `a > 0` 3.4x, `a > b` 1.9x, `-a` 1.9x, `np.abs(a)` 1.8x, `np.maximum(a, b)` 1.7x, `np.isfinite(a)` 1.7x, `f * 2.0` on float32 3.8x, `i + 1` on int64 3.6x, `c & c` on bool 2.0x.
 
-The saving is a fixed 130 to 300 ns a call. The prototype tested the floating-point flags with the C library's `fetestexcept` and `feclearexcept`, 15 ns of its time; the binding reads the status register directly in about 1 ns (`hk_float_flags_reported`), so the built lane should be a little faster than this.
+The saving is a fixed 130 to 300 ns a call. The prototype tested the floating-point flags with the C library's `fetestexcept` and `feclearexcept`, 15 ns of its time; the binding reads the status register directly in about 1 ns (`hk_float_flags_reported`), so the built lane should be a little faster than this. It is about the same: 124 to 130 ns for `a + b`, so the flags were not where the time went.
 
 - **Exactness.** Every NumPy ufunc with one or two inputs and one output, applied to arrays of float64, float32, int64, int32, uint8 and bool and to a float64 array of zeros of both signs, infinities, NaN, the largest and smallest numbers; each array with each other array of its length, and with each of 2.0, -0.5, 3, 0, -7, 1e300 and 2⁶⁰ on either side; under `np.errstate(all="warn")`. The result's bytes and type, the warnings and the exception, if any, compared with plain NumPy: 5,317 calls, no difference. The first version of the prototype differed on 11: integer `power` with a negative exponent, whose loop raises `ValueError` without returning an error code. Testing for a Python exception after every loop fixed them, and is part of the design.
 - **shap's test suite** passed the same way with and without `install()` (385 passed, 156 skipped). That run was hotkernels alone, without the prototype. The suite was not run under the prototype; `delivery check` and NumPy's own test suite are the tests of the built lane ([Testing](#testing)).
@@ -173,7 +218,7 @@ If any fails, the hook is removed and `report()` says which probe failed.
 
 ## Considered and not proposed
 
-- **A faster allocation.** 83 ns of the lane's 105 are NumPy creating and destroying the output. The binding could allocate the data itself and hand NumPy an array that owns it, skipping the context variable, the capsule and `tracemalloc`. It would bypass a memory handler a user has set, and the output would be invisible to `tracemalloc`. NumPy could look the handler up more cheaply itself; that is a change for NumPy, not for this package.
+- **A faster allocation.** 83 ns of the lane's 125 are NumPy creating and destroying the output. The binding could allocate the data itself and hand NumPy an array that owns it, skipping the context variable, the capsule and `tracemalloc`. It would bypass a memory handler a user has set, and the output would be invisible to `tracemalloc`. NumPy could look the handler up more cheaply itself; that is a change for NumPy, not for this package.
 - **Recycling outputs.** Keeping the arrays the lane creates on a free list when Python releases them would mean replacing `ndarray`'s deallocator and bringing objects back after their release. It is not done.
 - **The binding's own loops.** Writing the arithmetic in the binding, or calling the kernels, would make the lane responsible for matching every NumPy loop bit for bit, transcendental functions included. NumPy's loops are already there and are exactly right by definition.
 - **Calls that need a cast, and arrays that are not contiguous.** NumPy runs these through buffers and an iterator whose chunking would have to be reproduced exactly, and the loop it chooses for a stride it does not know in advance can differ from the one for a fixed stride. They go to NumPy.
@@ -193,7 +238,7 @@ If any fails, the hook is removed and `report()` says which probe failed.
 
 - `delivery check` passes on both architectures, with the `ufunc` operation's cases.
 - NumPy's own test suite has the same outcome with and without `install()`.
-- From Python at 16 float64 elements, on the Apple M1 Pro: `a + b` at least 1.8x and `a * 2.0` at least 2.5x faster than NumPy. No case of `delivery time` that the lane serves is slower than NumPy at any size, and a call that falls back costs at most 2 ns more.
+- From Python at 16 float64 elements, on the Apple M1 Pro: `a + b` at least 1.8x and `a * 2.0` at least 2.5x faster than NumPy. No case of `delivery time` that the lane serves is slower than NumPy at any size, and a call that falls back costs at most 2 ns more (built: 3 to 4 ns; see [What changed in the building](#what-changed-in-the-building)).
 
 ## Open decisions
 

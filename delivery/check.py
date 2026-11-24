@@ -130,16 +130,21 @@ def describe(value: object) -> tuple:
     return ("object", type(value).__name__, repr(value))
 
 
-def capture(case: Case) -> Outcome:
+def capture(case: Case, arguments: tuple | None = None) -> Outcome:
     """Run one case and record everything observable about it.
 
     Args:
-        case: The case. Its arguments are built afresh.
+        case: The case.
+        arguments: Its arguments, built by `case.make()` for this run, or
+            None to build them here. Building them first lets a caller read
+            the counters after the arguments exist and before the call: the
+            ufunc lane counts the ufunc calls that build them.
 
     Returns:
         The outcome, with the raw result kept when the case has a tolerance.
     """
-    arguments = case.make()
+    if arguments is None:
+        arguments = case.make()
     raw = None
     with warnings.catch_warnings(record=True) as issued:
         warnings.simplefilter("always")
@@ -295,8 +300,9 @@ def run_operation(operation: str, cases: Iterable[Case], inexact: bool, keep: Ca
     failures, taken = [], 0
     try:
         for case, want in zip(selected, expected):
+            arguments = case.make()
             before = binding.counters()[0]
-            got = capture(case)
+            got = capture(case, arguments)
             after = binding.counters()[0]
             taken += any(after[kernel] > before[kernel] for kernel in own_kernels)
             failure = _disagreement(case, want, got) or _expectation_failure(case, own_kernels, before, after)

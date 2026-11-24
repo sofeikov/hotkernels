@@ -32,6 +32,7 @@ static const char *const HK_KERNEL_NAMES[HK_KERNEL_COUNT] = {
     "cumsum_rows_f64", "cumprod_rows_f64", "cummax_rows_f64", "cumfmax_rows_f64",
     "argmax_rows_f32", "argmax_rows_f64", "argmin_rows_f32", "argmin_rows_f64",
     "add_inplace_f64", "subtract_inplace_f64",
+    "ufunc_lane",
 };
 
 // Operation names, in the order of hk_operation.
@@ -40,13 +41,14 @@ static const char *const HK_OPERATION_NAMES[HK_OPERATION_COUNT] = {
     "nonzero", "cumsum", "astype", "sum", "count_nonzero",
     "histogram", "bincount", "isin", "searchsorted", "interp",
     "where", "accumulate", "reduceat", "any", "round", "median",
-    "unique", "argsort",
+    "unique", "argsort", "ufunc",
     "bn.nanmean", "bn.nanstd", "bn.nanmin", "bn.nanmax",
 };
 
 // Every table of hooks, in the order hooks are listed to Python: deepest first.
 static hk_hook *const HK_HOOK_TABLES[] = {
     hk_slot_hooks, hk_loop_hooks, hk_function_hooks, hk_method_hooks, hk_index_hooks, hk_bottleneck_hooks,
+    hk_ufunc_hooks,
 };
 #define HK_HOOK_TABLE_COUNT (sizeof HK_HOOK_TABLES / sizeof HK_HOOK_TABLES[0])
 
