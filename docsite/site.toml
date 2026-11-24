@@ -84,7 +84,7 @@ layout = "report"
 path = "report/delivery"
 source = "report/delivery.md"
 title = "Into NumPy"
-summary = "A fast function nobody calls is worth nothing. Five kinds of hook route unmodified NumPy code to the kernels, and a call no kernel takes pays about a nanosecond."
+summary = "A fast function nobody calls is worth nothing. Seven kinds of hook, each one pointer changed in place, route unmodified NumPy code to the kernels, and a call no kernel takes pays a few nanoseconds at most."
 layout = "report"
 
 [[page]]

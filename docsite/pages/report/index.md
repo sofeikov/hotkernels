@@ -22,8 +22,8 @@ flowchart TD
   judge["<b>Judge</b><br/>lint, thousands of cases on guarded memory,<br/>calling convention, bootstrap timing"]
   log["attempts.md<br/>every attempt, kept or not"]
   kernels["<b>23 kernels</b><br/>22 assembly, 1 plain C"]
-  binding["<b>Binding</b><br/>five kinds of hook into NumPy"]
-  check["<b>Delivery check</b><br/>302,364 calls with and without,<br/>plus NumPy's own test suite"]
+  binding["<b>Binding</b><br/>seven kinds of hook, into NumPy and bottleneck"]
+  check["<b>Delivery check</b><br/>403,023 calls with and without,<br/>plus NumPy's own test suite"]
   user["<b>Your code</b><br/>import hotkernels; hotkernels.install()"]
 
   survey -->|"shortlist: where NumPy is behind"| spec

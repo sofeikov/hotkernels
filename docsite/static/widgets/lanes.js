@@ -13,7 +13,7 @@
 //   data-mode  "simd" (default), or "tail": opens on the leftover strategies,
 //              with the inaccessible page drawn and the read past the end shown
 
-import { h, seg, range, button, stat, reducedMotion } from "./util.js";
+import { h, seg, range, button, stat } from "./util.js";
 
 // Elements per 128-bit vector and bytes per element, by element type.
 const TYPES = {
@@ -163,7 +163,6 @@ export default async function mount(el) {
     outside.set(String(p.outside * bytes));
     outside.className = `w-stat ${p.outside ? "bad" : ""}`.trim();
     stepButton.disabled = done;
-    playButton.disabled = done;
     if (done) stop();
   }
 
@@ -171,9 +170,12 @@ export default async function mount(el) {
   const step = () => { state.pos += 1; render(); };
 
   const stepButton = button("Step", () => { stop(); step(); });
+  // Play steps through on a timer whatever the reduced-motion setting: each
+  // step is a redraw, not a movement, and the reader asked for it. From the
+  // last step, where the tail view opens, it starts again from the first.
   const playButton = button("Play", () => {
     if (timer) return stop();
-    if (reducedMotion) return restart(current().steps.length);
+    if (state.pos === current().steps.length) restart();
     playButton.textContent = "Pause";
     timer = setInterval(step, STEP_MS);
   }, "primary");

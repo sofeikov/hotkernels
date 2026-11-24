@@ -92,7 +92,7 @@ Apple M1 Pro, Apple M4 Max and Intel Core i5-14600KF, NumPy 2.5.5 on each. `uv r
 - **NumPy is a different opponent on x86-64.** It has AVX2 loops of its own for `argmax`, `clip` and `astype` there, so at a million elements those gain 1.0x to 1.9x there, far less than on Apple Silicon.
 - **A call no kernel takes costs under a nanosecond more**, or a percent or so where a hook has to read its arguments. On the M1 Pro `x[3]` takes 66.7 ns on plain NumPy and 66.6 ns with hotkernels installed; `np.clip(x, -0.5, None)` takes 1.02 µs and 1.04 µs.
 - **`np.searchsorted` and `np.interp` are timed with as many needles as elements**, and `np.digitize` with 1,000 bin edges. With a sorted array of 1,000 elements and a million needles `np.searchsorted` is 27x faster on either side on the M1 Pro and `np.interp` 19x; on the i5-14600KF they are 4.9x, 4.8x on the right side, and 3.6x.
-- **Checked from Python.** 302,364 calls on each architecture, to NumPy and to bottleneck, give the same result, exceptions and warnings with hotkernels as without, and NumPy's own test suite gives the same outcome for each of its 47,234 tests.
+- **Checked from Python.** 403,023 calls on each architecture, to NumPy and to bottleneck, give the same result, exceptions and warnings with hotkernels as without, and NumPy's own test suite gives the same outcome for each of its 47,234 tests.
 
 ### The kernels as native functions
 
@@ -209,7 +209,7 @@ hotkernels.uninstall()          # NumPy is exactly as it was
 ```
 
 - `hotkernels.install(inexact=True)` also installs the kernels that are not bit-identical to NumPy.
-- `with hotkernels.enabled():` installs for the duration of a block.
+- `with hotkernels.enabled():` installs for the duration of a block, and puts hotkernels back as it found it when the block ends; it takes the same arguments as `install()`.
 - A kernel takes a call only when the array is a plain contiguous `ndarray` of its element type and every other argument is one it implements. Any other call goes to NumPy as it was written.
 - On any other platform, and on an x86-64 processor without the x86-64-v3 instruction sets, `install()` does nothing and `report()` says why.
 - `python -m hotkernels script.py [args ...]` runs an unmodified script with hotkernels installed; `-m module` runs a module, and `--report` prints the report at the end.

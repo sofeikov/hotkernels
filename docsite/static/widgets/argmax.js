@@ -18,7 +18,7 @@
 // Attributes:
 //   data-seed  seed of the first data set (default 3)
 
-import { h, button, stat, rng, reducedMotion } from "./util.js";
+import { h, button, stat, rng } from "./util.js";
 
 const BLOCKS = 6, BLOCK = 8;
 const N = BLOCKS * BLOCK;
@@ -181,7 +181,7 @@ export default async function mount(el) {
     result.set(final ? `${final.index}${final.index === expected ? " ✓" : " ✗"}` : "–");
     rescanned.set(final ? String(final.scanned) : "–");
     branches.set(reduced.some((step) => step.unordered) ? "1" : "0");
-    stepButton.disabled = playButton.disabled = done;
+    stepButton.disabled = done;
     tieButton.setAttribute("aria-pressed", String(state.tie));
     nanButton.setAttribute("aria-pressed", String(state.nan));
     if (done) stop();
@@ -191,9 +191,12 @@ export default async function mount(el) {
   const step = () => { state.pos += 1; render(); };
 
   const stepButton = button("Step", () => { stop(); step(); });
+  // Play steps through on a timer whatever the reduced-motion setting: each
+  // step is a redraw, not a movement, and the reader asked for it. From the
+  // last step it starts again from the first.
   const playButton = button("Play", () => {
     if (timer) return stop();
-    if (reducedMotion) { state.pos = Infinity; return render(); }
+    if (stepButton.disabled) { state.pos = 0; render(); }
     playButton.textContent = "Pause";
     timer = setInterval(step, STEP_MS);
   }, "primary");

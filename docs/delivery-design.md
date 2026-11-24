@@ -10,7 +10,7 @@ The binding is the same C on every architecture. The figures in this document, t
 
 ## Summary
 
-- **Everything can be reached**, including `a[mask]`, `x[mask] = v` and `x.astype(...)`, which the core design recorded as a known gap. It takes five kinds of hook. One is an API NumPy provides for the purpose. The other four change NumPy's own objects in place.
+- **Everything can be reached**, including `a[mask]`, `x[mask] = v` and `x.astype(...)`, which the core design recorded as a known gap. It takes five kinds of hook. One is an API NumPy provides for the purpose. The other four change NumPy's own objects in place. Two more came later: the ufunc call hook ([ufunc-lane-design.md](ufunc-lane-design.md)) and the function hook set in bottleneck's function objects ([bottleneck-design.md](bottleneck-design.md)).
 - **A hook costs about 1 ns on a call that does not take a kernel.** Measured: 0.5 to 1.4 ns per call, on calls that cost 59 ns and up.
 - **End to end from Python, the speedups hold.** At a million elements: `np.argmax` 8.6x, `np.clip` 4.9x, `x[mask]` 9.8x to 16x, `x[mask] = v` 7.6x to 21x. The mask selection figure is lower than the judge's 22.5x, because a result has to be allocated.
 - **A hooked function or method can also skip NumPy's Python wrapper.** `np.argmax` on 16 elements drops from 573 ns to 65 ns. `np.clip` and `x.argmax()`, which first had only a deeper hook, got the same treatment later: on 16 elements `np.clip` drops from 1.2 µs to 120 ns and `x.argmax()` from 172 ns to 55 ns ([issue 17](https://github.com/sofeikov/kernel-arena/issues/17)). That is a win of the binding, not of a kernel.
@@ -98,7 +98,7 @@ The whole interface:
 |---|---|
 | `hotkernels.install(inexact=False)` | Applies every hook. Returns nothing. With `inexact=True` it also installs the kernels that are not bit-identical to NumPy |
 | `hotkernels.uninstall()` | Removes every hook. NumPy is exactly as it was |
-| `with hotkernels.enabled():` | `install()` on entry, `uninstall()` on exit if this block did the installing |
+| `with hotkernels.enabled():` | `install()` on entry, with the arguments given; on exit hotkernels is as the block found it: `uninstall()` if the block did the installing, otherwise `install()` with the arguments in force before the block |
 | `hotkernels.report()` | Returns what is installed and how often each kernel ran. Printing it gives a table |
 
 Rules:
