@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 7
+#define CORE_VERSION 8
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -1305,9 +1305,10 @@ fail:
 
 /* The kinds of road, by the method each stands for. */
 enum { BINARY, UNARY, ARRAY_UFUNC, ARRAY_FUNCTION, REDUCTION, GETITEM, ATTRIBUTE, INPLACE, SETITEM, STANDIN_CALL,
-       STANDIN_NAME, ROAD_KINDS };
+       STANDIN_NAME, RESHAPE, TRANSPOSE, SWAPAXES, RAVEL, ROAD_KINDS };
 static const char *const ROAD_NAMES[ROAD_KINDS] = {"binary", "unary", "array_ufunc", "array_function", "reduction", "getitem",
-                                                   "attribute", "inplace", "setitem", "standin_call", "standin_name"};
+                                                   "attribute", "inplace", "setitem", "standin_call", "standin_name",
+                                                   "reshape", "transpose", "swapaxes", "ravel"};
 
 typedef struct {
     PyObject_HEAD
@@ -1459,6 +1460,38 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         result = plain_item(args[0], args[1], frame);
         break;
+    case RESHAPE:
+    case TRANSPOSE:
+    case SWAPAXES:
+    case RAVEL: {
+        /* The methods that are a call of one NumPy function on the array, with the arguments put as the Python
+         * method puts them: `x.reshape(4, 3)` is `np.reshape(x, (4, 3))`, `x.transpose(1, 0)` is
+         * `np.transpose(x, (1, 0))` and `x.transpose(axes)` is `np.transpose(x, axes)`. */
+        Py_ssize_t given = count - 1;
+        if (named || (road->kind == SWAPAXES && given != 2) || (road->kind == RAVEL && given != 0)) {
+            goto python;
+        }
+        if (road->kind == SWAPAXES) {
+            operands = PyTuple_Pack(3, args[0], args[1], args[2]);
+        } else if (given == 0 && road->kind != RESHAPE) {
+            operands = PyTuple_Pack(1, args[0]);
+        } else if (given == 1 && (road->kind == RESHAPE || !PyLong_Check(args[1]))) {
+            operands = PyTuple_Pack(2, args[0], args[1]);
+        } else {
+            PyObject *rest = PyTuple_New(given);
+            for (Py_ssize_t place = 0; rest != NULL && place < given; place++) {
+                PyTuple_SET_ITEM(rest, place, Py_NewRef(args[1 + place]));
+            }
+            operands = rest ? PyTuple_Pack(2, args[0], rest) : NULL;
+            Py_XDECREF(rest);
+        }
+        kwargs = PyDict_New();
+        if (operands == NULL || kwargs == NULL) {
+            goto fail;
+        }
+        result = try_defer(road->operation, road->name, operands, kwargs, NULL, frame);
+        break;
+    }
     case INPLACE:
         if (named || count != 2) {
             goto python;

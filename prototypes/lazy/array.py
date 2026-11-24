@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 7
+CORE_VERSION = 8
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -1791,6 +1791,10 @@ LazyArray.__array_ufunc__.road = ("array_ufunc",)
 LazyArray.__array_function__.road = ("array_function", HANDLED_APART)
 LazyArray.__getitem__.road = ("getitem",)
 LazyArray.__setitem__.road = ("setitem",)
+LazyArray.reshape.road = ("reshape", np.reshape, "reshape")
+LazyArray.transpose.road = ("transpose", np.transpose, "transpose")
+LazyArray.swapaxes.road = ("swapaxes", np.swapaxes, "swapaxes")
+LazyArray.ravel.road = ("ravel", np.ravel, "ravel")
 
 # `graph.deferred` as Python has it, to put back when the C core is taken away.
 _python_deferred = graph.deferred
