@@ -99,7 +99,7 @@ if kernel_arch != ''
   py.extension_module('_binding',
     [binding / 'module.c', binding / 'hook_slot.c', binding / 'hook_loop.c',
      binding / 'hook_function.c', binding / 'hook_method.c', binding / 'hook_index.c',
-     binding / 'hook_bottleneck.c'] + asm_sources,
+     binding / 'hook_bottleneck.c', binding / 'hook_ufunc.c'] + asm_sources,
     include_directories: include_directories(numpy_include, is_system: true),
     c_args: ['-O3', '-I' + kernel_set],
     override_options: ['c_std=c11', 'warning_level=2'],

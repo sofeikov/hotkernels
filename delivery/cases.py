@@ -6401,6 +6401,578 @@ def argsort_cases() -> Iterator[Case]:
                    lambda n=n: (values("i64", n).view("datetime64[ns]"),), _stable, None)
 
 
+# ------------------------------------------------------------------ ufunc lane
+
+# The most elements a result may have for the ufunc lane: LANE_MAX_ELEMENTS in hook_ufunc.c.
+LANE_MAX_ELEMENTS = 16384
+# NumPy's default buffer size in elements, LANE_BUFFER_ELEMENTS in hook_ufunc.c.
+# The lane takes an array and a row of it only when the result fits in one
+# buffer of whole rows, which NumPy then fills in one loop call.
+LANE_BUFFER_ELEMENTS = 8192
+# The elements beyond which NumPy, and the lane, release the interpreter lock.
+LANE_THREADS_ELEMENTS = 500
+# Element types the lane takes, as spec names.
+LANE_DTYPES = ("f64", "f32", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool")
+# Element types it leaves to NumPy, as NumPy type names. Not long double: on
+# x86-64 it is 10 bytes of an 80-bit number in 16 of storage, and the 6 bytes
+# of padding NumPy leaves as they were differ from one run to the next, so its
+# results cannot be compared bytewise.
+LANE_OTHER_DTYPES = ("float16", "complex64", "complex128")
+# Sizes of the sweep over values: below and on both sides of NumPy's
+# threshold for releasing the lock.
+LANE_VALUE_SIZES = (1, 3, 16, LANE_THREADS_ELEMENTS, LANE_THREADS_ELEMENTS + 1)
+# Sizes of random values only: large, at the limit and one above it.
+LANE_LARGE_SIZES = (4096, LANE_MAX_ELEMENTS, LANE_MAX_ELEMENTS + 1)
+# Sizes of the sweep over layouts and spellings.
+LANE_LAYOUT_SIZES = (16, 1000, 20000)
+# The ufuncs of the sweeps over layouts, numbers and outputs: arithmetic,
+# comparisons, maxima, a transcendental function of two operands, logic and
+# bits, and those whose integer loops raise or set flags.
+LANE_LAYOUT_UFUNCS = ("add", "subtract", "multiply", "true_divide", "floor_divide", "remainder", "power", "greater",
+                      "equal", "maximum", "minimum", "arctan2", "logical_and", "bitwise_and", "left_shift", "exp",
+                      "negative", "absolute", "sqrt", "isnan", "invert")
+# Element types of the sweep over layouts and outputs.
+LANE_LAYOUT_DTYPES = ("f64", "f32", "i64", "u8", "bool")
+# The ufuncs for which NumPy deprecates a positional output and warns; the
+# lane leaves such calls to NumPy.
+LANE_POSITIONAL_DEPRECATED = ("maximum", "minimum")
+# The ufuncs whose integer loops raise a Python error for some values
+# (a negative exponent): the lane's counter does not move for a call that
+# raises, so no expectation is stated for them on integer values.
+LANE_RAISING_INTEGER_UFUNCS = ("power", "float_power", "ldexp")
+# Numbers on one side of a call: Python floats and ints at the edges of what
+# the lane converts (2^24 and 2^53, the limits of float32 and float64 for an
+# exact int; the int8, uint8, int32 and int64 ranges; a float32 overflow), and
+# NumPy numbers of the array's type and of others, and a bool, which is no int
+# to the lane.
+LANE_NUMBERS = (2.0, -0.5, 0.0, -0.0, float("inf"), float("nan"), 1e300, 3.5e38, 0, 1, -7, 127, 128, -129, 255,
+                256, 2**24, 2**24 + 1, 2**31, 2**53, 2**53 + 1, 2**63 - 1, 2**63, 2**64, -1, True,
+                np.float64(1.5), np.float32(-2.5), np.int64(4), np.int32(-3), np.uint8(7), np.bool_(True),
+                np.float16(1.0), np.longlong(5), 1j)
+# Matrix and row shapes of the sweep over rows: rows of 2, 6, 24 and 3,000
+# elements, results inside and outside one buffer of whole rows (8,190
+# elements of rows of 6; two rows of 3,000), a row of one and a column, which
+# the lane leaves to NumPy, and three dimensions.
+LANE_ROW_SHAPES = (((7, 2), (2,)), ((12, 6), (6,)), ((1365, 6), (6,)), ((1366, 6), (6,)), ((5, 4, 6), (4, 6)),
+                   ((5, 4, 6), (6,)), ((2, 3000), (3000,)), ((3, 3000), (3000,)), ((9, 1), (1,)), ((4, 5), (4, 1)),
+                   ((1, 9), (9,)), ((4, 3), (1, 3)))
+# Floating-point error settings each error case runs under.
+LANE_ERRSTATES = ("warn", "raise", "ignore", "call", "log")
+
+
+def _lane_ufuncs() -> tuple[np.ufunc, ...]:
+    """Return the ufuncs the lane hooks: those of the numpy namespace with one or two inputs and one output."""
+    found = {id(u): u for u in vars(np).values() if type(u) is np.ufunc}
+    return tuple(sorted((u for u in found.values() if u.nin in (1, 2) and u.nout == 1 and u.signature is None),
+                        key=lambda u: u.__name__))
+
+
+def _lane_array(x: object) -> bool:
+    """Say whether the lane reads or writes an operand as an array: an exact ndarray it takes as it is."""
+    return (type(x) is np.ndarray and x.ndim >= 1 and x.flags.c_contiguous and x.flags.aligned
+            and x.dtype.isnative and 1 <= x.size <= LANE_MAX_ELEMENTS and x.dtype.char in _LANE_TYPE_CHARS)
+
+
+# The type characters of the element types the lane takes.
+_LANE_TYPE_CHARS = frozenset(np.dtype(np_dtype(name)).char for name in LANE_DTYPES) | {"q", "Q"}
+
+
+def _lane_number(x: object) -> bool:
+    """Say whether an operand is a number the lane may take: a Python float or int, or a NumPy number of its types."""
+    return type(x) in (float, int) or (isinstance(x, np.generic) and type(x) is np.dtype(type(x)).type
+                                       and np.dtype(type(x)).char in _LANE_TYPE_CHARS)
+
+
+def _lane_converts(x: object, dtype: np.dtype) -> bool:
+    """Say whether the lane converts a number exactly to a loop's element type, as hook_ufunc.c's number_as does.
+
+    Args:
+        x: The number.
+        dtype: The type NumPy resolved the number to.
+
+    Returns:
+        True for a NumPy number of exactly that type, a Python float to float64,
+        or to float32 unless it is finite and rounds to an infinity, and a
+        Python int in an integer type's range, or of magnitude at most 2^53 for
+        float64 and 2^24 for float32.
+    """
+    if isinstance(x, np.generic):
+        return np.dtype(type(x)).num == dtype.num
+    if type(x) is float:
+        if dtype == np.float64:
+            return True
+        return dtype == np.float32 and not (math.isfinite(x) and abs(x) > float(np.finfo(np.float32).max))
+    if dtype.kind in "iu":
+        info = np.iinfo(dtype)
+        return info.min <= x <= info.max and -(2**63) <= x <= 2**63 - 1
+    if dtype == np.float64:
+        return abs(x) <= 2**53
+    if dtype == np.float32:
+        return abs(x) <= 2**24
+    return False
+
+
+def _lane_resolved(ufunc: np.ufunc, inputs: tuple) -> tuple | None:
+    """Return the types NumPy resolves a call to, as the lane asks for them, or None when it cannot."""
+    types = tuple(type(x) if type(x) in (float, int) else np.asarray(x).dtype for x in inputs)
+    try:
+        return ufunc.resolve_dtypes((*types, None))
+    except Exception:  # Any refusal means NumPy has no loop the lane could take.
+        return None
+
+
+def _lane_disjoint_or_same(a: np.ndarray, out: np.ndarray) -> bool:
+    """Say whether an input is the output's own memory or no part of it, as hook_ufunc.c's may_share does."""
+    a_start, out_start = a.__array_interface__["data"][0], out.__array_interface__["data"][0]
+    if a_start == out_start and a.nbytes == out.nbytes:
+        return True
+    return a_start + a.nbytes <= out_start or out_start + out.nbytes <= a_start
+
+
+def _lane_takes(ufunc: np.ufunc, inputs: tuple, out: object = None, positional: bool = False) -> bool:
+    """Say whether the ufunc lane must take a call, from its conditions in docs/ufunc-lane-design.md.
+
+    Stated apart from hook_ufunc.c, from NumPy's own type resolution, so that
+    the cases check the lane against its design rather than against itself.
+
+    Args:
+        ufunc: The ufunc called.
+        inputs: Its inputs.
+        out: The output it is given, or None.
+        positional: Whether the output is given positionally.
+
+    Returns:
+        True when every condition holds.
+    """
+    if positional and ufunc.__name__ in LANE_POSITIONAL_DEPRECATED:
+        return False
+    arrays = [x for x in inputs if isinstance(x, np.ndarray)]
+    if not arrays or not all(_lane_array(x) or (_lane_number(x) and not isinstance(x, np.ndarray)) for x in inputs):
+        return False
+    shape = max(arrays, key=lambda a: a.ndim).shape
+    total = math.prod(shape)
+    for a in arrays:
+        if a.shape == shape:
+            continue
+        if a.ndim >= len(shape) or tuple(shape[len(shape) - a.ndim:]) != a.shape:
+            return False
+        if a.size < 2 or total > (LANE_BUFFER_ELEMENTS // a.size) * a.size:
+            return False
+    resolved = _lane_resolved(ufunc, inputs)
+    if resolved is None or resolved[-1].char not in _LANE_TYPE_CHARS:
+        return False
+    for x, dtype in zip(inputs, resolved):
+        if dtype.char not in _LANE_TYPE_CHARS:
+            return False
+        if isinstance(x, np.ndarray) or isinstance(x, np.generic):
+            if np.asarray(x).dtype.num != dtype.num:
+                return False
+        elif dtype == np.bool_ or not _lane_converts(x, dtype):
+            return False
+    if out is not None:
+        if not (_lane_array(out) and out.flags.writeable and out.shape == shape and out.dtype.num == resolved[-1].num):
+            return False
+        if not all(_lane_disjoint_or_same(a, out) for a in arrays):
+            return False
+    return True
+
+
+def _lane_expect(ufunc: np.ufunc, inputs: tuple, out: object = None, positional: bool = False) -> str | None:
+    """Return a case's expectation: the lane, none, or ANY for a call whose integer loop may raise.
+
+    Args:
+        ufunc: The ufunc called.
+        inputs: Its inputs.
+        out: The output it is given, or None.
+        positional: Whether the output is given positionally.
+
+    Returns:
+        "ufunc_lane", None or ANY.
+    """
+    if not _lane_takes(ufunc, inputs, out, positional):
+        return None
+    raising = ufunc.__name__ in LANE_RAISING_INTEGER_UFUNCS and all(
+        np.asarray(x).dtype.kind in "iub" for x in inputs)
+    return ANY if raising else "ufunc_lane"
+
+
+def _lane_call(ufunc: np.ufunc, *inputs):
+    """Call a ufunc on its inputs."""
+    return ufunc(*inputs)
+
+
+def _lane_call_errstate(setting: str, ufunc: np.ufunc, *inputs):
+    """Call a ufunc with every floating-point error set to `setting`, through np.errstate.
+
+    Args:
+        setting: A value np.errstate takes. "call" calls a function that
+            records nothing; "log" needs an object with a `write` method.
+        ufunc: The ufunc.
+        *inputs: Its inputs.
+
+    Returns:
+        What the ufunc returns.
+    """
+    handlers = {"call": lambda kind, flag: None, "log": _DiscardingLog()}
+    if setting in handlers:
+        with np.errstate(all=setting, call=handlers[setting]):
+            return ufunc(*inputs)
+    with np.errstate(all=setting):
+        return ufunc(*inputs)
+
+
+class _DiscardingLog:
+    """An object np.errstate(all="log") can write its messages to; it keeps none."""
+
+    def write(self, message: str) -> None:
+        """Discard a message."""
+
+
+def _lane_out_keyword(ufunc: np.ufunc, *arguments):
+    """Call `ufunc(*inputs, out=out)`, the output being the last argument, and return whether it returned `out` itself."""
+    *inputs, out = arguments
+    return ufunc(*inputs, out=out) is out, out
+
+
+def _lane_out_tuple(ufunc: np.ufunc, *arguments):
+    """Call `ufunc(*inputs, out=(out,))` and return whether it returned `out` itself."""
+    *inputs, out = arguments
+    return ufunc(*inputs, out=(out,)) is out, out
+
+
+def _lane_out_positional(ufunc: np.ufunc, *arguments):
+    """Call `ufunc(*inputs, out)` and return whether it returned `out` itself."""
+    *inputs, out = arguments
+    return ufunc(*inputs, out) is out, out
+
+
+def _lane_out_none(ufunc: np.ufunc, *inputs):
+    """Call `ufunc(*inputs, out=None)`, which NumPy takes as no output."""
+    return ufunc(*inputs, out=None)
+
+
+def _lane_where(ufunc: np.ufunc, *inputs):
+    """Call `ufunc(*inputs, where=True)`: a keyword the lane leaves to NumPy."""
+    return ufunc(*inputs, where=True)
+
+
+def _lane_in_place(ufunc: np.ufunc, *arguments):
+    """Call `ufunc(x, y, out=x)`, the first input being the output, as `x += y` does."""
+    return ufunc(*arguments, out=arguments[0]) is arguments[0]
+
+
+def _lane_operator(op: Callable, *inputs):
+    """Apply a Python operator to the inputs, as `a + b` does."""
+    return op(*inputs)
+
+
+def _lane_inputs(ufunc: np.ufunc, dtype: str, n: int, x_class: str, y_class: str, position: int = 0) -> tuple:
+    """Build the inputs of one call: one array per input, the second of its own value class.
+
+    Args:
+        ufunc: The ufunc, which says how many inputs.
+        dtype: Element type as a spec name.
+        n: Element count.
+        x_class: Value class of the first input.
+        y_class: Value class of the second.
+        position: Index of the interesting element, for positional classes.
+
+    Returns:
+        The inputs.
+    """
+    x = values(dtype, n, x_class, position, arg="x")
+    return (x,) if ufunc.nin == 1 else (x, values(dtype, n, y_class, position, arg="y"))
+
+
+def _lane_case(label: str, ufunc: np.ufunc, make: Callable[[], tuple], call: Callable, out_index: int | None = None,
+               positional: bool = False, expect: str | None | object = "auto") -> Case:
+    """Make one case of the lane, its expectation worked out from the built arguments.
+
+    Args:
+        label: What the case is.
+        ufunc: The ufunc called.
+        make: Builds the arguments `call` takes after the ufunc.
+        call: Makes the call: takes the ufunc, then the arguments.
+        out_index: Index among the arguments of the output given, or None.
+        positional: Whether that output is given positionally.
+        expect: The expectation, or "auto" to work it out with _lane_expect.
+
+    Returns:
+        The case.
+    """
+    if expect == "auto":
+        arguments = make()
+        out = arguments[out_index] if out_index is not None else None
+        inputs = arguments[:ufunc.nin]
+        expect = _lane_expect(ufunc, inputs, out, positional)
+    return Case("ufunc", label, make, partial(call, ufunc), expect)
+
+
+def _lane_value_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield every hooked ufunc over every element type and value class at small sizes, and random values at large ones."""
+    for ufunc in ufuncs:
+        for dtype in LANE_DTYPES:
+            plain, positional = judge_cases.classes(dtype)
+            for n in LANE_VALUE_SIZES:
+                for cls in plain:
+                    for y_class in dict.fromkeys((cls, judge_cases.RANDOM)):
+                        yield _lane_case(f"{ufunc.__name__} {dtype} n={n} x={cls} y={y_class}", ufunc,
+                                         partial(_lane_inputs, ufunc, dtype, n, cls, y_class), _lane_call)
+                for cls in positional:
+                    yield _lane_case(f"{ufunc.__name__} {dtype} n={n} x={cls}@last", ufunc,
+                                     partial(_lane_inputs, ufunc, dtype, n, cls, cls, n - 1), _lane_call)
+            for n in LANE_LARGE_SIZES:
+                yield _lane_case(f"{ufunc.__name__} {dtype} n={n} random", ufunc,
+                                 partial(_lane_inputs, ufunc, dtype, n, judge_cases.RANDOM, judge_cases.RANDOM),
+                                 _lane_call)
+        for name in LANE_OTHER_DTYPES:
+            yield _lane_case(f"{ufunc.__name__} {name} n=16", ufunc,
+                             lambda ufunc=ufunc, name=name: tuple(values("f64", 16, arg=a).astype(name)
+                                                                  for a in ("x", "y")[:ufunc.nin]),
+                             _lane_call, expect=None)
+
+
+def _lane_mixed_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield two-input ufuncs on arrays of two different element types: NumPy's loop then needs a cast, or does not."""
+    for ufunc in ufuncs:
+        if ufunc.nin != 2:
+            continue
+        for first in LANE_LAYOUT_DTYPES:
+            for second in LANE_LAYOUT_DTYPES:
+                if first != second:
+                    yield _lane_case(f"{ufunc.__name__} {first} with {second} n=16", ufunc,
+                                     lambda first=first, second=second: (values(first, 16, arg="x"),
+                                                                         values(second, 16, arg="y")),
+                                     _lane_call)
+
+
+def _lane_number_inputs(dtype: str, n: int, number: object, first: bool) -> tuple:
+    """Build an array and a number, the number first or second."""
+    x = values(dtype, n, arg="x")
+    return (number, x) if first else (x, number)
+
+
+def _lane_number_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield two-input ufuncs on an array and a number, on either side, over every element type."""
+    for ufunc in ufuncs:
+        if ufunc.nin != 2:
+            continue
+        for dtype in LANE_DTYPES:
+            for number in LANE_NUMBERS:
+                for first in (False, True):
+                    side = "first" if first else "second"
+                    yield _lane_case(f"{ufunc.__name__} {dtype} n=16 with {type(number).__name__} {number!r} {side}",
+                                     ufunc, partial(_lane_number_inputs, dtype, 16, number, first),
+                                     partial(_lane_call_errstate, "ignore"))
+
+
+def _lane_variant_inputs(ufunc: np.ufunc, dtype: str, n: int, variant: Variant, both: bool) -> tuple:
+    """Build the inputs of a call whose first input, or both, have one layout.
+
+    Args:
+        ufunc: The ufunc, which says how many inputs.
+        dtype: Element type as a spec name.
+        n: Element count.
+        variant: Layout of the first input.
+        both: Whether the second input has the layout too; else it is contiguous.
+
+    Returns:
+        The inputs.
+    """
+    x = variant.build(values(dtype, n, arg="x"))
+    if ufunc.nin == 1:
+        return (x,)
+    y = values(dtype, n, arg="y")
+    return (x, variant.build(y) if both else y)
+
+
+def _lane_layout_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield the sweep over layouts and array kinds, and over the operator spellings."""
+    operators = {"add": operator.add, "subtract": operator.sub, "multiply": operator.mul, "true_divide": operator.truediv,
+                 "greater": operator.gt, "equal": operator.eq, "negative": operator.neg, "absolute": abs,
+                 "invert": operator.invert, "bitwise_and": operator.and_, "power": operator.pow}
+    for ufunc in ufuncs:
+        for dtype in LANE_LAYOUT_DTYPES:
+            for n in LANE_LAYOUT_SIZES:
+                for variant in VARIANTS:
+                    if n < variant.min_n or (np_dtype(dtype).itemsize == 1 and not variant.for_single_bytes):
+                        continue
+                    for both in (False, True)[: ufunc.nin]:
+                        expect = "auto" if variant.predictable else ANY
+                        yield _lane_case(f"{ufunc.__name__} {dtype} n={n} {variant.name}{' both' if both else ''}",
+                                         ufunc, partial(_lane_variant_inputs, ufunc, dtype, n, variant, both),
+                                         partial(_lane_call_errstate, "ignore"), expect=expect)
+                if ufunc.__name__ in operators:
+                    op = operators[ufunc.__name__]
+                    yield _lane_case(f"{ufunc.__name__} as an operator {dtype} n={n}", ufunc,
+                                     partial(_lane_inputs, ufunc, dtype, n, judge_cases.RANDOM, judge_cases.RANDOM),
+                                     lambda _ufunc, *inputs, op=op: _lane_operator(op, *inputs))
+                yield _lane_case(f"{ufunc.__name__} {dtype} n={n} where=True", ufunc,
+                                 partial(_lane_inputs, ufunc, dtype, n, judge_cases.RANDOM, judge_cases.RANDOM),
+                                 _lane_where, expect=None)
+                yield _lane_case(f"{ufunc.__name__} {dtype} n={n} out=None", ufunc,
+                                 partial(_lane_inputs, ufunc, dtype, n, judge_cases.RANDOM, judge_cases.RANDOM),
+                                 _lane_out_none)
+
+
+def _lane_output_arguments(ufunc: np.ufunc, dtype: str, n: int, kind: str) -> tuple:
+    """Build the inputs and an output of one kind.
+
+    Args:
+        ufunc: The ufunc.
+        dtype: Element type of the inputs, as a spec name.
+        n: Element count.
+        kind: "fresh" (of the result's type), "first" (the first input itself),
+            "other_type" (float64 for a float32 result, else float32),
+            "overlapping" (one element after the first input, in the same
+            buffer), "strided", "readonly" or "larger" (one more dimension).
+
+    Returns:
+        The inputs followed by the output.
+    """
+    inputs = _lane_inputs(ufunc, dtype, n, judge_cases.RANDOM, judge_cases.RANDOM)
+    resolved = _lane_resolved(ufunc, inputs)
+    result = resolved[-1] if resolved is not None else np.dtype(np.float64)
+    if kind == "first":
+        return (*inputs, inputs[0])
+    if kind == "overlapping":
+        buffer = np.concatenate([inputs[0], inputs[0][:1]])
+        return (buffer[:n], *inputs[1:], buffer[1:].astype(result) if buffer.dtype != result else buffer[1:])
+    if kind == "other_type":
+        return (*inputs, np.zeros(n, np.float32 if result != np.float32 else np.float64))
+    if kind == "strided":
+        return (*inputs, np.zeros(2 * n, result)[::2])
+    if kind == "readonly":
+        out = np.zeros(n, result)
+        out.flags.writeable = False
+        return (*inputs, out)
+    if kind == "larger":
+        return (*inputs, np.zeros((2, n), result))
+    return (*inputs, np.zeros(n, result))
+
+
+def _lane_output_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield the calls with an output: keyword, tuple and positional, of every kind."""
+    spellings = (("out=", _lane_out_keyword, False), ("out=(..,)", _lane_out_tuple, False),
+                 ("positional out", _lane_out_positional, True))
+    kinds = ("fresh", "first", "other_type", "overlapping", "strided", "readonly", "larger")
+    for ufunc in ufuncs:
+        for dtype in LANE_LAYOUT_DTYPES:
+            for n in (16, 1000):
+                for kind in kinds:
+                    # NumPy alone gives different results from one run to the
+                    # next here: after the loop raises, its buffered cast into
+                    # the output copies what was left in its buffer.
+                    if (kind == "other_type" and ufunc.__name__ in LANE_RAISING_INTEGER_UFUNCS
+                            and np_dtype(dtype).kind in "iub"):
+                        continue
+                    for text, call, positional in spellings:
+                        yield _lane_case(f"{ufunc.__name__} {dtype} n={n} {text} {kind}", ufunc,
+                                         partial(_lane_output_arguments, ufunc, dtype, n, kind),
+                                         lambda u, *a, call=call: _lane_call_errstate_out(call, u, *a),
+                                         out_index=ufunc.nin, positional=positional)
+
+
+def _lane_call_errstate_out(call: Callable, ufunc: np.ufunc, *arguments):
+    """Make a call with an output with floating-point errors ignored, so random data does not warn."""
+    with np.errstate(all="ignore"):
+        return call(ufunc, *arguments)
+
+
+def _lane_row_inputs(dtype: str, shape: tuple, row: tuple, row_first: bool) -> tuple:
+    """Build an array and a row of it, the row first or second."""
+    m = values(dtype, math.prod(shape), arg="x").reshape(shape)
+    r = values(dtype, math.prod(row), arg="y").reshape(row)
+    return (r, m) if row_first else (m, r)
+
+
+def _lane_row_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield two-input ufuncs on an array and a row of it, the row on either side, and in place."""
+    for ufunc in ufuncs:
+        if ufunc.nin != 2:
+            continue
+        for dtype in ("f64", "f32", "i64", "bool"):
+            for shape, row in LANE_ROW_SHAPES:
+                for row_first in (False, True):
+                    yield _lane_case(f"{ufunc.__name__} {dtype} {shape} with {row}{' first' if row_first else ''}",
+                                     ufunc, partial(_lane_row_inputs, dtype, shape, row, row_first),
+                                     partial(_lane_call_errstate, "ignore"))
+                yield _lane_case(f"{ufunc.__name__} {dtype} {shape} with {row} in place", ufunc,
+                                 partial(_lane_row_inputs, dtype, shape, row, False),
+                                 lambda u, *a: _lane_call_errstate_out(_lane_in_place, u, *a), out_index=0)
+
+
+def _lane_error_inputs(ufunc: np.ufunc, dtype: str, kind: str) -> tuple:
+    """Build inputs that make a loop raise floating-point exceptions or a Python error.
+
+    Args:
+        ufunc: The ufunc.
+        dtype: Element type as a spec name.
+        kind: "specials": zeros of both signs, infinities, NaN and the largest
+            numbers in both inputs; "zero_divisor": random values over zeros;
+            "negative_exponent": a negative second operand for integer powers.
+
+    Returns:
+        The inputs, of 16 elements.
+    """
+    x = values(dtype, 16, arg="x")
+    if kind == "zero_divisor":
+        y = np.zeros(16, x.dtype)
+    elif kind == "negative_exponent":
+        y = np.full(16, -1, x.dtype) if x.dtype.kind == "i" else values(dtype, 16, arg="y")
+    else:
+        x = values(dtype, 16, "extremes", arg="x")
+        y = values(dtype, 16, "inf_mix" if x.dtype.kind == "f" else "extremes", arg="y")
+    return (x,) if ufunc.nin == 1 else (x, y)
+
+
+def _lane_error_cases(ufuncs: tuple[np.ufunc, ...]) -> Iterator[Case]:
+    """Yield calls whose loops raise flags or errors, under every np.errstate setting, and in place."""
+    for ufunc in ufuncs:
+        for dtype in ("f64", "f32", "i64", "u8"):
+            for kind in ("specials", "zero_divisor", "negative_exponent"):
+                for setting in LANE_ERRSTATES:
+                    yield _lane_case(f"{ufunc.__name__} {dtype} {kind} errstate={setting}", ufunc,
+                                     partial(_lane_error_inputs, ufunc, dtype, kind),
+                                     partial(_lane_call_errstate, setting), expect=ANY)
+                yield _lane_case(f"{ufunc.__name__} {dtype} {kind} in place, errstate=raise", ufunc,
+                                 partial(_lane_error_inputs, ufunc, dtype, kind),
+                                 lambda u, *a: _lane_errstate_in_place(u, *a), expect=ANY)
+
+
+def _lane_errstate_in_place(ufunc: np.ufunc, *inputs):
+    """Call `ufunc(x, y, out=x)` under np.errstate(all="raise"), and return x whatever happens."""
+    with np.errstate(all="raise"):
+        try:
+            ufunc(*inputs, out=inputs[0])
+        except FloatingPointError:
+            pass
+    return inputs[0]
+
+
+def ufunc_cases() -> Iterator[Case]:
+    """Yield the cases of the ufunc lane: elementwise ufunc calls on small arrays.
+
+    Every hooked ufunc over every element type the lane takes and its value
+    classes; arrays of two element types; numbers of every kind on either
+    side; layouts, array kinds and operator spellings; outputs of every kind
+    and spelling; an array and a row of it; and loops that raise, under every
+    error setting. Each case states whether the lane must take it, worked out
+    by _lane_takes from the design's conditions, except where the call may
+    raise, when only the results are compared.
+    """
+    every = _lane_ufuncs()
+    chosen = tuple(u for u in every if u.__name__ in LANE_LAYOUT_UFUNCS)
+    yield from _lane_value_cases(every)
+    yield from _lane_mixed_cases(chosen)
+    yield from _lane_number_cases(chosen)
+    yield from _lane_layout_cases(chosen)
+    yield from _lane_output_cases(chosen)
+    yield from _lane_row_cases(chosen)
+    yield from _lane_error_cases(chosen)
+
+
+
 # Every operation that has a hook, with its exact cases.
 OPERATIONS: dict[str, Callable[[], Iterator[Case]]] = {
     "argmax": partial(argext_cases, "argmax"),
@@ -6428,6 +7000,7 @@ OPERATIONS: dict[str, Callable[[], Iterator[Case]]] = {
     "inplace": inplace_cases,
     **{f"bn.{function}": partial(bottleneck_cases, function) for function in BN_FUNCTIONS},
     "argsort": argsort_cases,
+    "ufunc": ufunc_cases,
 }
 
 # Operations that have kernels which are not bit-identical to NumPy, with the

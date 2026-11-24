@@ -34,13 +34,21 @@ functions, "Left to NumPy" counts calls left to bottleneck.
 It is not counted for {% for kernel in uncounted %}{{ kernel.numpy_call }}{{ " and " if loop.revindex == 2 else (", " if not loop.last else "") }}{% endfor %}, since every add and
 subtract of float64 arrays passes their hook.
 {% endif %}
-{% set builtins = report.kernels | selectattr("builtin") | list %}
+{% set lanes = report.kernels | selectattr("builtin") | selectattr("implementation", "equalto", "NumPy") | list %}
+{% set builtins = report.kernels | selectattr("builtin") | rejectattr("implementation", "equalto", "NumPy") | list %}
 {% if builtins %}
 Not counted on the first line, because they are loops built into hotkernels
 rather than kernels:
 {% for kernel in builtins %}{{ kernel.numpy_call }} on {{ kernel.elements }}{{ ", " if not loop.last else "." }}{% endfor %}
 
 {% endif %}
+{% for kernel in lanes %}
+The {{ kernel.numpy_call }} row is NumPy's own loops, which hotkernels calls
+for small arrays without NumPy's call path: a + b, a > 0, np.exp(a), x += y.
+Its "Left to NumPy" counts every other ufunc call. It is not counted on the
+first line.
+
+{% endfor %}
 {% if not report.inexact %}
 Kernels marked "within tolerance" are not bit-identical to NumPy and are
 installed only by install(inexact=True).

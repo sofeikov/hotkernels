@@ -170,9 +170,11 @@ def build(version: str, installed: bool, unsupported: str | None, inexact: bool,
     table = load_kernel_table()
     rows, seen_operations = [], set()
     for info in KERNELS:
-        # A loop built into the binding is not in the table: it is C, and
-        # bit-identical to NumPy, which `delivery check` holds it to.
-        entry = {"implementation": BUILTIN_IMPLEMENTATION} if info.builtin else table.get(info.name, {})
+        # A loop built into the binding is not in the table: it is C, or
+        # NumPy's own loop for the ufunc lane, and bit-identical to NumPy,
+        # which `delivery check` holds it to.
+        builtin = {"implementation": info.implementation or BUILTIN_IMPLEMENTATION}
+        entry = builtin if info.builtin else table.get(info.name, {})
         exact = entry.get("exact", True)
         hooks_applied = any(hook in applied_hooks for hook in info.hooks)
         note = _note(info, exact, installed, inexact, hooks_applied, pending or {})

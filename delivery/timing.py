@@ -54,6 +54,8 @@ MIN_CALLS = 3
 MAX_CALLS = 200_000
 # Seed of all timing data.
 SEED = 7
+# The most elements a result may have for the ufunc lane: LANE_MAX_ELEMENTS in hook_ufunc.c.
+LANE_MAX_ELEMENTS = 16384
 # Columns of the two-dimensional arrays timed. Every timed size is a multiple of it.
 TIMED_COLUMNS = 4
 # Columns of the timed boolean matrices of any(axis=1): the width its kernel
@@ -566,6 +568,23 @@ def _two_floats(n: int) -> tuple:
     return rng.standard_normal(n), rng.standard_normal(n)
 
 
+def _float_matrix_and_row(n: int) -> tuple:
+    """Build a float64 matrix of TIMED_COLUMNS columns and n elements, and a row of it."""
+    rng = _rng(n)
+    return rng.standard_normal((n // TIMED_COLUMNS, TIMED_COLUMNS)), rng.standard_normal(TIMED_COLUMNS)
+
+
+def _maximum_in_place(x: np.ndarray, y: np.ndarray) -> None:
+    """Run `np.maximum(x, y, out=x)`: an output given, the first input, whose values stay bounded however often it runs."""
+    np.maximum(x, y, out=x)
+
+
+def _strided_pair(n: int) -> tuple:
+    """Build two float64 arrays of n elements, each every second element of an array twice as long."""
+    rng = _rng(n)
+    return rng.standard_normal(2 * n)[::2], rng.standard_normal(2 * n)[::2]
+
+
 def _subtract_in_place(w: np.ndarray, b: np.ndarray) -> None:
     """Run `w -= b`."""
     w -= b
@@ -743,6 +762,21 @@ TAKEN: tuple[Timed, ...] = (
     Timed("argsort", "np.argsort(np.flip(x), kind='stable')", "float64, a reversed view",
           partial(_floats, np.float64), lambda x: np.argsort(np.flip(x), kind="stable"), "argsort_f64",
           min_n=ARGSORT_MIN_N),
+    # The ufunc lane: NumPy's own loops without NumPy's call path, up to
+    # LANE_MAX_ELEMENTS; above it the statements are measured as left to NumPy.
+    Timed("ufunc", "a + b", "float64", _two_floats, np.add, "ufunc_lane", max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "a * 2.0", "float64", partial(_floats, np.float64), lambda a: a * 2.0, "ufunc_lane",
+          max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "a > 0", "float64", partial(_floats, np.float64), lambda a: a > 0, "ufunc_lane",
+          max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "np.exp(a)", "float64", partial(_floats, np.float64), np.exp, "ufunc_lane", max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "a * 2.0", "float32", partial(_floats, np.float32), lambda a: a * 2.0, "ufunc_lane",
+          max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "i + 1", "int64", partial(_ints, np.int64), lambda i: i + 1, "ufunc_lane", max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "np.maximum(x, y, out=x)", "float64", _two_floats, _maximum_in_place, "ufunc_lane",
+          max_n=LANE_MAX_ELEMENTS),
+    Timed("ufunc", "m - row", f"float64, {TIMED_COLUMNS} columns", _float_matrix_and_row, np.subtract, "ufunc_lane",
+          max_n=LANE_MAX_ELEMENTS),
 )
 
 # Statements that reach a hook and are left to NumPy: what a hook costs a
@@ -793,6 +827,8 @@ LEFT: tuple[Timed, ...] = (
     Timed("argsort", "np.argsort(x, kind='stable')", "float64, nearly sorted",
           _nearly_sorted_floats, _stable_argsort, None),
     Timed("argsort", "np.argsort(x, kind='stable')", "float32", partial(_floats, np.float32), _stable_argsort, None),
+    Timed("ufunc", "a + b", "float64, strided", _strided_pair, np.add, None),
+    Timed("ufunc", "a + b", "float16", lambda n: tuple(a.astype(np.float16) for a in _two_floats(n)), np.add, None),
 )
 
 

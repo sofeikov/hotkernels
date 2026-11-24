@@ -76,6 +76,9 @@ typedef enum {
     HK_CUMSUM_ROWS_F64, HK_CUMPROD_ROWS_F64, HK_CUMMAX_ROWS_F64, HK_CUMFMAX_ROWS_F64,
     HK_ARGMAX_ROWS_F32, HK_ARGMAX_ROWS_F64, HK_ARGMIN_ROWS_F32, HK_ARGMIN_ROWS_F64,
     HK_ADD_INPLACE_F64, HK_SUBTRACT_INPLACE_F64,
+    // Not a loop of the binding's own: NumPy's inner loops, called directly
+    // for elementwise ufunc calls on small arrays (hook_ufunc.c).
+    HK_UFUNC_LANE,
     HK_KERNEL_COUNT
 } hk_kernel;
 
@@ -87,7 +90,7 @@ typedef enum {
     HK_OP_NONZERO, HK_OP_CUMSUM, HK_OP_ASTYPE, HK_OP_SUM, HK_OP_COUNT_NONZERO,
     HK_OP_HISTOGRAM, HK_OP_BINCOUNT, HK_OP_ISIN, HK_OP_SEARCHSORTED, HK_OP_INTERP,
     HK_OP_WHERE, HK_OP_ACCUMULATE, HK_OP_REDUCEAT, HK_OP_ANY, HK_OP_ROUND, HK_OP_MEDIAN,
-    HK_OP_UNIQUE, HK_OP_ARGSORT,
+    HK_OP_UNIQUE, HK_OP_ARGSORT, HK_OP_UFUNC,
     // bottleneck's functions: a call counted here was left to bottleneck.
     HK_OP_BN_NANMEAN, HK_OP_BN_NANSTD, HK_OP_BN_NANMIN, HK_OP_BN_NANMAX,
     HK_OPERATION_COUNT
@@ -764,5 +767,6 @@ extern hk_hook hk_function_hooks[];
 extern hk_hook hk_method_hooks[];
 extern hk_hook hk_index_hooks[];
 extern hk_hook hk_bottleneck_hooks[];
+extern hk_hook hk_ufunc_hooks[];
 
 #endif

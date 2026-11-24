@@ -28,6 +28,11 @@ FUNCTION = "function"
 METHOD = "method"
 INDEXING = "indexing"
 BOTTLENECK = "bottleneck"
+UFUNC = "ufunc call"
+
+# What report() shows as the implementation of the ufunc lane: NumPy's own
+# inner loops, which the binding calls without NumPy's call path.
+NUMPY_LOOPS = "NumPy"
 
 # The module that defines bottleneck's functions. A bottleneck hook is applied
 # only when it is in sys.modules; hotkernels never imports it.
@@ -200,6 +205,10 @@ class KernelInfo:
     # `kernels/`: the judge never sees it, and `report()` shows it as exact C
     # and does not count it among the kernels.
     builtin: bool = False
+    # What `report()` shows in its Kernel column for a row built into the
+    # binding that is not C of its own, or None for C: "NumPy" for the ufunc
+    # lane, which calls NumPy's own loops.
+    implementation: str | None = None
 
 
 def _marked(dtype: type, n: int, index: int, value: float) -> np.ndarray:
@@ -1002,6 +1011,116 @@ def _argsort(dtype: type) -> bool:
     return result.dtype == np.intp and result.tolist() == expected
 
 
+# Element count of the ufunc lane's probes: far below every threshold of the lane.
+LANE_PROBE_N = 16
+# Rows and columns of the matrix the lane's row probe subtracts a row from.
+LANE_PROBE_SHAPE = (4, 5)
+# The value the lane's comparison probe compares with.
+LANE_PROBE_THRESHOLD = 3
+
+
+def _lane_values(offset: float, step: float, n: int = LANE_PROBE_N) -> list[float]:
+    """Return `n` floats, `offset + step * i`, all exact in float32.
+
+    Args:
+        offset: The first value.
+        step: The difference between neighbours; a power of two or a small multiple of one.
+        n: How many.
+
+    Returns:
+        The values, as Python floats.
+    """
+    return [offset + step * i for i in range(n)]
+
+
+def _lane_add() -> bool:
+    """Probe the ufunc lane: `a + b` on two float64 arrays of one shape.
+
+    The expected values are Python's own float additions, which are the same
+    IEEE operations.
+
+    Returns:
+        Whether the result is a float64 array of the sums.
+    """
+    a, b = _lane_values(0.25, 0.5), _lane_values(-3.0, 0.125)
+    result = np.array(a) + np.array(b)
+    return result.dtype == np.float64 and result.tolist() == [x + y for x, y in zip(a, b)]
+
+
+def _lane_number_f32() -> bool:
+    """Probe the ufunc lane: `f * 2.0` with a Python float, on float32.
+
+    The Python float must be converted to float32, as NumPy converts a Python
+    number of no fixed type (NEP 50), and the result must stay float32.
+
+    Returns:
+        Whether the result is a float32 array of the doubled values.
+    """
+    values = _lane_values(-1.5, 0.25)
+    result = np.array(values, np.float32) * 2.0
+    return result.dtype == np.float32 and result.tolist() == [2.0 * v for v in values]
+
+
+def _lane_compare() -> bool:
+    """Probe the ufunc lane: `i > 3` on int64, a comparison with a Python int.
+
+    Returns:
+        Whether the result is the boolean array Python's comparisons give.
+    """
+    values = list(range(LANE_PROBE_N))
+    result = np.array(values, np.int64) > LANE_PROBE_THRESHOLD
+    return result.dtype == np.bool_ and result.tolist() == [v > LANE_PROBE_THRESHOLD for v in values]
+
+
+def _lane_row() -> bool:
+    """Probe the ufunc lane: `np.subtract(m, row)`, a row taken from every row of a matrix.
+
+    Returns:
+        Whether every row of the result is that row of the matrix minus the row.
+    """
+    rows, cols = LANE_PROBE_SHAPE
+    matrix = [_lane_values(r, 0.5, cols) for r in range(rows)]
+    row = _lane_values(0.75, -0.25, cols)
+    result = np.subtract(np.array(matrix), np.array(row))
+    return result.shape == LANE_PROBE_SHAPE and result.tolist() == [[x - y for x, y in zip(line, row)]
+                                                                    for line in matrix]
+
+
+def _lane_inplace() -> bool:
+    """Probe the ufunc lane with an output: `x += y`, then `np.add(x, y, out=x)`.
+
+    Returns:
+        Whether `x` holds `x + 2 * y` afterwards and the second call returned `x` itself.
+    """
+    a, b = _lane_values(1.0, 0.5), _lane_values(0.0, 0.25)
+    x, y = np.array(a), np.array(b)
+    x += y
+    returned = np.add(x, y, out=x)
+    return returned is x and x.tolist() == [p + q + q for p, q in zip(a, b)]
+
+
+def _lane_flags() -> bool:
+    """Probe the ufunc lane's floating-point errors: `a / 0.0` under `np.errstate(divide="raise")`.
+
+    The lane must hand the divide-by-zero flag to NumPy's handler, which
+    raises here, and must return infinities with the flag ignored. A last
+    plain call moves the lane's counter.
+
+    Returns:
+        Whether the division raised FloatingPointError, then gave infinities.
+    """
+    a = np.array(_lane_values(1.0, 1.0))
+    try:
+        with np.errstate(divide="raise"):
+            a / 0.0
+        return False
+    except FloatingPointError:
+        pass
+    with np.errstate(divide="ignore"):
+        result = a / 0.0
+    return result.tolist() == [float("inf")] * LANE_PROBE_N and (a + a).tolist() == [v + v for v in a.tolist()]
+
+
 # Every hook, in the order install() applies them: the deepest first.
 HOOKS: tuple[Hook, ...] = (
     Hook("slot.argmax.f32", TYPE_SLOT, (Probe("argmax_f32", partial(_argext_method, np.float32, "argmax", 1.0)),)),
@@ -1168,6 +1287,16 @@ HOOKS: tuple[Hook, ...] = (
            (Probe(f"{function}_cols_f64", partial(_bottleneck, function, f"bottleneck.{function}")),),
            module=BOTTLENECK_MODULE)
       for function in ("nanmean", "nanstd", "nanmin", "nanmax")),
+    # The ufunc lane, last: the inner-loop hooks above can change which loop
+    # NumPy hands it.
+    Hook("ufunc.call", UFUNC, (
+        Probe("ufunc_lane", _lane_add),
+        Probe("ufunc_lane", _lane_number_f32),
+        Probe("ufunc_lane", _lane_compare),
+        Probe("ufunc_lane", _lane_row),
+        Probe("ufunc_lane", _lane_inplace),
+        Probe("ufunc_lane", _lane_flags),
+    )),
 )
 
 # The hooks in bottleneck, which install(bottleneck=False) leaves out.
@@ -1259,6 +1388,10 @@ KERNELS: tuple[KernelInfo, ...] = (
                unbound_reason=None if ON_ARM64 else INPLACE_ARM64_ONLY, builtin=True),
     KernelInfo("subtract_inplace_f64", "x -= y", "float64", INPLACE, ("loop.subtract.f64",),
                unbound_reason=None if ON_ARM64 else INPLACE_ARM64_ONLY, builtin=True),
+    # NumPy's own inner loops, called directly by the ufunc lane for
+    # elementwise calls on small arrays: `a + b`, `a > 0`, `np.exp(a)`.
+    KernelInfo("ufunc_lane", "elementwise ufuncs", "numeric", "ufunc", ("ufunc.call",), builtin=True,
+               implementation=NUMPY_LOOPS),
     # Calls a library sends to bottleneck rather than NumPy: `bn.nanmean(a,
     # axis=0)` on a matrix whose rows' elements are adjacent.
     *(KernelInfo(f"{function}_cols_f64", f"bn.{function}", "float64", f"bn.{function}", (f"bottleneck.{function}",))
