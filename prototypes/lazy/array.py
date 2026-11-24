@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 8
+CORE_VERSION = 9
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -765,6 +765,36 @@ class _Slot:
     place: int
 
 
+# Pending arrays in one index that the C core writes down itself; an index with more goes the Python way.
+SLOTS_MADE = 8
+
+
+@dataclass(eq=False, slots=True)
+class _Select:
+    """What the node of `x[index]` calls when the index holds arrays that were pending: the index with their values put in.
+
+    A class and not a function made inside `_select`, so that the C core can make one too.
+    """
+
+    # The index's items, with a `_Slot` where a pending array's value goes.
+    template: tuple
+    # True when the index was written as a tuple, False for one item.
+    whole: bool
+
+    def __call__(self, base: Any, *found: Any) -> Any:
+        """Index the computed array with the computed index.
+
+        Args:
+            base: The array's value.
+            *found: The values of the index's pending arrays, in the order of their slots.
+
+        Returns:
+            What NumPy gives for the index.
+        """
+        parts = tuple(found[part.place] if isinstance(part, _Slot) else part for part in self.template)
+        return base[parts if self.whole else parts[0]]
+
+
 def _is_number(node: Node) -> bool:
     """Say whether NumPy gives a number, not an array, for a node without dimensions.
 
@@ -1047,7 +1077,7 @@ def _select(target: "LazyArray", parts: tuple, frame: FrameType | None = None) -
     Raises:
         IndexError: NumPy's, for a mask of the wrong shape or index arrays that do not broadcast.
     """
-    fill, pending, _ = parts
+    fill, pending, template = parts
     nodes = tuple(lazy._node for lazy in pending)
     index = fill(nodes)
     signature = _core.plan(operator.getitem, (target._node, index), {}) if _core is not None else None
@@ -1058,10 +1088,7 @@ def _select(target: "LazyArray", parts: tuple, frame: FrameType | None = None) -
     else:
         signature = rules.Signature(*signature)
 
-    def run(base: Any, *found: Any) -> Any:
-        """Index the computed array with the computed index."""
-        return base[fill(found)]
-
+    run = _Select(tuple(template), isinstance(index, tuple))
     if len(graph.NOT_COMPUTED) >= graph.PENDING_LIMIT:
         evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
     # What `_strict(target, pending)` says, without its search: the lazy arrays are these and no others.
@@ -1818,7 +1845,8 @@ def _set_up(core: Any) -> None:
                forget=graph._forget, counts=graph.COUNTS, origins=graph._origins, specs=graph._specs, plans=rules._plans,
                admissible=rules._admissible_specs, caller=graph.caller, errstate=graph.errstate, view_kind=rules.VIEW,
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
-               getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Write=_Write, Assign=_Assign, fitting=_fitting,
+               getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
+               slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
 
 
