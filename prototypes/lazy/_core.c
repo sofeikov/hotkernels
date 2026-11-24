@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 10
+#define CORE_VERSION 11
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -76,6 +76,9 @@ static PyTypeObject *Node, *Lazy, *Cell, *Step, *Ufunc, *Ndarray, *Write, *Assig
 static PyObject *fitting;            /* `array._fitting` */
 static PyTypeObject *Select;         /* `array._Select` */
 static PyTypeObject *Into;           /* `array._Into` */
+static PyTypeObject *Through;        /* `array._AssignThrough`, with the fields of `_Select` */
+static Py_ssize_t through_at[X_FIELDS];
+static PyObject *assignable;         /* `array._assignable` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
 static PyObject *write_kind;         /* `rules.WRITE` */
@@ -1102,6 +1105,57 @@ fail:
     return NULL;
 }
 
+/* Take an index apart as `array._index_parts` does: `template` gets each item, with a slot where a pending array
+ * is, and `with_nodes` the same with the array's node there. 1 when done; 0 for an index Python has to look at (an
+ * array that has its values or is of another type than whole numbers and masks, a list, an `ndarray`); -1 with an
+ * error set. */
+static int
+index_apart(PyObject **items, Py_ssize_t count, PyObject *template, PyObject *with_nodes, Py_ssize_t *found, int *strict,
+            int *numbers)
+{
+    Py_ssize_t most = PyTuple_GET_SIZE(slots);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *item = items[place];
+        if (Py_TYPE(item) == Lazy) {
+            PyObject *pending_node = node_of(item);
+            if (pending_node == NULL) {
+                return -1;
+            }
+            PyTuple_SET_ITEM(with_nodes, place, pending_node);
+            if (Py_TYPE(pending_node) != Node || SLOT(pending_node, node_at[N_OPERATION]) == Py_None || *found == most) {
+                return 0;
+            }
+            PyObject *kind = PyObject_GetAttr(SLOT(pending_node, node_at[N_DTYPE]), s_kind);
+            if (kind == NULL) {
+                return -1;
+            }
+            /* A mask, or whole numbers: `"biu"`. */
+            int indexes = PyUnicode_CompareWithASCIIString(kind, "b") == 0 || PyUnicode_CompareWithASCIIString(kind, "i") == 0
+                          || PyUnicode_CompareWithASCIIString(kind, "u") == 0;
+            Py_DECREF(kind);
+            if (!indexes) {
+                return 0;
+            }
+            *strict = *strict || SLOT(pending_node, node_at[N_STRICT]) == Py_True;
+            *numbers = *numbers && PyTuple_GET_SIZE(SLOT(pending_node, node_at[N_SHAPE])) == 0;
+            PyTuple_SET_ITEM(template, place, Py_NewRef(PyTuple_GET_ITEM(slots, (*found)++)));
+            continue;
+        }
+        int plain = PyLong_CheckExact(item) || item == Py_None || item == Py_Ellipsis;
+        if (!plain && PySlice_Check(item)) {
+            PySliceObject *slice = (PySliceObject *)item;
+            plain = (slice->start == Py_None || PyLong_CheckExact(slice->start)) && (slice->stop == Py_None || PyLong_CheckExact(slice->stop))
+                    && (slice->step == Py_None || PyLong_CheckExact(slice->step));
+        }
+        if (!plain) {
+            return 0;
+        }
+        PyTuple_SET_ITEM(template, place, Py_NewRef(item));
+        PyTuple_SET_ITEM(with_nodes, place, Py_NewRef(item));
+    }
+    return 1;
+}
+
 /* `x[index]` for an index that holds pending arrays, masks or positions, beside whole numbers and slices: the
  * quick road of `array._select`, with the index taken apart as `array._index_parts` takes it. An array in the
  * index that has its values, a list, an `ndarray` and anything else are left to Python. */
@@ -1114,7 +1168,7 @@ select_item(PyObject *target, PyObject *index, PyFrameObject *frame)
     }
     PyObject *single[1] = {index};
     PyObject **items = whole ? &PyTuple_GET_ITEM(index, 0) : single;
-    Py_ssize_t count = whole ? PyTuple_GET_SIZE(index) : 1, found = 0, most = PyTuple_GET_SIZE(slots);
+    Py_ssize_t count = whole ? PyTuple_GET_SIZE(index) : 1, found = 0;
     PyObject *result = Miss, *aim = NULL, *unwrapped = NULL, *kwargs = NULL, *signature = NULL, *run = NULL, *args = NULL,
              *node = NULL;
     int strict = 0, numbers = 1;
@@ -1122,44 +1176,12 @@ select_item(PyObject *target, PyObject *index, PyFrameObject *frame)
     if (template == NULL || with_nodes == NULL) {
         goto fail;
     }
-    for (Py_ssize_t place = 0; place < count; place++) {
-        PyObject *item = items[place];
-        if (Py_TYPE(item) == Lazy) {
-            PyObject *pending_node = node_of(item);
-            if (pending_node == NULL) {
-                goto fail;
-            }
-            PyTuple_SET_ITEM(with_nodes, place, pending_node);
-            if (Py_TYPE(pending_node) != Node || SLOT(pending_node, node_at[N_OPERATION]) == Py_None || found == most) {
-                goto done;
-            }
-            PyObject *kind = PyObject_GetAttr(SLOT(pending_node, node_at[N_DTYPE]), s_kind);
-            if (kind == NULL) {
-                goto fail;
-            }
-            /* A mask, or whole numbers: `"biu"`. */
-            int indexes = PyUnicode_CompareWithASCIIString(kind, "b") == 0 || PyUnicode_CompareWithASCIIString(kind, "i") == 0
-                          || PyUnicode_CompareWithASCIIString(kind, "u") == 0;
-            Py_DECREF(kind);
-            if (!indexes) {
-                goto done;
-            }
-            strict = strict || SLOT(pending_node, node_at[N_STRICT]) == Py_True;
-            numbers = numbers && PyTuple_GET_SIZE(SLOT(pending_node, node_at[N_SHAPE])) == 0;
-            PyTuple_SET_ITEM(template, place, Py_NewRef(PyTuple_GET_ITEM(slots, found++)));
-            continue;
-        }
-        int plain = PyLong_CheckExact(item) || item == Py_None || item == Py_Ellipsis;
-        if (!plain && PySlice_Check(item)) {
-            PySliceObject *slice = (PySliceObject *)item;
-            plain = (slice->start == Py_None || PyLong_CheckExact(slice->start)) && (slice->stop == Py_None || PyLong_CheckExact(slice->stop))
-                    && (slice->step == Py_None || PyLong_CheckExact(slice->step));
-        }
-        if (!plain) {
-            goto done;
-        }
-        PyTuple_SET_ITEM(template, place, Py_NewRef(item));
-        PyTuple_SET_ITEM(with_nodes, place, Py_NewRef(item));
+    int apart = index_apart(items, count, template, with_nodes, &found, &strict, &numbers);
+    if (apart < 0) {
+        goto fail;
+    }
+    if (apart == 0) {
+        goto done;
     }
     if (found == 0) {
         goto done;
@@ -1457,6 +1479,137 @@ fail:
     return NULL;
 }
 
+/* `x[index] = value` through an index that holds pending arrays, for an assignment remembered to fit: the quick
+ * road of that branch of `LazyArray.__setitem__`, by the key `array._assignment_key` writes. None, `Miss`, or NULL. */
+static PyObject *
+set_through(PyObject *target, PyObject *index, PyObject *value, PyFrameObject *frame)
+{
+    int whole = PyTuple_CheckExact(index);
+    PyObject *aim = (!whole && PyTuple_Check(index)) ? NULL : writable(target);
+    if (aim == NULL || (Py_TYPE(value) == Lazy && SLOT(value, lazy_at[L_CELL]) == SLOT(target, lazy_at[L_CELL]))) {
+        return Miss;
+    }
+    PyObject *held = Py_None, *steps = SLOT(target, lazy_at[L_STEPS]);
+    for (Py_ssize_t each = 0; each < PyTuple_GET_SIZE(steps); each++) {
+        PyObject *step = PyTuple_GET_ITEM(steps, each);
+        if (SLOT(step, step_at[S_PLAIN]) != Py_True) {
+            return Miss;
+        }
+        held = SLOT(step, step_at[S_SHAPE]);
+    }
+    PyObject *single[1] = {index};
+    PyObject **items = whole ? &PyTuple_GET_ITEM(index, 0) : single;
+    Py_ssize_t count = whole ? PyTuple_GET_SIZE(index) : 1, found = 0;
+    int strict = 0, numbers = 1;
+    Marks marks = {0};
+    PyObject *result = Miss, *read = NULL, *shape = NULL, *unwrapped = NULL, *part = NULL, *written = NULL, *key = NULL,
+             *assign = NULL, *reads = NULL;
+    PyObject *template = PyTuple_New(count), *with_nodes = PyTuple_New(count);
+    if (template == NULL || with_nodes == NULL) {
+        goto fail;
+    }
+    int apart = index_apart(items, count, template, with_nodes, &found, &strict, &numbers);
+    if (apart < 0) {
+        goto fail;
+    }
+    if (apart == 0 || found == 0) {
+        goto done;
+    }
+    /* `array._shape_of(value)`, for a lazy array, an `ndarray` and a Python number. */
+    if (Py_TYPE(value) == Lazy) {
+        read = node_of(value);
+        shape = read && Py_TYPE(read) == Node ? Py_NewRef(SLOT(read, node_at[N_SHAPE])) : NULL;
+    } else if (Py_TYPE(value) == Ndarray) {
+        read = Py_NewRef(value);
+        shape = PyObject_GetAttr(value, s_shape);
+    } else if (PyLong_CheckExact(value) || PyBool_Check(value) || PyFloat_CheckExact(value) || PyComplex_CheckExact(value)) {
+        read = Py_NewRef(value);
+        shape = Py_NewRef(empty_tuple);
+    }
+    if (shape == NULL || !PyTuple_CheckExact(shape)) {
+        if (PyErr_Occurred()) {
+            goto fail;
+        }
+        goto done;
+    }
+    /* The key: the shape assigned into if the array is a view, the value's shape with a placeholder for a length
+     * that is not known, and the index as a call's key writes it, on the cell's node. */
+    unwrapped = PyTuple_Pack(2, aim, whole ? with_nodes : PyTuple_GET_ITEM(with_nodes, 0));
+    part = unwrapped ? index_key(unwrapped, &marks) : NULL;
+    if (part == NULL) {
+        goto fail;
+    }
+    if (part == Miss) {
+        part = NULL;
+        goto done;
+    }
+    written = PyTuple_New(PyTuple_GET_SIZE(shape));
+    for (Py_ssize_t axis = 0; written != NULL && axis < PyTuple_GET_SIZE(shape); axis++) {
+        PyObject *length = PyTuple_GET_ITEM(shape, axis);
+        if (is_stand_in(length)) {
+            int place = mark_of(&marks, length);
+            if (place < 0) {
+                if (PyErr_Occurred()) {
+                    goto fail;
+                }
+                goto done;
+            }
+            length = PyLong_FromLong(-place - 1);
+            if (length == NULL) {
+                goto fail;
+            }
+            PyTuple_SET_ITEM(written, axis, length);
+        } else {
+            PyTuple_SET_ITEM(written, axis, Py_NewRef(length));
+        }
+    }
+    key = written ? PyTuple_Pack(3, held, written, part) : NULL;
+    int fits = key ? PySet_Contains(assignable, key) : -1;
+    if (fits < 0) {
+        goto fail;
+    }
+    if (!fits) {
+        goto done;
+    }
+    /* What the write reads: the value, then the index's pending arrays in the order of their slots. */
+    reads = PyTuple_New(1 + found);
+    assign = reads ? Through->tp_alloc(Through, 0) : NULL;
+    if (assign == NULL) {
+        goto fail;
+    }
+    PyTuple_SET_ITEM(reads, 0, Py_NewRef(read));
+    for (Py_ssize_t place = 0, taken = 0; place < count; place++) {
+        if (Py_TYPE(items[place]) == Lazy) {
+            PyTuple_SET_ITEM(reads, 1 + taken++, Py_NewRef(PyTuple_GET_ITEM(with_nodes, place)));
+        }
+    }
+    SLOT(assign, through_at[X_TEMPLATE]) = Py_NewRef(template);
+    SLOT(assign, through_at[X_WHOLE]) = Py_NewRef(whole ? Py_True : Py_False);
+    int done_write = defer_write(target, s_setitem, assign, reads, frame);
+    if (done_write < 0) {
+        goto fail;
+    }
+    if (done_write == 0) {
+        result = Py_NewRef(Py_None);
+    }
+done:
+    marks_clear(&marks);
+    Py_XDECREF(template);
+    Py_XDECREF(with_nodes);
+    Py_XDECREF(read);
+    Py_XDECREF(shape);
+    Py_XDECREF(unwrapped);
+    Py_XDECREF(part);
+    Py_XDECREF(written);
+    Py_XDECREF(key);
+    Py_XDECREF(assign);
+    Py_XDECREF(reads);
+    return result;
+fail:
+    result = NULL;
+    goto done;
+}
+
 /* A call that writes its result into `out=`, for a write that is known to fit: the quick road of
  * `array._write_out`. `function` is the ufunc or the NumPy function, `inputs` its `count` positional arguments.
  * Returns `target` (new reference), `Miss`, or NULL. */
@@ -1743,6 +1896,9 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             goto python;
         }
         result = set_item(args[0], args[1], args[2], frame);
+        if (result == Miss) {
+            result = set_through(args[0], args[1], args[2], frame);
+        }
         break;
     default:
         goto python;
@@ -2058,6 +2214,15 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Into = (PyTypeObject *)Py_NewRef(into);
+    PyObject *through = PyDict_GetItemString(given, "AssignThrough");
+    if (through == NULL || !PyType_Check(through) || offsets((PyTypeObject *)through, SELECT_FIELDS, X_FIELDS, through_at)
+        || take(given, "assignable", &PySet_Type, &assignable)) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_KeyError, "setup() was not given the class 'AssignThrough'");
+        }
+        return NULL;
+    }
+    Through = (PyTypeObject *)Py_NewRef(through);
     Py_RETURN_NONE;
 }
 
