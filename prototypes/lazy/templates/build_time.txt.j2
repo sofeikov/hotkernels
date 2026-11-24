@@ -1,0 +1,13 @@
+{# What programs/build_time.py prints: the time to write each program's graph down, then the time to make single operations. `runs` is how many runs each timing is the quickest of; `examples`, `features`, `tokens` and `width` are the sizes of the arrays NumPy computed on. #}
+Building the graph, nothing computed. The quickest of {{ runs }} runs.
+NumPy's column is the same program computed, on {{ examples }} x {{ features }} float64 and {{ tokens }} x {{ width }} float32.
+
+{{ "Program".ljust(40) }}  {{ "Operations".rjust(10) }}  {{ "Build, ms".rjust(10) }}  {{ "Per operation, us".rjust(17) }}  {{ "NumPy, ms".rjust(10) }}
+{% for row in programs %}
+{{ row.name.ljust(40) }}  {{ "%10d" | format(row.operations) }}  {{ "%10.2f" | format(row.build_ms) }}  {{ "%17.2f" | format(row.per_operation_us) }}  {{ "%10.2f" | format(row.numpy_ms) }}
+{% endfor %}
+
+{{ "One line, made and dropped".ljust(52) }}  {{ "ns".rjust(8) }}
+{% for row in operations %}
+{{ row.written.ljust(52) }}  {{ "%8.0f" | format(row.ns) }}
+{% endfor %}
