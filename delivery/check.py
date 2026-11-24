@@ -29,7 +29,7 @@ import numpy as np
 
 import hotkernels
 from hotkernels.environment import BINDING_MODULE
-from hotkernels.hooks import BOTTLENECK_HOOKS, KERNELS
+from hotkernels.hooks import BOTTLENECK_HOOKS, FUNCTION, HOOKS, KERNELS, METHOD
 
 from .cases import ANY, INEXACT_OPERATIONS, OPERATIONS, Case
 
@@ -352,13 +352,11 @@ def run_operation(operation: str, cases: Iterable[Case], inexact: bool, keep: Ca
 
 # Name of the summary line for the checks of install() and uninstall() themselves.
 INSTALLATION = "install and uninstall"
-# NumPy objects whose identity must survive install() and uninstall(): functions
-# of the numpy module, methods of ndarray, and methods of the ufunc type.
-_HOOKED_OBJECTS = ("argmax", "argmin", "count_nonzero", "sum", "histogram", "bincount", "isin", "interp", "clip",
-                   "compress", "extract", "putmask", "copyto", "where", "any", "round", "around", "median",
-                   "unique")
-_HOOKED_METHODS = ("astype", "sum", "nonzero", "cumsum", "searchsorted", "argmax", "argmin", "clip", "any", "round")
-_HOOKED_UFUNC_METHODS = ("accumulate", "reduceat")
+# What a function or method hook's name is an attribute of, by the part of the
+# name before the dot: `function.sum` is np.sum, `method.sum` is
+# np.ndarray.sum and `ufunc.reduceat` is np.ufunc.reduceat. Each such object
+# must be the same object after install() and after uninstall().
+_HOOK_OWNERS = {"function": np, "method": np.ndarray, "ufunc": np.ufunc}
 # The hooks behind the clip ufunc's loop, which also take every call the
 # function and method hooks of clip take.
 _CLIP_LOOP_HOOKS = ("loop.clip.f32", "loop.clip.f64")
@@ -428,9 +426,14 @@ def _bottleneck_objects() -> list[object]:
 
 
 def _numpy_objects() -> list[object]:
-    """Return the NumPy objects hotkernels changes pointers in."""
-    return ([getattr(np, name) for name in _HOOKED_OBJECTS] + [getattr(np.ndarray, name) for name in _HOOKED_METHODS]
-            + [getattr(np.ufunc, name) for name in _HOOKED_UFUNC_METHODS])
+    """Return the NumPy functions and methods hotkernels changes pointers in.
+
+    Read from the package's own table of hooks, so a hook added there is
+    checked here without being listed again. The ufunc call hook changes a
+    field of every ufunc, not an attribute, and is not of either kind.
+    """
+    names = (hook.name.split(".", 1) for hook in HOOKS if hook.kind in (FUNCTION, METHOD))
+    return [getattr(_HOOK_OWNERS[owner], attribute) for owner, attribute in names]
 
 
 def _kernel_calls(binding) -> int:
