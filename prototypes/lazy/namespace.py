@@ -39,6 +39,8 @@ CONVERTERS = frozenset({"array", "asarray", "asanyarray", "ascontiguousarray", "
 PASS_THROUGH = frozenset({"asarray", "asanyarray"})
 # NumPy's random generators, whose methods make arrays out of the module's sight.
 RANDOM_GENERATORS = (np.random.Generator, np.random.RandomState)
+# Types of an argument that is no array and holds none: a call's arguments are mostly these and arrays.
+NO_ARRAY = frozenset({int, float, bool, complex, str, type(None)})
 
 
 def get_lazy(strict: bool = False) -> "LazyNumPy":
@@ -136,6 +138,8 @@ class LazyCallable:
         """
         self._function = function
         self._strict = strict
+        # The function as a reader would name it, for a recording.
+        self._source = f"np.{getattr(function, '__name__', 'function')}"
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Call the NumPy function with lazy arrays in place of `ndarray`s.
@@ -147,10 +151,33 @@ class LazyCallable:
         Returns:
             The result, with any `ndarray` in it made lazy.
         """
-        owned = not _holds_arrays((args, kwargs))
-        result = self._function(*(_lifted(arg, self._strict) for arg in args),
-                                **{key: _lifted(arg, self._strict) for key, arg in kwargs.items()})
-        return _made_lazy(result, f"np.{getattr(self._function, '__name__', 'function')}", self._strict, owned)
+        strict = self._strict
+        # Whether no array is among the arguments (`_holds_arrays`), found in the pass that makes the
+        # `ndarray`s lazy (`_lifted`). The commonest arguments are told by their type, without a call.
+        owned = True
+        lifted = []
+        for arg in args:
+            kind = type(arg)
+            if kind is LazyArray:
+                owned = False
+            elif kind is np.ndarray:
+                owned = False
+                arg = wrap(arg, strict=strict)
+            elif kind not in NO_ARRAY:
+                owned = owned and not _holds_arrays(arg)
+                arg = _lifted(arg, strict)
+            lifted.append(arg)
+        for key, arg in kwargs.items():
+            kind = type(arg)
+            if kind not in NO_ARRAY:
+                owned = owned and not _holds_arrays(arg)
+                lifted_one = _lifted(arg, strict)
+                if lifted_one is not arg:
+                    kwargs = {**kwargs, key: lifted_one}  # A dictionary of the same order; `kwargs.items()` goes on over the old one.
+        result = self._function(*lifted, **kwargs)
+        if type(result) is LazyArray:
+            return result  # Deferred: the commonest answer, and already what `_made_lazy` would return.
+        return _made_lazy(result, self._source, strict, owned)
 
     def __repr__(self) -> str:
         """Say which function this wraps."""
@@ -218,6 +245,8 @@ class LazyNumPy:
         """
         self._module = module
         self._strict = strict
+        # What `__getattr__` answered for each name, with the module's attribute it answered for.
+        self._answers: dict[str, tuple[Any, Any]] = {}
 
     def __repr__(self) -> str:
         """Say which module this stands in for."""
@@ -242,6 +271,23 @@ class LazyNumPy:
             AttributeError: For a name the module lacks.
         """
         attribute = getattr(self._module, name)
+        answered = self._answers.get(name)
+        if answered is not None and answered[0] is attribute:
+            return answered[1]  # The module still has what it had: the same answer, not another wrapper.
+        answer = self._answer(attribute, name)
+        self._answers[name] = (attribute, answer)
+        return answer
+
+    def _answer(self, attribute: Any, name: str) -> Any:
+        """Work out what stands in for one attribute of the module.
+
+        Args:
+            attribute: What the module has under the name.
+            name: The name.
+
+        Returns:
+            What `__getattr__` returns for it.
+        """
         if isinstance(attribute, ModuleType):
             return LazyNumPy(attribute, self._strict)
         if isinstance(attribute, type) or not callable(attribute):

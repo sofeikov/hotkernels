@@ -15,9 +15,29 @@ import sys
 import threading
 import weakref
 from dataclasses import dataclass, field
+from types import CodeType, FrameType
 from typing import Any, Callable, Protocol
 
 import numpy as np
+
+
+
+class _NoRecord:
+    """Stands where NumPy's record of the error settings stands, on a NumPy that keeps none this layer knows of."""
+
+    @staticmethod
+    def get() -> object:
+        """Return an object no earlier call returned, so that no remembered settings are taken for the ones in effect."""
+        return object()
+
+
+try:
+    # Where NumPy 2 keeps the error settings in effect: a context variable whose
+    # value is replaced, never changed, by `np.seterr` and `np.errstate`. It is
+    # private to NumPy; without it `np.geterr()` is asked for every node.
+    from numpy._core.umath import _extobj_contextvar as _error_settings
+except ImportError:  # A NumPy that keeps them elsewhere.
+    _error_settings = _NoRecord
 
 # A frame in one of these directories is the layer's own code or NumPy's, never
 # the line a user wrote. The layer's directory is matched exactly, so that the
@@ -29,9 +49,22 @@ _NUMPY_DIRECTORY = os.path.dirname(os.path.abspath(np.__file__)) + os.sep
 # added, so a long loop that never gathers cannot hold an unbounded graph.
 PENDING_LIMIT = 100_000
 
-# Guards the pending list and every evaluation. Re-entrant, because computing
-# everything pending computes nodes one by one under the same lock.
+# Guards every evaluation. Re-entrant, because computing everything pending
+# computes nodes one by one under the same lock. Making a node does not take
+# it: a node joins the pending set in one step, and the set is read as a whole.
 LOCK = threading.RLock()
+
+# Lines of the user's code remembered at most, before the memory is emptied
+# and starts again. A program has as many as it has places that write an
+# operation; the bound is for one that compiles code as it runs.
+ORIGIN_MEMORY_LIMIT = 4096
+# Shapes with their element types remembered at most, before that memory and
+# the answers of `rules.plan` that were found through it are emptied.
+SPEC_MEMORY_LIMIT = 8192
+# The name a module's dictionary keeps Python's record of shown warnings under.
+_REGISTRY_NAME = "__warningregistry__"
+# What a line is said to be in when its dictionary of globals has no `__name__`.
+_UNKNOWN_MODULE = "<unknown>"
 
 # Hands out node numbers. Operands are always numbered below their consumer.
 _numbers = itertools.count()
@@ -194,6 +227,12 @@ class Node:
     # made at once may have kept a view of. A write into such memory has to
     # happen in that memory, at once; a write into any other can be deferred.
     exposed: bool = False
+    # A number that stands for the shape and the element type together, as
+    # `spec` gives it: two nodes with one number have the same shape and the
+    # same `dtype` object. 0 while it has not been asked for, and for a shape
+    # with a length that is not known. It is what `rules.plan` remembers its
+    # answers by; nothing else reads it.
+    spec: int = 0
 
     @property
     def pending(self) -> bool:
@@ -231,8 +270,39 @@ class Counts:
 COUNTS = Counts()
 
 # Every node that has no value yet, held weakly: pending work that the program
-# drops without gathering is forgotten, never computed.
-_pending: weakref.WeakSet[Node] = weakref.WeakSet()
+# drops without gathering is forgotten, never computed. A set of weak
+# references, each of which takes itself out of the set when its node dies.
+# That is what `weakref.WeakSet` is; this one is kept by hand because both
+# steps, adding a reference and dropping a dead one, are then single calls
+# into C, and a node is made and dropped once per operation of the program.
+_pending: set[weakref.ref] = set()
+# The same set under a name other modules may read the length of, which is
+# what `pending_count()` returns: the check against PENDING_LIMIT is made for
+# every node, and this spares it a call.
+NOT_COMPUTED = _pending
+# Called with the reference of a node that has died.
+_forget = _pending.discard
+
+# Whether each file seen on the stack is the layer's own code or NumPy's, by
+# the name its code objects carry. A name that is not a path (`<stdin>`) is
+# judged against the working directory the first time it is seen.
+_internal_files: dict[str, bool] = {}
+# The lines of the user's code found so far, by the identity of the code
+# object and the offset of the instruction running in it. An entry holds the
+# code object, so that the identity stays its own, and the line.
+_origins: dict[tuple[int, int], tuple[CodeType, "Origin"]] = {}
+# The error settings last seen and the dictionary `np.geterr()` gave for them.
+_last_errstate: tuple[Any, dict] = (None, {})
+# The number of each shape and element type met so far, by the shape and the
+# identity of the `dtype` object. An entry holds the `dtype`, so that the
+# identity stays its own.
+_specs: dict[tuple[tuple[int, ...], int], tuple[int, np.dtype]] = {}
+# Hands out those numbers, from 1. One is never given twice, so a number a
+# node still carries after the memory was emptied can match no later entry.
+_spec_numbers = itertools.count(1)
+# Called when the memory of shapes is emptied: `rules` empties its own, whose
+# entries were found by the numbers that are now forgotten.
+spec_memory_emptied: list[Callable[[], None]] = []
 
 
 # The fallbacks already logged, as (kind, call, file, line): each line of the
@@ -277,8 +347,8 @@ def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False
     Returns:
         A computed node with that value.
     """
-    node = Node(number=next(_numbers), name="array", operation=None, args=(), kwargs={},
-                shape=value.shape, dtype=value.dtype, value=value, kind=kind, strict=strict, exposed=exposed)
+    node = Node(next(_numbers), "array", None, (), {}, value.shape, value.dtype, None, None, value, None, kind, strict,
+                exposed)
     if observer is not None:
         observer.made(node, source)
     return node
@@ -286,7 +356,7 @@ def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False
 
 def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict,
              shape: tuple[int, ...], dtype: np.dtype, kind: str, strict: bool = False,
-             origin: "Origin | None" = None) -> Node:
+             origin: "Origin | None" = None, spec: int = 0, frame: FrameType | None = None) -> Node:
     """Make a pending node and add it to the pending list.
 
     Args:
@@ -301,14 +371,22 @@ def deferred(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict
         origin: The line that wrote the operation, when it is not the line
             running now: a view is made again, after a write, for the line
             that first made it. None for the caller's line.
+        spec: The number of the shape and element type, when the caller has
+            it already; 0 leaves it to be worked out if it is ever asked for.
+        frame: A frame to look for the caller's line from: the one that
+            called into the layer, when the caller has it at hand. Every
+            frame between it and this one is the layer's own, so the line
+            found is the same and fewer frames are walked. None to look from here.
 
     Returns:
         The node. It remembers the line and the `np.errstate` in effect.
     """
-    node = Node(number=next(_numbers), name=name, operation=operation, args=args, kwargs=kwargs,
-                shape=shape, dtype=dtype, origin=origin or caller(), errstate=np.geterr(), kind=kind, strict=strict)
-    with LOCK:
-        _pending.add(node)
+    remembered = _last_errstate
+    node = Node(next(_numbers), name, operation, args, kwargs, shape, dtype,
+                origin or caller(frame or sys._getframe(1)),
+                remembered[1] if remembered[0] is _error_settings.get() else errstate(),
+                None, None, kind, strict, False, spec)
+    _pending.add(weakref.ref(node, _forget))
     COUNTS.deferred += 1
     if observer is not None:
         observer.made(node, name)
@@ -340,7 +418,10 @@ def is_known(shape: tuple[int, ...]) -> bool:
     Returns:
         False when a length is a stand-in for one that depends on values.
     """
-    return all(length < UNKNOWN_FLOOR for length in shape)
+    for length in shape:
+        if length >= UNKNOWN_FLOOR:
+            return False
+    return True
 
 
 def is_issued(length: int) -> bool:
@@ -380,18 +461,135 @@ def shape_text(shape: tuple[int, ...]) -> str:
     return f"({lengths[0]},)" if len(lengths) == 1 else f"({', '.join(lengths)})"
 
 
-def caller() -> Origin:
-    """Find the line of the user's code that is running.
+def errstate() -> dict:
+    """Return the `np.errstate` in effect, as `np.geterr()` gives it.
 
     Returns:
-        The innermost frame that belongs neither to this layer nor to NumPy:
-        `np.sum(x)` reaches the layer through NumPy's own Python.
+        A dictionary that is shared by every node written under the same
+        settings and must not be changed. NumPy replaces its record of the
+        settings whenever they change, so the dictionary made for one record
+        is right for as long as that record is the one in effect.
     """
-    frame = sys._getframe(1)
-    while frame.f_back is not None and is_internal(frame.f_code.co_filename):
-        frame = frame.f_back
-    registry = frame.f_globals.setdefault("__warningregistry__", {})
-    return Origin(frame.f_code.co_filename, frame.f_lineno, frame.f_globals.get("__name__", "<unknown>"), registry)
+    global _last_errstate
+    settings = _error_settings.get()
+    seen, found = _last_errstate
+    if seen is not settings:
+        found = np.geterr()
+        _last_errstate = (settings, found)
+    return found
+
+
+def spec(node: Node) -> int:
+    """Return the number that stands for a node's shape and element type, working it out the first time.
+
+    Args:
+        node: Any node.
+
+    Returns:
+        The same number for every node of that shape whose element type is
+        that `dtype` object, and for no other. 0 when a length of the shape
+        is not known: such a node has no number until it is computed.
+    """
+    found = node.spec
+    if not found:
+        found = node.spec = spec_of(node.shape, node.dtype)
+    return found
+
+
+def spec_of(shape: tuple[int, ...], dtype: np.dtype) -> int:
+    """Return the number that stands for a shape and an element type.
+
+    Args:
+        shape: A shape.
+        dtype: An element type. It is told from others by which object it
+            is, not by what it equals: two `dtype` objects that compare
+            equal can still differ, in metadata for one, and NumPy's answers
+            may carry the difference.
+
+    Returns:
+        The number, or 0 when a length of the shape is not known.
+    """
+    key = (shape, id(dtype))
+    found = _specs.get(key)
+    if found is not None:
+        return found[0]
+    if not is_known(shape):
+        return 0
+    if len(_specs) >= SPEC_MEMORY_LIMIT:
+        _specs.clear()
+        for emptied in spec_memory_emptied:
+            emptied()
+    number = next(_spec_numbers)
+    _specs[key] = (number, dtype)
+    return number
+
+
+def caller(frame: FrameType | None = None) -> Origin:
+    """Find the line of the user's code that is running.
+
+    Args:
+        frame: Where to start looking; None for the frame that called this function.
+
+    Returns:
+        The innermost frame, from there outwards, that belongs neither to
+        this layer nor to NumPy: `np.sum(x)` reaches the layer through
+        NumPy's own Python. A line that was found before is returned as the
+        same object.
+    """
+    if frame is None:
+        frame = sys._getframe(1)
+    # Only a frame of the user's code is ever remembered, so one that is found here is the answer
+    # without a look at its file: the case of an operator, which the user's line calls directly.
+    origin = _remembered(frame)
+    if origin is not None:
+        return origin
+    walked = frame
+    while True:
+        filename = walked.f_code.co_filename
+        internal = _internal_files.get(filename)
+        if internal is None:
+            internal = _internal_files[filename] = is_internal(filename)
+        if not internal:
+            break
+        outer = walked.f_back
+        if outer is None:
+            break
+        walked = outer
+    if walked is not frame:
+        origin = _remembered(walked)
+        if origin is not None:
+            return origin
+    code, names = walked.f_code, walked.f_globals
+    origin = Origin(code.co_filename, walked.f_lineno, names.get("__name__", _UNKNOWN_MODULE),
+                    names.setdefault(_REGISTRY_NAME, {}))
+    if not internal:
+        # A stack that is the layer's and NumPy's all the way up ends at a frame that is not the user's: not remembered.
+        if len(_origins) >= ORIGIN_MEMORY_LIMIT:
+            _origins.clear()
+        _origins[(id(code), walked.f_lasti)] = (code, origin)
+    return origin
+
+
+def _remembered(frame: FrameType) -> Origin | None:
+    """Return the line a frame is at, if it was found before and still describes the frame.
+
+    Args:
+        frame: Any frame.
+
+    Returns:
+        The `Origin` made for the same instruction of the same code object,
+        which fixes the file and the line. The module's name and its
+        registry of warnings are looked up again, since a program may
+        replace either, and the same code may run under other globals. None
+        when nothing is remembered or one of them differs.
+    """
+    found = _origins.get((id(frame.f_code), frame.f_lasti))
+    if found is not None:
+        origin = found[1]
+        names = frame.f_globals
+        if names.get(_REGISTRY_NAME) is origin.registry and names.get("__name__", _UNKNOWN_MODULE) == origin.module:
+            return origin
+    return None
 
 
 def is_internal(filename: str) -> bool:
@@ -419,8 +617,10 @@ def pending_nodes() -> list[Node]:
         A list in descending number, so that `pop()` yields them in the order
         they were written.
     """
-    with LOCK:
-        return sorted((node for node in _pending if node.pending), key=lambda node: node.number, reverse=True)
+    # `list()` copies the set in one step, so a node that dies or is made
+    # while the copy is read changes nothing here.
+    alive = (reference() for reference in list(_pending))
+    return sorted((node for node in alive if node is not None and node.pending), key=lambda node: node.number, reverse=True)
 
 
 def settle(node: Node) -> None:
@@ -430,4 +630,5 @@ def settle(node: Node) -> None:
         node: A node that has just been computed or has failed.
     """
     node.operation, node.args, node.kwargs = None, (), {}
-    _pending.discard(node)
+    # A reference to a living node is equal to any other reference to it.
+    _pending.discard(weakref.ref(node))
