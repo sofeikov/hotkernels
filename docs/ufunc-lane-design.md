@@ -9,7 +9,7 @@ Against the [exit criterion](#exit-criterion):
 | Criterion | Result |
 |---|---|
 | `delivery check` passes, with the `ufunc` operation | Met on ARM64: 403,021 cases, none failing. The `ufunc` operation has 100,657, of which the lane must take 49,922 and took 51,766 (the rest of what it took are cases where only the results are compared). x86-64: CI |
-| NumPy's own test suite has the same outcome with and without `install()` | See the pull request |
+| NumPy's own test suite has the same outcome with and without `install()` | Met: 47,248 tests, none differing, after the change in [What changed in the building](#what-changed-in-the-building) for replaced loops |
 | `a + b` at least 1.8x and `a * 2.0` at least 2.5x faster at 16 float64 elements | Met: 1.98x and 2.58x in `delivery time`; 1.92x and 2.87x in alternating batches of `timeit` |
 | No case of `delivery time` the lane serves is slower than NumPy | Met. An earlier run, at load average 5.2, read `np.exp(a)` at 4,096 elements as 0.96x; the run below has it at 1.00x, and alternating batches put it level (14.97 against 14.74 µs best, 15.50 against 15.64 µs median) |
 | A call that falls back costs at most 2 ns more | Not met: 3 to 4 ns, about 1.3% of the cheapest such call. 1.3 ns of it is the count of calls left to NumPy, which was kept ([below](#what-changed-in-the-building)) |
@@ -108,6 +108,8 @@ shap was the occasion for this. Its explainers are NumPy-heavy in the sense that
 | Partition | 1,470.7 ms | 1.01x | 1.031x |
 | Sampling | 202.8 ms | 1.01x | 1.021x |
 | Exact, Linear, Tree | | 1.00x | 0.99x to 1.01x |
+
+With the lane as built, which also takes outputs, NumPy numbers and rows, in a later run (load average about 3): Kernel 1.097x, Sampling 1.089x, Linear 1.072x, Permutation 1.069x, Partition 1.047x, Exact 0.991x, Tree 1.000x, against plain NumPy, every result the same bytes as NumPy's. shap's test suite gave the same outcomes (385 passed, 156 skipped), the lane serving 1,313,993 of its ufunc calls and leaving 484,893 to NumPy.
 
 The gain is small because the most it could be is small. Sampling with macOS's `sample`, classified as `delivery apps --profile` does: in the Partition explainer the Python interpreter has 54% of the time, NumPy 24% and memory management 17%; in the Permutation explainer 36%, 30% and 18%. The Kernel explainer spends 62% waiting in OpenMP threads that scikit-learn's k-means starts. If every NumPy call cost nothing, Partition would be at most 1.3x faster. The interpreter's share is shap's own Python, the scipy sparse matrices it builds and the models' predict functions.
 

@@ -864,7 +864,7 @@ Not a kernel. `a + b` on 16 float64 elements is about 250 ns from Python and the
 | `np.maximum(x, y, out=x)` | float64 | 2.39x | 1.18x |
 | `m - row`, 4 columns | float64 | 3.75x | 1.50x |
 
-Above 16,384 elements the call is NumPy's; at a million elements every one of these is within 0.4% of NumPy. A call the lane declines costs 3 to 4 ns more. What is left of a small call is about 125 ns, of which 83 ns is NumPy allocating and freeing the result and about 20 ns Python reaching the ufunc. On whole programs the gain is what their small elementwise calls cost them: shap's explainers 2% to 7%, where NumPy has a quarter to a third of the time. x86-64 is not measured.
+Above 16,384 elements the call is NumPy's; at a million elements every one of these is within 0.4% of NumPy. A call the lane declines costs 3 to 4 ns more. What is left of a small call is about 125 ns, of which 83 ns is NumPy allocating and freeing the result and about 20 ns Python reaching the ufunc. On whole programs the gain is what their small elementwise calls cost them: shap's explainers 4% to 10%, where NumPy has a quarter to a third of the time. x86-64 is not measured.
 
 ## Where the result is narrower than the number
 
