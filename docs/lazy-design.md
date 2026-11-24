@@ -510,7 +510,7 @@ Not reached, because no lazy array is among the arguments: `np.zeros(3)`, a rand
 
 ### The prototype
 
-Nine modules of pure Python, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 54 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 16 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents. The 18 tests of what is remembered while a graph is written are in `tests/test_lazy_building.py` ([What writing a node costs](#what-writing-a-node-costs)).
+Nine modules of Python and one optional C source, laid out as the package would be ([Where it lives](#where-it-lives)), so that a comment on a file is a comment on a piece of the design. It follows this document: the deferred set above, every other call at once, a value that is needed computed and logged, strict arrays that refuse instead, node-by-node evaluation with the call as written. `uv run --group dev pytest tests/test_lazy_prototype.py` runs 54 tests, one or more per rule stated here, each comparing with the real `numpy` module. The 16 tests of the graph tools are in `tests/test_lazy_graphs.py` and are described in those tools' documents. The 19 tests of what is remembered while a graph is written, and of the C core, are in `tests/test_lazy_building.py` ([What writing a node costs](#what-writing-a-node-costs)).
 
 | Program | Deferred | Made at once | Result against eager NumPy |
 |---|---|---|---|
@@ -562,27 +562,30 @@ What the tests hold, each matching a rule of this document:
 
 ### What writing a node costs
 
-`uv run python -m prototypes.lazy.programs.build_time` writes each program's graph down with the stand-in and drops it without a gather, so the time is the writing alone. It does not depend on the size of the arrays, which are never read. The quickest of 15 runs:
+`uv run python -m prototypes.lazy.programs.build_time` writes each program's graph down with the stand-in and drops it without a gather, so the time is the writing alone. It does not depend on the size of the arrays, which are never read. Nodes are written by the C core ([The C core](#the-c-core)) where it is built, and by Python with `--no-core`. The quickest of 15 runs:
 
-| Program | Operations | To write the graph | Per operation | NumPy computing it, on 200 × 8 `float64` and 16 × 32 `float32` |
-|---|---|---|---|---|
-| The linear regression, 50 gradient steps | 954 | 1.66 ms | 1.74 µs | 0.42 ms |
-| The transformer block, 10 in a row | 550 | 1.31 ms | 2.38 µs | 1.17 ms |
-| A loop that writes into its array (`x[i] = v`, `x += 1.0`, `x[i, 1:] *= 2.0`), 100 turns | 400 | 0.91 ms | 2.28 µs | 0.12 ms |
-| The mean of the rows a mask selects, 100 masks | 400 | 1.33 ms | 3.32 µs | 0.59 ms |
+| Program | Operations | In Python | With the C core | Per operation, with the core | NumPy computing it, on 200 × 8 `float64` and 16 × 32 `float32` |
+|---|---|---|---|---|---|
+| The linear regression, 50 gradient steps | 954 | 1.65 ms | 0.50 ms | 0.53 µs | 0.42 ms |
+| The transformer block, 10 in a row | 550 | 1.30 ms | 0.51 ms | 0.93 µs | 1.18 ms |
+| A loop that writes into its array (`x[i] = v`, `x += 1.0`, `x[i, 1:] *= 2.0`), 100 turns | 400 | 0.89 ms | 0.29 ms | 0.72 µs | 0.12 ms |
+| The mean of the rows a mask selects, 100 masks | 400 | 1.33 ms | 0.70 ms | 1.75 µs | 0.59 ms |
 
-| One line, made and dropped | Time |
-|---|---|
-| `a * b`, `a * 2.0`, `-a`, `a.sum()`, `c[1]` | 1.4 to 1.6 µs |
-| `np.exp(a)` through the real module; `np.sum(a, axis=0)`; `a.mean(axis=-1, keepdims=True)`; `c[1, 1:3]`; `c.T` | 1.6 to 1.9 µs |
-| `np.exp(a)` through the stand-in; `c.reshape(4, 3)` | 2.2 to 2.5 µs |
-| `selected * 2.0` and `selected.mean(axis=0)`, where `selected` has a length that is not known | 3.1 to 3.2 µs |
-| `c[mask]`, the mask pending | 4.4 µs |
+| One line, made and dropped | In Python | With the C core |
+|---|---|---|
+| `a * b`, `a * 2.0`, `-a`, `a.sum()`, `c[1]` | 1.4 to 1.6 µs | 0.40 to 0.42 µs |
+| `c[1, 1:3]`, `c.T`, `a.mean(axis=-1, keepdims=True)` | 1.9 µs | 0.45 to 0.50 µs |
+| `np.exp(a)` and `np.sum(a, axis=0)` through the real module | 1.7 to 1.9 µs | 0.60 µs |
+| `np.exp(a)` through the stand-in | 2.2 µs | 0.67 µs |
+| `selected * 2.0` and `selected.mean(axis=0)`, where `selected` has a length that is not known | 3.2 to 3.3 µs | 0.57 to 0.61 µs |
+| `c.reshape(4, 3)` | 2.5 µs | 0.78 µs |
+| `c[mask]`, the mask pending | 4.5 µs | 3.1 µs |
 
-- **A node costs as much as NumPy's own work on a few thousand elements.** NumPy multiplies two `float64` arrays of 16 elements in 0.23 µs, of 4,096 in 0.8 µs and of 8,192 in 1.9 µs. Below about 7,000 elements, writing `a * b` down takes longer than computing it. The first build, which computes each node with the call as written, is therefore slower than NumPy on small arrays and close to it on large ones. That is accepted here; what the graph is for comes after ([What the graph is for](#what-the-graph-is-for)).
-- **Nearly all of it would be spent asking, if every node asked.** What a node needs is the same on every turn of a loop, and each answer costs more than the node: NumPy's answer for a shape and an element type, on stand-ins, 4 to 6.5 µs; the line of the user's code, 1.3 µs for each frame of the layer between it and the node; `np.geterr()`, 0.4 µs. A node written by asking all three each time takes 14 to 19 µs. The layer remembers the answers ([What is remembered while a graph is written](#what-is-remembered-while-a-graph-is-written)): found again, they cost 0.25 to 0.4 µs, 0.2 µs and 0.05 µs.
+- **A node costs as much as NumPy's own work on a thousand elements.** NumPy multiplies two `float64` arrays of 16 elements in 0.23 µs, of 1,024 in 0.45 µs, of 4,096 in 0.8 µs and of 8,192 in 1.9 µs. With the core, writing `a * b` down takes what computing it takes at about 1,000 elements; in Python, at about 7,000. The regression's whole graph is written in the time NumPy computes it on 200 examples. The first build, which computes each node with the call as written, is therefore slower than NumPy on small arrays and close to it on large ones. That is accepted here; what the graph is for comes after ([What the graph is for](#what-the-graph-is-for)).
+- **Nearly all of it would be spent asking, if every node asked.** What a node needs is the same on every turn of a loop, and each answer costs more than the node: NumPy's answer for a shape and an element type, on stand-ins, 4 to 6.5 µs; the line of the user's code, 1.3 µs for each frame of the layer between it and the node; `np.geterr()`, 0.4 µs. A node written by asking all three each time takes 14 to 19 µs. The layer remembers the answers ([What is remembered while a graph is written](#what-is-remembered-while-a-graph-is-written)): found again, they cost 0.25 to 0.4 µs, 0.2 µs and 0.05 µs in Python, and a node takes 1.4 to 2.5 µs. What is left then is the interpreter's own work, which the C core does in 0.4 to 0.8 µs.
 - **What is remembered is what would be worked out.** `tests/test_lazy_building.py` holds each memory to the answer found from nothing. Every kind of deferred call gets, the second time, the signature the rules and NumPy give. Calls that Python finds equal and NumPy does not (`axis=1` and `axis=True`, `uint8 + 1` and `uint8 + 300`, a node and an `ndarray`, two byte orders, two `dtype` objects that differ in metadata) are told apart. For each of NumPy's 42 ufuncs of two or more operands, seven element types and every place among the operands, 39 float and complex values give one answer per type of the number, which is what lets `x * rate` be remembered whatever `rate` is. `rules.basic_shape` gives NumPy's shape for 4,000 random indices wherever it answers, and passes on every one NumPy raises for. Each road into the layer names the line that wrote the operation, the second time as the first. Forty random programs of 150 operations each, with writes, masks, views read after a write and errors, give the same nodes, lines, fallbacks, exceptions and values with every memory switched off, with the memories empty, and with them full. Sixteen wrong versions of the memories, each one changed line, were tried against these tests by a script outside the repository; each fails at least one.
-- **The floor in Python is a third of that.** The bare probe, a class with the operators that writes down the operation and its operands and nothing else, takes 0.3 to 0.5 µs for a node, measured on a busy machine (load average 8 to 10); a method that makes one object and returns it takes 0.16 µs. The difference to 1.5 µs is what a node of this design holds and the probe's does not ([What is remembered while a graph is written](#what-is-remembered-while-a-graph-is-written) has the shares).
+- **The core writes the nodes Python writes.** Every test of the layer runs twice, in Python alone and with the core (`tests/conftest.py`): 89 tests each way. Among them the random programs, where the run with every memory off is in Python and the runs with them on are the core's. Of eleven wrong versions of the core, each one changed line, ten fail a test; the eleventh writes a key Python never stores, so the core finds nothing by it and Python takes the call.
+- **Without the core, the floor is what the bare probe takes.** The probe, a class with the operators that writes down the operation and its operands and nothing else, takes 0.3 to 0.5 µs for a node in Python, measured on a busy machine (load average 8 to 10). The core writes a whole node of this design, with its shape, type, line, error settings and its place in the pending set, in 0.41 µs.
 
 ### With `install()` in effect
 
@@ -628,7 +631,7 @@ Run once on the same machine, by a script that is not in the repository. Each pr
 
 ### Where it lives
 
-A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of [the whole interface](#the-whole-interface) exported from the package. The prototype has the same modules:
+A subpackage of Python with one optional C source, `hotkernels/src/hotkernels/lazy/`, and the names of [the whole interface](#the-whole-interface) exported from the package. The prototype has the same modules:
 
 | Module | Holds | In the prototype |
 |---|---|---|
@@ -636,6 +639,7 @@ A subpackage of pure Python, `hotkernels/src/hotkernels/lazy/`, and the names of
 | `rules.py` | Which calls are deferred, and the shape and element type of each | [rules.py](../prototypes/lazy/rules.py) |
 | `evaluate.py` | Computing a node, a set of nodes, everything pending | [evaluate.py](../prototypes/lazy/evaluate.py) |
 | `array.py` | The lazy array: operators, the two protocols, the refusals, `gather()` | [array.py](../prototypes/lazy/array.py) |
+| `_core.c` | The quick road for writing a node, in C ([The C core](#the-c-core)) | [_core.c](../prototypes/lazy/_core.c), built by [build_core.py](../prototypes/lazy/build_core.py) |
 | `namespace.py` | The stand-in for the `numpy` module | [namespace.py](../prototypes/lazy/namespace.py) |
 | `explain.py`, `templates/explain.txt.j2` | The text of a pending graph | [explain.py](../prototypes/lazy/explain.py) |
 | `record.py` | The graph as an object, and the recording mode | [record.py](../prototypes/lazy/record.py) |
@@ -692,7 +696,20 @@ A loop writes the same operations on every turn, and each asks what the turn bef
 
 Each memory is bounded: when it is full it is emptied and starts again, so a program that makes shapes, types or code as it runs cannot grow one without end. A number that stood for a shape is never given out twice, so a node that still carries one from before means what it meant.
 
-What is left of a node's 1.5 µs is the interpreter's own work, in these shares for `a * b`: finding the line again, 0.2 µs; the key and the look-up of the answer, 0.25 µs; the node, 0.25 µs; the lazy array and its cell, 0.17 µs; adding the node to the set of pending nodes, counting it and reading the error settings, 0.25 µs; the operator's method and the pass over its arguments, 0.35 µs. That is some ten calls of Python functions and five objects: the node, its tuple of operands, its weak reference in the pending set, the lazy array and the cell. None of the six shares is a question that could be asked less often; each is work the design gives every node. Going well below 1 µs means doing that work in C ([Open questions](#open-questions)).
+What is left of a node's 1.5 µs is the interpreter's own work, in these shares for `a * b`: finding the line again, 0.2 µs; the key and the look-up of the answer, 0.25 µs; the node, 0.25 µs; the lazy array and its cell, 0.17 µs; adding the node to the set of pending nodes, counting it and reading the error settings, 0.25 µs; the operator's method and the pass over its arguments, 0.35 µs. That is some ten calls of Python functions and five objects: the node, its tuple of operands, its weak reference in the pending set, the lazy array and the cell. None of the six shares is a question that could be asked less often; each is work the design gives every node. Going below it means doing that work outside the interpreter, which is the next section.
+
+### The C core
+
+`prototypes/lazy/_core.c` is the hot path in C: about 1,800 lines that write one node of the graph when every answer it needs is remembered. It takes `a * b` from 1.5 µs to 0.41 µs.
+
+- **It is the quick road of functions that exist in Python, and nothing else.** `graph.deferred`, `array._try_defer`, `array._plain_item`, the in-place operators, `x[i] = v` through a plain index, and the stand-in's `np.name` and `np.name(...)` each have a road in the core for the calls where everything the Python function would look up is already in the memories of the section above. The Python functions are the definition. A node the core makes is, field for field, the node they would have made.
+- **It reads the memories and never writes them.** The core builds the key Python builds and looks it up. Where it finds nothing, or meets anything it is not sure of (an argument it does not know how to write down, a subclass, a collection that may hold a lazy array, a pending set at its limit, an array that has its values and is read by one element), it returns a marker and the Python function takes the call unchanged: works the answer out, raises NumPy's error, makes the call at once, and fills the memory, so that the next such call is one the core can take. A mistake in a key the core writes therefore costs time and not correctness, unless it makes two calls look alike that are not; the tests of [What writing a node costs](#what-writing-a-node-costs) are aimed at that.
+- **The objects are the Python classes' own.** `Node`, `LazyArray`, the cell, the view step and the write are declared with `__slots__`, so an instance is a C structure of object pointers at offsets the class's member descriptors give. The core reads the offsets once and makes an instance by allocating it and storing its fields. No `__init__` runs, so each constructor in the core stores what the `__init__` stores and says so. For this a deferred write's node calls an object of a small class where it called a function made on the spot, in Python as in C.
+- **It stands on the class where the methods stood.** A `Road` is a callable the core defines; `array.use_core(core)` puts one in place of each operator, each reduction, `__array_ufunc__`, `__array_function__`, `__getitem__`, `__setitem__`, the in-place operators and `T`, and keeps the Python method as the road's fallback. `a * b` then goes from the interpreter's `BINARY_OP` to C without a Python frame in between, which is also why the user's line is the frame the core is called from. `use_core(None)` puts the methods back.
+- **What a test or the layer rebinds is read each time:** the observer, the limit of pending nodes, the error settings' record. So a recording, a patched limit and `np.errstate` behave with the core as without it.
+- **It is optional and says which version it is.** `python -m prototypes.lazy.build_core` compiles it with clang into the layer's directory; the layer takes it if it is there and runs the same without it. The core carries a version number that `array.py` asks for, so a module built from an older source is left unused.
+- **What still goes the Python way:** the first call of each kind, by design; `x[mask]` and other indices that hold pending arrays, whose node calls a function made for that index (3.1 µs, of which the answer is found by the core); `reshape`, `transpose` and `swapaxes` as methods, which pass through a Python method on their way to the core; `out=` writes; everything made at once.
+- **What it leans on.** CPython's layout of an object with slots, its frames (`PyEval_GetFrame`, the offset of the running instruction), its context variables and weak references. It compiles against the headers of Python 3.11, 3.12 and 3.14 and was run on 3.12. It assumes the lock the interpreter holds; free-threaded Python is not supported, as for the rest of the package.
 
 ### Computing
 
@@ -906,10 +923,11 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 - *What asking for it computes.* The prototype computes the selection. Counting the mask would be enough, and would compute less.
 - *Errors that move.* An error that depends on the number selected is raised when the graph is computed. A strict stand-in could refuse to defer such a selection, so that a program run strictly keeps every shape error on its line.
 
-**Writing a node in C.**
+**The C core in the package.**
 
-- *In Python, with what repeats remembered* (the prototype): 1.4 to 2.5 µs for a node, of which nothing is spent asking NumPy ([What is remembered while a graph is written](#what-is-remembered-while-a-graph-is-written)). What remains is the interpreter: calls and objects.
-- *The lazy array and the node as extension types,* with the operators as slots and the memories as C dictionaries. No part of this was built, so its cost is an estimate: NumPy itself goes from Python to a finished array of 16 elements in 0.23 µs, and a node needs no more work than that, so a node might cost a sixth of what it does. It would be the first compiled code of the layer, and the paths that are not remembered would still call back into Python. Whether it is worth having depends on what the graph is used for: a fused kernel that saves a millisecond does not notice a microsecond per node, and a program of small arrays gains nothing from a graph at all.
+- *Built on request, beside the Python* (the prototype): `build_core` calls clang, and the layer works without the result. Right for a study object.
+- *Built with the package:* `hotkernels` already compiles C for its binding, so the core would be one more source of that build and would ship in the wheels. The Python roads stay as the definition and the fallback, and the test that runs every test both ways stays with them.
+- *How far it goes.* The core is a quick road, not a second implementation: it holds no rule for a shape or a type and decides nothing that Python does not decide first. Moving the rules themselves into C would make the first call of each kind cheaper, which a loop does not notice, at the price of two sets of rules to keep alike. Not proposed.
 
 **How much to say when the layer computes without being asked.**
 
@@ -927,7 +945,7 @@ y.gather()               # by reference: [10., 2., 4.]      copied when met: [0.
 - **A codebase that uses other libraries.** The ten programs use NumPy alone. pandas, matplotlib, SciPy and scikit-learn are not installed where they were run, so nothing here says what happens when an array is handed to one of them.
 - **Pickling and copying a lazy array.** Not tried.
 - **`install(inexact=True)` and the bottleneck hooks with the layer.** Only the default `install()` was run.
-- **The other architecture.** Everything here was run on ARM64 macOS. The layer is pure Python; which kernel takes which call differs by platform, and the test of the kernels makes no assumption about it.
+- **The other architecture.** Everything here was run on ARM64 macOS. The layer's Python is the same everywhere, and its C core is portable C that was compiled and run on ARM64 macOS only; which kernel takes which call differs by platform, and the test of the kernels makes no assumption about it.
 - **A stub file for the stand-in.** Whether one makes `np.` complete in an editor was not tried.
 - **NumPy releases other than 2.5.5.** Both protocols are years old and documented, and the supported range starts at 2.3; the check runs on each.
 - **A program at its real size.** The repository's applications were run smaller than they come, once, by a script outside the repository. They are not yet part of a check that anyone can run again.
