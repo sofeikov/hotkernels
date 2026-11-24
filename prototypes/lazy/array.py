@@ -32,6 +32,15 @@ import numpy as np
 from . import evaluate, explain, graph, record, rules
 from .graph import Node, NotGathered, Trigger
 
+try:
+    # The quick road for writing a node, in C. The layer is the same without it; see `use_core`.
+    from . import _core as _built_core
+except ImportError:
+    _built_core = None
+
+# The version of `_core.c` this file was written against. A module built from another is not used.
+CORE_VERSION = 7
+
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
 # NumPy functions that make a new array from the shape and element type of
@@ -139,6 +148,53 @@ class _Step:
             NumPy's view of it.
         """
         return self.operation(array, *self.tail, **self.kwargs)
+
+
+@dataclass(eq=False, slots=True)
+class _Write:
+    """What the node of a deferred write calls: a copy of what the array held, with the write made into it.
+
+    A class and not a function made inside `_defer_write`, so that the C core can make one too.
+    """
+
+    # The view operations from the cell's contents to the array written into.
+    steps: tuple
+    # Makes the write: called with the part of the copy the target is a view of, then the operands' values.
+    perform: Callable[..., Any]
+
+    def __call__(self, old: np.ndarray, *values: Any) -> np.ndarray:
+        """Copy what the array held and make the write into the copy.
+
+        Args:
+            old: The cell's contents before the write.
+            *values: The values of what the write reads.
+
+        Returns:
+            The cell's contents after the write.
+        """
+        new = old.copy()
+        view = new
+        for step in self.steps:
+            view = step.of(view)
+        self.perform(view, *values)
+        return new
+
+
+@dataclass(eq=False, slots=True)
+class _Assign:
+    """Makes `view[index] = assigned` for an index that holds no lazy array: what `_Write` performs for a plain assignment."""
+
+    # The index as written between the brackets.
+    index: Any
+
+    def __call__(self, view: np.ndarray, assigned: Any) -> None:
+        """Assign into the part of the copy the target is a view of.
+
+        Args:
+            view: That part.
+            assigned: The value assigned.
+        """
+        view[self.index] = assigned
 
 
 def wrap(value: Any, source: str = "array", strict: bool = False, owned: bool = False) -> "LazyArray":
@@ -347,6 +403,10 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
     Raises:
         Exception: NumPy's own, when the shapes or types are wrong.
     """
+    if _core is not None:
+        made = _core.try_defer(operation, name, args, kwargs, ruled_as, frame)
+        if made is not _core.MISS:
+            return made
     # One pass over the arguments does the work of `_unwrapped` and, for
     # arguments that are not collections, of `_strict`.
     unwrapped = []
@@ -673,6 +733,7 @@ def _binary(ufunc: np.ufunc, reflected: bool = False) -> Callable[..., Any]:
         deferred = _try_defer(ufunc, name, args, {}, None, sys._getframe(1))
         # Not `deferred or ...`: a truth test of a lazy array would compute it.
         return deferred if deferred is not None else _at_once(ufunc, call, args, {})
+    apply.road = ("binary", ufunc, name, None, reflected)
     return apply
 
 
@@ -692,6 +753,7 @@ def _unary(ufunc: np.ufunc) -> Callable[..., Any]:
         """Defer the operator's ufunc on the array."""
         deferred = _try_defer(ufunc, name, (self,), {}, None, sys._getframe(1))
         return deferred if deferred is not None else _at_once(ufunc, call, (self,), {})
+    apply.road = ("unary", ufunc, name)
     return apply
 
 
@@ -737,8 +799,9 @@ def _may_defer_write(target: "LazyArray") -> bool:
     """
     cell = target._cell
     node = cell.node
+    # `rules.is_admissible`: no length of zero and an element type the layer defers, remembered by the node's number.
     return (not node.exposed and node.failure is None and not cell.doubted and not cell.shared_in_doubt()
-            and node.shape != () and 0 not in node.shape and node.dtype.kind in rules.DEFERRED_KINDS)
+            and node.shape != () and rules.is_admissible(node))
 
 
 def _defer_write(target: "LazyArray", name: str, perform: Callable[..., Any], operands: tuple,
@@ -758,17 +821,8 @@ def _defer_write(target: "LazyArray", name: str, perform: Callable[..., Any], op
         operands: What the write reads: lazy arrays, `ndarray`s, numbers.
         frame: The frame that called into the layer, when the caller has it; see `graph.deferred`.
     """
-    cell, steps = target._cell, target._steps
-
-    def run(old: np.ndarray, *values: Any) -> np.ndarray:
-        """Copy what the array held and make the write into the copy."""
-        new = old.copy()
-        view = new
-        for step in steps:
-            view = step.of(view)
-        perform(view, *values)
-        return new
-
+    cell = target._cell
+    run = _Write(target._steps, perform)
     # Read before the cell changes: an operand that is a view of this array is a view of what it held.
     read, strict = _read(operands)
     strict = cell.node.strict or strict
@@ -996,9 +1050,13 @@ def _select(target: "LazyArray", parts: tuple, frame: FrameType | None = None) -
     fill, pending, _ = parts
     nodes = tuple(lazy._node for lazy in pending)
     index = fill(nodes)
-    signature = rules.plan(operator.getitem, (target._node, index), {})
-    if signature is None:
-        return None
+    signature = _core.plan(operator.getitem, (target._node, index), {}) if _core is not None else None
+    if signature is None or signature is _core.MISS:
+        signature = rules.plan(operator.getitem, (target._node, index), {})
+        if signature is None:
+            return None
+    else:
+        signature = rules.Signature(*signature)
 
     def run(base: Any, *found: Any) -> Any:
         """Index the computed array with the computed index."""
@@ -1185,6 +1243,7 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str, ufunc: np.ufunc) ->
         value = self._node.value
         result = apply(value, _valued(other))
         return self if result is value else LazyArray(graph.leaf(result, symbol, graph.AT_ONCE, self._node.strict))
+    write.road = ("inplace", apply, symbol, perform)
     return write
 
 
@@ -1236,6 +1295,7 @@ def _reduction(function: Callable[..., Any], name: str) -> Callable[..., Any]:
         operands = (self,) + args
         deferred = _try_defer(method, name, operands, kwargs, function, sys._getframe(1))
         return deferred if deferred is not None else _at_once(method, f"ndarray.{name}", operands, kwargs)
+    reduce.road = ("reduction", method, name, function)
     return reduce
 
 
@@ -1592,11 +1652,7 @@ class LazyArray:
             return
         if _may_defer_write(self):
             if _plain_assignment_fits(self, index, value):
-                def assign_plain(view: np.ndarray, assigned: Any) -> None:
-                    """Assign into the part of the copy the target is a view of, at the index as written."""
-                    view[index] = assigned
-
-                _defer_write(self, "setitem", assign_plain, (value,), sys._getframe(1))
+                _defer_write(self, "setitem", _Assign(index), (value,), sys._getframe(1))
                 return
             parts = _index_parts(index)
             if parts is not None and _assignment_fits(self, parts, value):
@@ -1728,3 +1784,89 @@ class LazyArray:
     __iadd__, __isub__ = _in_place(operator.iadd, "x += y", np.add), _in_place(operator.isub, "x -= y", np.subtract)
     __imul__ = _in_place(operator.imul, "x *= y", np.multiply)
     __itruediv__ = _in_place(operator.itruediv, "x /= y", np.true_divide)
+
+
+# The roads the C core can stand on, beside the operators and reductions that say so where they are made.
+LazyArray.__array_ufunc__.road = ("array_ufunc",)
+LazyArray.__array_function__.road = ("array_function", HANDLED_APART)
+LazyArray.__getitem__.road = ("getitem",)
+LazyArray.__setitem__.road = ("setitem",)
+
+# `graph.deferred` as Python has it, to put back when the C core is taken away.
+_python_deferred = graph.deferred
+# The C core in use, or None: every call then goes the Python way.
+_core: Any = None
+# The Python methods of `LazyArray` that a road of the core stands in for at present, by name.
+_stood_in_for: dict[str, Callable[..., Any]] = {}
+# The same for the classes of the stand-in for the module: (the class, the name, the method).
+_stood_in_for_elsewhere: list[tuple[type, str, Callable[..., Any]]] = []
+
+
+def _set_up(core: Any) -> None:
+    """Tell the C core the layer's classes, memories and constants.
+
+    Args:
+        core: The module built from `_core.c`.
+    """
+    from . import namespace  # Imports this module, so not at the top.
+    core.setup(Node=Node, LazyArray=LazyArray, Cell=_Cell, Step=_Step, ufunc=np.ufunc, ndarray=np.ndarray,
+               graph_names=vars(graph), rules_names=vars(rules), numbers=graph._numbers, pending=graph._pending,
+               forget=graph._forget, counts=graph.COUNTS, origins=graph._origins, specs=graph._specs, plans=rules._plans,
+               admissible=rules._admissible_specs, caller=graph.caller, errstate=graph.errstate, view_kind=rules.VIEW,
+               sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
+               getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Write=_Write, Assign=_Assign, fitting=_fitting,
+               write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
+
+
+def use_core(core: Any) -> None:
+    """Take the C core for writing nodes, or put it away.
+
+    With a core, each method of `LazyArray` that carries a `road` is
+    replaced by a `Road` of the core, which takes the calls whose answers
+    are remembered and hands every other to that method; `graph.deferred`
+    is the core's; and `_try_defer` asks the core first. The Python
+    functions stay the definition of what happens: the core is their quick
+    road, and without it nothing but the time is different.
+
+    Args:
+        core: The module built from `_core.c`, or None for Python alone.
+            A module of another version than this file was written against
+            is put away like None.
+    """
+    global _core
+    from . import namespace  # Imports this module, so not at the top.
+    for name, method in _stood_in_for.items():
+        setattr(LazyArray, name, method)
+    _stood_in_for.clear()
+    for owner, name, method in _stood_in_for_elsewhere:
+        setattr(owner, name, method)
+    _stood_in_for_elsewhere.clear()
+    graph.deferred = _python_deferred
+    if _core is not None:
+        _core.enable(False)
+    _core = None
+    if core is None or getattr(core, "VERSION", None) != CORE_VERSION:
+        return
+    _set_up(core)
+    core.enable(True)
+    for name, method in list(vars(LazyArray).items()):
+        road = getattr(method, "road", None)
+        if road is not None:
+            _stood_in_for[name] = method
+            setattr(LazyArray, name, core.Road(road[0], method, *road[1:]))
+    for owner in (namespace.LazyCallable, namespace.LazyNumPy):
+        for name, method in list(vars(owner).items()):
+            road = getattr(method, "road", None)
+            if road is not None:
+                _stood_in_for_elsewhere.append((owner, name, method))
+                setattr(owner, name, core.Road(road[0], method, *road[1:]))
+    # `x.T` is a property, which carries no attribute of its own: `np.transpose(x)`, deferred.
+    _stood_in_for["T"] = transposed = vars(LazyArray)["T"]
+    LazyArray.T = core.Road("attribute", transposed.fget, np.transpose, "transpose")
+    graph.deferred = core.deferred
+    _core = core
+
+
+def core_in_use() -> bool:
+    """Say whether nodes are being written by the C core."""
+    return _core is not None

@@ -289,8 +289,10 @@ _forget = _pending.discard
 _internal_files: dict[str, bool] = {}
 # The lines of the user's code found so far, by the identity of the code
 # object and the offset of the instruction running in it. An entry holds the
-# code object, so that the identity stays its own, and the line.
-_origins: dict[tuple[int, int], tuple[CodeType, "Origin"]] = {}
+# code object, so that the identity stays its own; the line; and the line's
+# registry of warnings and module name again, which are compared on every
+# use. `_core.c` reads an entry in this order.
+_origins: dict[tuple[int, int], tuple[CodeType, "Origin", dict, str]] = {}
 # The error settings last seen and the dictionary `np.geterr()` gave for them.
 _last_errstate: tuple[Any, dict] = (None, {})
 # The number of each shape and element type met so far, by the shape and the
@@ -566,7 +568,7 @@ def caller(frame: FrameType | None = None) -> Origin:
         # A stack that is the layer's and NumPy's all the way up ends at a frame that is not the user's: not remembered.
         if len(_origins) >= ORIGIN_MEMORY_LIMIT:
             _origins.clear()
-        _origins[(id(code), walked.f_lasti)] = (code, origin)
+        _origins[(id(code), walked.f_lasti)] = (code, origin, origin.registry, origin.module)
     return origin
 
 
@@ -585,10 +587,9 @@ def _remembered(frame: FrameType) -> Origin | None:
     """
     found = _origins.get((id(frame.f_code), frame.f_lasti))
     if found is not None:
-        origin = found[1]
         names = frame.f_globals
-        if names.get(_REGISTRY_NAME) is origin.registry and names.get("__name__", _UNKNOWN_MODULE) == origin.module:
-            return origin
+        if names.get(_REGISTRY_NAME) is found[2] and names.get("__name__", _UNKNOWN_MODULE) == found[3]:
+            return found[1]
     return None
 
 

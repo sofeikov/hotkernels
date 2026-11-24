@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from . import array
 from .array import LazyArray, _at_once, wrap
 
 # Functions that turn their first argument into an array and have no protocol
@@ -129,6 +130,9 @@ class LazyCallable:
     `np.add.reduce` is wrapped the same way.
     """
 
+    # Slots, so that the C core can read them where it stands in for `__call__`.
+    __slots__ = ("_function", "_strict", "_source")
+
     def __init__(self, function: Callable[..., Any], strict: bool) -> None:
         """Wrap one callable.
 
@@ -152,6 +156,24 @@ class LazyCallable:
             The result, with any `ndarray` in it made lazy.
         """
         strict = self._strict
+        # The commonest call: lazy arrays and plain values by position, plain values by keyword. Nothing
+        # has to be made lazy, so the arguments go to NumPy as they came.
+        owned = True
+        for arg in args:
+            kind = type(arg)
+            if kind is LazyArray:
+                owned = False
+            elif kind not in NO_ARRAY:
+                break
+        else:
+            for arg in kwargs.values():
+                if type(arg) not in NO_ARRAY:
+                    break
+            else:
+                result = self._function(*args, **kwargs)
+                if type(result) is LazyArray:
+                    return result
+                return _made_lazy(result, self._source, strict, owned)
         # Whether no array is among the arguments (`_holds_arrays`), found in the pass that makes the
         # `ndarray`s lazy (`_lifted`). The commonest arguments are told by their type, without a call.
         owned = True
@@ -236,6 +258,9 @@ class LazyRandom:
 class LazyNumPy:
     """Stands where a NumPy module stands, and answers every name the module has."""
 
+    # Slots, so that the C core can read them where it stands in for `__getattr__`.
+    __slots__ = ("_module", "_strict", "_answers")
+
     def __init__(self, module: ModuleType, strict: bool) -> None:
         """Stand in for one module.
 
@@ -319,3 +344,11 @@ class LazyNumPy:
             owned = not _holds_arrays((args, kwargs)) or (name == "array" and kwargs.get("copy", True) is True)
             return _made_lazy(function(*args, **kwargs), f"np.{name}", self._strict, owned)
         return convert
+
+
+# The roads the C core can stand on: see `array.use_core`.
+LazyCallable.__call__.road = ("standin_call", _made_lazy, NO_ARRAY)
+LazyNumPy.__getattr__.road = ("standin_name",)
+
+# Every class a road can stand on exists now: take the C core if it is built.
+array.use_core(array._built_core)
