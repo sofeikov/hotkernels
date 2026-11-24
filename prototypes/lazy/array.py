@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 9
+CORE_VERSION = 10
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -195,6 +195,23 @@ class _Assign:
             assigned: The value assigned.
         """
         view[self.index] = assigned
+
+
+@dataclass(eq=False, slots=True)
+class _Into:
+    """Makes a call with its result written into `out=`: what `_Write` performs for `np.add(a, b, out=x)`."""
+
+    # A ufunc, or one of OUT_FUNCTIONS.
+    function: Callable[..., Any]
+
+    def __call__(self, view: np.ndarray, *values: Any) -> None:
+        """Make the call with its result written into the part of the copy the target is a view of.
+
+        Args:
+            view: That part.
+            *values: The call's positional arguments, with values for lazy arrays.
+        """
+        self.function(*values, out=view)
 
 
 def wrap(value: Any, source: str = "array", strict: bool = False, owned: bool = False) -> "LazyArray":
@@ -1289,10 +1306,7 @@ def _write_out(function: Callable[..., Any], call: str, args: tuple, target: Any
     Raises:
         Exception: NumPy's, for a result that cannot be cast into `out`.
     """
-    def into(view: np.ndarray, *values: Any) -> None:
-        """Make the call with its result written into the part of the copy the target is a view of."""
-        function(*values, out=view)
-
+    into = _Into(function)
     if not isinstance(target, LazyArray) or not _may_defer_write(target) or not _fits_elementwise(into, target, args, function):
         return False
     _defer_write(target, call, into, args)
@@ -1815,7 +1829,7 @@ class LazyArray:
 
 # The roads the C core can stand on, beside the operators and reductions that say so where they are made.
 LazyArray.__array_ufunc__.road = ("array_ufunc",)
-LazyArray.__array_function__.road = ("array_function", HANDLED_APART)
+LazyArray.__array_function__.road = ("array_function", HANDLED_APART, None, OUT_FUNCTIONS)
 LazyArray.__getitem__.road = ("getitem",)
 LazyArray.__setitem__.road = ("setitem",)
 LazyArray.reshape.road = ("reshape", np.reshape, "reshape")
@@ -1846,7 +1860,7 @@ def _set_up(core: Any) -> None:
                admissible=rules._admissible_specs, caller=graph.caller, errstate=graph.errstate, view_kind=rules.VIEW,
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
                getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
-               slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, fitting=_fitting,
+               slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
 
 
