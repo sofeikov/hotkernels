@@ -5,7 +5,9 @@ loop: the shape and element type of the call, the line that wrote it, the
 error settings in effect, whether a write fits. The prototype remembers the
 answers, and works the shape of a plain index out itself. Each test here
 holds what is remembered to what is worked out from nothing, which is what
-NumPy says. Run with `uv run --group dev pytest tests/test_lazy_building.py`.
+NumPy says. Each test runs twice, in Python alone and with the layer's C
+core (`tests/conftest.py`), which takes the calls whose answers are
+remembered. Run with `uv run --group dev pytest tests/test_lazy_building.py`.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from typing import Any, Callable
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, array, get_lazy, graph, rules
+from prototypes.lazy import LazyArray, NotGathered, array, get_lazy, graph, rules
 from prototypes.lazy.programs import regression
 
 # Seed of every random array and every random program in these tests.
@@ -62,6 +64,8 @@ MARK_THAT_FITS, MARK_THAT_DOES_NOT = 5, 200_000
 TURNS = 10
 
 lazy = get_lazy()
+# A stand-in whose arrays refuse to give their values without gather().
+strict = get_lazy(strict=True)
 
 
 def raised(call: Callable[[], Any]) -> BaseException:
@@ -352,6 +356,15 @@ def test_a_length_that_is_not_known_keeps_its_own_mark(monkeypatch):
         asked.append(counted.calls)
     # Every question was asked on the first turn.
     assert asked[0] > 0 and asked[-1] == asked[0]
+    # A call that brings two lengths that are not known, and whose answer has the second: each time, that call's own.
+    column = data[:, 0]
+    for low, high in ((-0.5, 0.2), (0.0, 0.6), (-1.0, 1.0)):
+        ordered = lazy.asarray(numpy.sort(column))
+        table_mask, sought_mask = ordered > low, x[:, 1] > high
+        places = numpy.searchsorted(ordered[table_mask], x[:, 1][sought_mask])
+        assert places._node.pending and places._node.shape == (graph.unknown_length(sought_mask._node),)
+        expected = numpy.searchsorted(numpy.sort(column)[numpy.sort(column) > low], data[:, 1][data[:, 1] > high])
+        assert expected.tobytes() == places.gather().tobytes()
     # Two selections of different lengths do not go together, remembered or not: NumPy's error, on the line.
     few, many = x[x[:, 0] > 0.5], x[x[:, 0] > -0.5]
     assert (few + few)._node.pending and (many + many)._node.pending
@@ -375,11 +388,16 @@ def test_an_answer_that_could_depend_on_the_mask_is_not_remembered():
     for node in (fits, does_not, fits, does_not):
         assert outcome(lambda: rules.plan(numpy.add, (node, node), {})) == outcome(lambda: rules._plan(numpy.add, (node, node), {}))
     assert rules.plan(numpy.add, (fits, fits), {}) is not None and rules.plan(numpy.add, (does_not, does_not), {}) is None
+    if array.core_in_use():
+        # The C core finds a remembered answer by the same rule, and so finds none here either.
+        assert all(array._core.plan(numpy.add, (node, node), {}) is array._core.MISS for node in (fits, does_not))
     # A narrow selection is remembered: the second mask's answer is found, with its own mark.
     narrow = [graph.Node(0, "made up", None, (), {}, (graph.UNKNOWN_FLOOR + mark, 4), numpy.dtype(numpy.float64)) for mark in (7, 9)]
     before = len(rules._plans)
     answers = [rules.plan(numpy.add, (node, node), {}) for node in narrow]
     assert len(rules._plans) == before + 1 and [answer.shape for answer in answers] == [node.shape for node in narrow]
+    if array.core_in_use():
+        assert [array._core.plan(numpy.add, (node, node), {})[0] for node in narrow] == [node.shape for node in narrow]
 
 
 def test_every_road_finds_the_line_that_wrote_the_operation():
@@ -437,6 +455,25 @@ def test_a_line_is_found_again_and_checked_against_its_module():
     finally:
         globals()["__warningregistry__"] = kept
     assert here().registry is kept
+    # The same on the road an operator takes, which with the C core is the core's own look in the memory.
+    x = lazy.arange(3.0)
+
+    def written() -> graph.Origin:
+        """Write one operation and return the line it names."""
+        return (x + 1)._node.origin
+
+    before = [written(), written()]
+    try:
+        globals()["__warningregistry__"] = replaced = {}
+        assert written().registry is replaced and before[0] is before[1] and before[0].registry is kept
+    finally:
+        globals()["__warningregistry__"] = kept
+    assert written().registry is kept
+    operation = compile("y = x + 1", "<two modules, one line>", "exec")
+    for names in ({"x": x, "__name__": "one"}, {"x": x, "__name__": "two"}, {"x": x, "__name__": "one"}):
+        exec(operation, names)
+        origin = names["y"]._node.origin
+        assert origin.module == names["__name__"] and origin.registry is names["__warningregistry__"]
     # One code object under two sets of globals: each gets its own module's name and record.
     code = compile("origin = caller()", "<two modules>", "exec")
     one, two = {"caller": graph.caller, "__name__": "one"}, {"caller": graph.caller, "__name__": "two"}
@@ -488,6 +525,18 @@ def test_a_write_that_fits_is_asked_about_once(monkeypatch):
     for _ in range(2):
         assert str(raised(lambda: operator.iadd(small, 300))) == str(raised(lambda: operator.iadd(plain_small, 300)))
         assert type(raised(lambda: operator.iadd(small, 1.5))) is type(raised(lambda: operator.iadd(plain_small, 1.5)))
+    # What is written from a strict array is strict, the second time as the first.
+    whole, part = strict.arange(3.0) + 0, strict.arange(2.0) + 0
+    for _ in range(3):
+        target, assigned = lazy.zeros(3), lazy.zeros(3)
+        target += 0.0
+        assigned[0] = 0.0
+        assert not target._node.strict and not assigned._node.strict
+        target += whole
+        assigned[1:] = part
+        assert target._node.pending and target._node.strict and assigned._node.pending and assigned._node.strict
+        assert isinstance(raised(lambda: float(target.sum())), NotGathered)
+        assert target.gather().tobytes() == numpy.arange(3.0).tobytes() and assigned.gather().tobytes() == numpy.array([0.0, 0.0, 1.0]).tobytes()
     out, plain_out = lazy.zeros((3, 4)), numpy.zeros((3, 4))
     before = counted.calls
     for turn in range(TURNS):
@@ -526,6 +575,7 @@ def test_a_plain_assignment_does_not_ask_numpy(monkeypatch):
     column, plain_column = chosen[:, 1], plain_chosen[:, 1]
     assert not graph.is_known(column._steps[-1].shape) and not column._steps[-1].plain
     float(chosen.sum())  # Computes the selection, which now has four rows, and hands no array out.
+    assert (chosen * 1)._node.shape == (4, 4) and chosen[0]._node.shape == (4,)  # Read with its real shape, as a loop would have.
     before = counted.calls
     column[0] = -1.0
     plain_column[0] = -1.0
@@ -585,6 +635,44 @@ def test_the_stand_in_gives_one_wrapper_for_a_name_until_the_module_changes(monk
     assert wrapped(x).gather().tobytes() == numpy.exp(data).tobytes()
     monkeypatch.setattr(numpy, "exp", numpy.expm1)
     assert lazy.exp is not wrapped and lazy.exp(x).gather().tobytes() == numpy.expm1(data).tobytes()
+
+
+def test_the_core_stands_in_for_the_python_and_can_be_put_away(lazy_core):
+    """With the C core, an operator is a road that falls back to the Python method; put away, the method is back."""
+    data = numpy.arange(12.0).reshape(3, 4)
+    x = lazy.asarray(data)
+    python_add, python_deferred = array._stood_in_for.get("__add__", LazyArray.__add__), array._python_deferred
+    if lazy_core != "c":
+        assert not array.core_in_use() and LazyArray.__add__ is python_add and graph.deferred is python_deferred
+        return
+    core = array._core
+    roads = ("__add__", "__rmul__", "__neg__", "__lt__", "sum", "astype", "__array_ufunc__", "__array_function__", "__getitem__")
+    assert all(type(vars(LazyArray)[name]) is core.Road and vars(LazyArray)[name].fallback is array._stood_in_for[name] for name in roads)
+    assert graph.deferred is core.deferred
+    # What the core does not take, the method does: a call made at once, an error, a bound method.
+    assert (x + [1.0, 2.0, 3.0, 4.0]).gather().tobytes() == (data + [1.0, 2.0, 3.0, 4.0]).tobytes()
+    assert str(raised(lambda: x + numpy.ones(5))) == str(raised(lambda: data + numpy.ones(5)))
+    assert x.__add__(1).gather().tobytes() == (data + 1).tobytes() and x.sum(axis=0).gather().tobytes() == data.sum(axis=0).tobytes()
+    # Switched off, every call is handed to the method; put away, the methods are the class's again.
+    core.enable(False)
+    try:
+        assert (x * 2)._node.pending and (x * 2).gather().tobytes() == (data * 2).tobytes()
+    finally:
+        core.enable(True)
+    try:
+        array.use_core(None)
+        assert LazyArray.__add__ is python_add and graph.deferred is python_deferred and (x * 2)._node.pending
+
+        class Older:
+            """Stands for a core built from another version of the source."""
+
+            VERSION = array.CORE_VERSION + 1
+
+        array.use_core(Older)
+        assert not array.core_in_use() and LazyArray.__add__ is python_add
+    finally:
+        array.use_core(core)
+    assert array.core_in_use() and (x * 2).gather().tobytes() == (data * 2).tobytes()
 
 
 class Heard:
@@ -847,7 +935,9 @@ def test_random_programs_are_written_alike_with_and_without_the_memories(monkeyp
 
     With the memories switched off every question goes the long way: to the
     rules, to NumPy's answer on stand-ins, up the stack. With them on, the
-    program runs twice more, the second time with every answer already there.
+    program runs twice more, the second time with every answer already there:
+    in Python, or by the C core when the test is run with it, where the
+    second run is the one the core writes.
     """
     def run(seed: int) -> tuple[list, list]:
         """Run one random program under an observer, with nothing held from the run before."""
@@ -863,14 +953,19 @@ def test_random_programs_are_written_alike_with_and_without_the_memories(monkeyp
             gc.enable()
 
     nodes = 0
+    core = array._core
     for seed in range(PROGRAMS):
         with monkeypatch.context() as off:
+            array.use_core(None)  # The C core reads the memories directly: off means Python alone.
             off.setattr(rules, "_key", lambda operation, args, kwargs, marks: None)
             off.setattr(rules, "basic_shape", lambda shape, index: None)
             off.setattr(array, "_fit_key", lambda written_by, target, operands: None)
             off.setattr(graph, "_remembered", lambda frame: None)
             off.setattr(graph, "_error_settings", graph._NoRecord)
-            plain = run(seed)
+            try:
+                plain = run(seed)
+            finally:
+                array.use_core(core)
         forget_everything()
         first = run(seed)
         again = run(seed)
