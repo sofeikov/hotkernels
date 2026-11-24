@@ -194,21 +194,23 @@ sequenceDiagram
   participant U as install()
   participant B as Binding
   participant N as NumPy
+  U->>N: small public calls, before any hook is applied
+  N-->>U: NumPy's own answers
   U->>B: apply hook, remember the pointer it replaced
-  U->>N: one small public call with a known answer
+  U->>N: the same calls again
   N->>B: (the call reaches the hook, if the hook works)
   B-->>U: result
-  alt the kernel's counter moved and the answer is right
+  alt the kernel's counter moved and every answer is NumPy's, in every detail
     U->>U: keep the hook
-  else counter did not move, or wrong answer
+  else counter did not move, or an answer differs
     U->>B: put the original pointer back
     U->>U: record why, for report()
   end
 ```
 
-Each hook goes in one at a time and proves itself with a real call through NumPy's public interface. If the kernel's counter did not move, or the answer is wrong, the hook is removed and `report()` says so. The failure mode of a NumPy that routes a call differently is therefore "that operation is not accelerated", never "that operation is wrong".
+Each hook goes in one at a time and proves itself with real calls through NumPy's public interface, made once before any hook is applied and once after. If the kernel's counter did not move, or an answer differs from NumPy's own, the hook is removed and `report()` says so. The answers are compared as the differential test below compares them: Python type, element type, shape, flags and bytes, so a result that is a Python `int` where NumPy's is `np.intp`, or `+0.0` where NumPy's is `-0.0`, counts as different. The probes' inputs hold a negative zero wherever the operation can return one. The failure mode of a NumPy that routes a call differently, or answers it differently in such a detail, is therefore "that operation is not accelerated", never "that operation is wrong". It costs about 0.6 ms of the 6.4 ms `install()` takes on an Apple M1 Pro.
 
-A NumPy that routes the call the same way but answers it differently is another matter, and the self-test does not see it. NumPy 2.0 makes every zero `np.clip` returns +0.0, where later releases and the kernel keep its sign; before 2.3, `np.count_nonzero(x)` returns a Python `int` where later releases and the binding return `np.intp`. On those releases every hook passed its self-test and stayed in place. The differential test below found both, run against each NumPy 2 release, and the package now requires NumPy 2.3 and refuses an older one. Continuous integration runs that test against the oldest NumPy the package claims and the newest on PyPI.
+The self-test did not always compare in full. NumPy 2.0 makes every zero `np.clip` returns +0.0, where later releases and the kernel keep its sign; before 2.3, `np.count_nonzero(x)` returns a Python `int` where later releases and the binding return `np.intp`. On those releases every hook passed the self-test of the time, which compared values alone, and stayed in place. The differential test below found both, run against each NumPy 2 release, and the package now requires NumPy 2.3 and refuses an older one. Continuous integration runs that test against the oldest NumPy the package claims and the newest on PyPI. A probe sees only its own inputs, so the differential test remains the wider guard.
 
 `uninstall()` restores the pointers in reverse order, and only a pointer that is still the one hotkernels put there. If something else has patched the same place since, it is left alone and reported.
 

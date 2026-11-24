@@ -191,7 +191,7 @@ One counter of calls the lane served, shown in `report()` as one row: the NumPy 
 
 ### The self-test
 
-At `install()`, after the hook is applied, a set of probes runs, each of which must give the right answer and move the lane's counter by exactly one:
+At `install()`, after the hook is applied, a set of probes runs, each of which must give the answer it gave before any hook was applied, compared in full as every probe's is ([delivery-design.md](delivery-design.md#installing-and-uninstalling)), and move the lane's counter by exactly one:
 
 - `a + b` on float64;
 - `a * 2.0` on float32, so a Python number is converted for a float32 loop;

@@ -33,7 +33,7 @@ import numpy as np
 
 from . import report as _report
 from .environment import BINDING_MODULE, unsupported_reason
-from .hooks import BOTTLENECK_HOOKS, BOTTLENECK_MODULE, HOOKS, Hook, Probe
+from .hooks import BOTTLENECK_HOOKS, BOTTLENECK_MODULE, HOOKS, Hook, Probe, describe
 from .report import Report
 
 __all__ = ["install", "uninstall", "enabled", "report", "Report", "__version__"]
@@ -70,26 +70,71 @@ def _load_binding():
     return importlib.import_module(BINDING_MODULE)
 
 
-def _probe_passes(binding, probe: Probe) -> bool:
-    """Run one self-test call and say whether its kernel took it and was right.
+def _active_probes(hook: Hook, inexact: bool) -> tuple[Probe, ...]:
+    """Return the probes of a hook that install() runs.
+
+    Args:
+        hook: The hook.
+        inexact: Whether kernels that are not bit-identical to NumPy were
+            asked for. Their probes are left out otherwise.
+
+    Returns:
+        The probes, in the hook's order.
+    """
+    return tuple(probe for probe in hook.probes if inexact or not probe.inexact)
+
+
+def _answer(probe: Probe) -> tuple | None:
+    """Run one probe's calls and describe what they gave.
+
+    Args:
+        probe: The probe.
+
+    Returns:
+        The description of its answer (`describe`), or None when it raised.
+    """
+    try:
+        return describe(probe.call())
+    except Exception:  # A probe that raises has failed, whatever it raised.
+        log.debug("probe for %s raised", probe.kernel, exc_info=True)
+        return None
+
+
+def _expected(hook: Hook, inexact: bool) -> tuple[tuple | None, ...]:
+    """Run a hook's probes before the hook is applied: the answers it must give.
+
+    Args:
+        hook: The hook, not applied.
+        inexact: As for `_active_probes`.
+
+    Returns:
+        One description per probe that install() runs, in order; None for one
+        that raised.
+    """
+    return tuple(_answer(probe) for probe in _active_probes(hook, inexact))
+
+
+def _probe_passes(binding, probe: Probe, expected: tuple | None) -> bool:
+    """Run one self-test call and say whether its kernel took it and answered as NumPy did.
 
     Args:
         binding: The extension module.
         probe: The call to make and the kernel that should take it.
+        expected: The description of the probe's answer with the hook not
+            applied, from `_expected`, or None when that run raised.
 
     Returns:
-        True when the answer was right and the kernel's call counter moved.
+        True when the answer is the same as without the hook in every detail
+        `describe` keeps and the kernel's call counter moved.
     """
-    before = binding.counters()[0][probe.kernel]
-    try:
-        right = probe.call()
-    except Exception:  # A probe that raises has failed, whatever it raised.
-        log.debug("probe for %s raised", probe.kernel, exc_info=True)
+    if expected is None:
         return False
-    return right and binding.counters()[0][probe.kernel] > before
+    before = binding.counters()[0][probe.kernel]
+    answer = _answer(probe)
+    return answer is not None and answer == expected and binding.counters()[0][probe.kernel] > before
 
 
-def _apply(binding, hook: Hook, inexact: bool) -> str | None:
+def _apply(binding, hook: Hook, inexact: bool, expected: tuple[tuple | None, ...]) -> str | None:
     """Apply one hook and keep it only if every probe passes.
 
     Args:
@@ -97,6 +142,8 @@ def _apply(binding, hook: Hook, inexact: bool) -> str | None:
         hook: The hook to apply.
         inexact: Whether kernels that are not bit-identical to NumPy were
             asked for. Their probes are skipped otherwise.
+        expected: The answers of the hook's probes before it was applied,
+            from `_expected` with the same `inexact`.
 
     Returns:
         None when the hook is in place, otherwise a line saying why it is not.
@@ -106,13 +153,30 @@ def _apply(binding, hook: Hook, inexact: bool) -> str | None:
         binding.apply(hook.name)
     except Exception as error:  # Any failure here means NumPy is not shaped as expected.
         return f"{hook.name}: could not be applied ({error})"
-    for probe in hook.probes:
-        if probe.inexact and not inexact:
-            continue
-        if not _probe_passes(binding, probe):
+    for probe, answer in zip(_active_probes(hook, inexact), expected):
+        if not _probe_passes(binding, probe, answer):
             binding.remove(hook.name)
             return f"{hook.name}: removed again, its self-test for {probe.kernel} failed"
     return None
+
+
+def _apply_all(binding, hooks: list[Hook], inexact: bool) -> list[str]:
+    """Apply hooks in order, each proved by its probes against the answers given before any of them was applied.
+
+    The probes all run first, with none of `hooks` applied, so each hook is
+    compared with NumPy as it was, not with NumPy and the hooks before it.
+
+    Args:
+        binding: The extension module.
+        hooks: The hooks, none of them applied.
+        inexact: As for `_apply`.
+
+    Returns:
+        One line per hook that is not in place.
+    """
+    expected = [_expected(hook, inexact) for hook in hooks]
+    problems = (_apply(binding, hook, inexact, answers) for hook, answers in zip(hooks, expected))
+    return [problem for problem in problems if problem]
 
 
 class _BottleneckLoader(importlib.abc.Loader):
@@ -207,7 +271,7 @@ def _drop_finder() -> None:
 
 
 def _apply_bottleneck(binding) -> list[str]:
-    """Apply the hooks in bottleneck, each proved by its probe.
+    """Apply the hooks in bottleneck, each proved by its probe against bottleneck's own answer.
 
     bottleneck must be in sys.modules. A hook whose function is not shaped as
     the binding expects, or whose probe fails, is left off.
@@ -218,8 +282,7 @@ def _apply_bottleneck(binding) -> list[str]:
     Returns:
         One line per hook that is not in place.
     """
-    hooks = [hook for hook in HOOKS if hook.name in BOTTLENECK_HOOKS]
-    return [problem for problem in (_apply(binding, hook, False) for hook in hooks) if problem]
+    return _apply_all(binding, [hook for hook in HOOKS if hook.name in BOTTLENECK_HOOKS], False)
 
 
 def _bottleneck_imported() -> None:
@@ -295,8 +358,7 @@ def install(inexact: bool = False, bottleneck: bool = True) -> None:
         _remove_all(binding)
         _drop_finder()
         binding.set_inexact(inexact)
-        numpy_hooks = [hook for hook in HOOKS if hook.module is None]
-        problems = [problem for problem in (_apply(binding, hook, inexact) for hook in numpy_hooks) if problem]
+        problems = _apply_all(binding, [hook for hook in HOOKS if hook.module is None], inexact)
         if bottleneck and BOTTLENECK_MODULE in sys.modules:
             problems += _apply_bottleneck(binding)
         elif bottleneck:
