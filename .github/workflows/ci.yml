@@ -148,5 +148,6 @@ jobs:
       # NumPy's own test suite, both ways, as in the macOS job.
       - run: uv run delivery numpy-tests
       # The tests of the delivery tool's own code: the sizes and records of
-      # `delivery apps` and the parsing of the Linux profile. They time nothing.
+      # `delivery apps` and the parsing of the Linux profile. And the tests of
+      # the self-test install() runs. They time nothing.
       - run: uv run --group dev pytest tests

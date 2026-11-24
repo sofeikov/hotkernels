@@ -45,7 +45,7 @@ x86-64 was not measured: there is no such machine here. The lane is the same C t
 - **A call that falls back costs 3 to 4 ns, not 2.** The decline path tests an exact `ndarray` first and settles it by its own checks, and looks at keywords and outputs only when there are any. What is left is the call through the lane and the count of calls left to NumPy, 1.3 ns of the total. The count was kept: it is what `report()` shows of the calls the lane did not serve, and it is what told shap's calls apart in [What it does for whole programs](#what-it-does-for-whole-programs).
 - **`report()` shows the lane as NumPy's.** Its row is "elementwise ufuncs", element type "numeric", and "NumPy" in the Kernel column, not "C", because the loops are NumPy's; a line under the table says what its columns count.
 - **`delivery check` builds a case's arguments before it reads the counters.** The judge's value classes make ufunc calls of their own, which the lane counts. Building the arguments first, then reading the counters, then making the call, leaves every other operation as it was.
-- **NumPy can be nondeterministic itself.** `np.power` on int64 with a negative exponent into a float32 output gave two different outputs over six runs of plain NumPy: after the loop raises, its buffered cast copies what was left in its buffer. Those cases are left out of `delivery check`. Long double, one of the types the lane must decline, is left out of the cases too: on x86-64 it is an 80-bit number in 16 bytes, and NumPy leaves the 6 bytes of padding as they were, so its bytes differ from run to run; `complex64` takes its place. CI's Linux jobs found it, on the first push.
+- **NumPy can be nondeterministic itself.** `np.power` on int64 with a negative exponent into a float32 output gave two different outputs over six runs of plain NumPy: after the loop raises, its buffered cast copies what was left in its buffer. Those cases are left out of `delivery check`. Long double, one of the types the lane must decline, is left out of the cases too: on x86-64 it is an 80-bit number in 16 bytes, and NumPy leaves the 6 bytes of padding as they were, so its bytes differ from run to run; `complex64` takes its place. CI's Linux jobs found it, on the first push. Long double results of other operations, such as `np.round` on a long double scalar, which the binding passes to NumPy, are still compared: on x86-64, where `np.finfo(np.longdouble)` reports the x87 format, `delivery check` compares a long double, real or complex, by the 10 bytes of each value only and not by its padding, whose contents depend on what that memory held before, such as what the probes of `install()` left there.
 
 ## Summary
 
@@ -191,7 +191,7 @@ One counter of calls the lane served, shown in `report()` as one row: the NumPy 
 
 ### The self-test
 
-At `install()`, after the hook is applied, a set of probes runs, each of which must give the right answer and move the lane's counter by exactly one:
+At `install()`, after the hook is applied, a set of probes runs, each of which must give the answer it gave before any hook was applied, compared in full as every probe's is ([delivery-design.md](delivery-design.md#installing-and-uninstalling)), and move the lane's counter by exactly one:
 
 - `a + b` on float64;
 - `a * 2.0` on float32, so a Python number is converted for a float32 loop;

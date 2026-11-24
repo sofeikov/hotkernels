@@ -40,6 +40,16 @@ DIGEST_BYTES = 16
 # Longest description of a value shown in a failure.
 SHOWN_CHARACTERS = 300
 
+# Bits of the significand NumPy reports (`np.finfo(np.longdouble).nmant`)
+# for the x87 80-bit extended format, which a long double is on x86-64 Linux.
+# The format stores 64 significand bits with the leading one explicit, and
+# NumPy counts the 63 after it.
+X87_SIGNIFICAND_BITS = 63
+# Bytes of an x87 80-bit value: 8 of significand and 2 of sign and exponent.
+# NumPy stores it in 16 bytes and leaves the 6 after these as they were, so
+# they differ from run to run and say nothing about the value.
+X87_VALUE_BYTES = 10
+
 # What a case ended in.
 RETURNED = "returned"
 RAISED = "raised"
@@ -103,12 +113,39 @@ def _digest(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=DIGEST_BYTES).hexdigest()
 
 
+def _value_bytes(array: np.ndarray) -> bytes:
+    """Return the bytes of an array's elements that hold their values, in C order.
+
+    That is every byte, except for a long double or complex long double in
+    the x87 80-bit format (x86-64 Linux): there only the first
+    X87_VALUE_BYTES of each 16-byte long double are kept, since NumPy leaves
+    the padding after them as it was. On ARM64 macOS a long double is a
+    double, and on ARM64 Linux an IEEE quad with no padding; both keep every
+    byte.
+
+    Args:
+        array: Any array, of any layout.
+
+    Returns:
+        The bytes to compare: equal for two arrays of one element type and
+        shape exactly when their elements have the same bits.
+    """
+    contiguous = np.ascontiguousarray(array)
+    x87 = np.finfo(np.longdouble).nmant == X87_SIGNIFICAND_BITS
+    if x87 and contiguous.dtype.type in (np.longdouble, np.clongdouble):
+        # A complex long double is two long doubles, each padded the same way.
+        elements = contiguous.view(np.uint8).reshape(-1, np.dtype(np.longdouble).itemsize)
+        return elements[:, :X87_VALUE_BYTES].tobytes()
+    return contiguous.tobytes()
+
+
 def describe(value: object) -> tuple:
     """Reduce a value to a comparable description.
 
     An array becomes its type, element type, shape, flags and a hash of its
     bytes, so +0.0 differs from -0.0 and NaNs are compared by their bits. A
     masked array adds its mask. Containers are described element by element.
+    An x87 long double is compared by its value bytes only (`_value_bytes`).
 
     Args:
         value: A result, or an argument after a call.
@@ -120,11 +157,11 @@ def describe(value: object) -> tuple:
     if isinstance(value, np.ma.MaskedArray):
         return ("masked", type(value).__name__, describe(np.asarray(value.data)), describe(np.ma.getmaskarray(value)))
     if isinstance(value, np.ndarray):
-        contents = repr(value.tolist()) if value.dtype.hasobject else _digest(np.ascontiguousarray(value).tobytes())
+        contents = repr(value.tolist()) if value.dtype.hasobject else _digest(_value_bytes(value))
         flags = (value.flags.c_contiguous, value.flags.f_contiguous, value.flags.writeable)
         return ("array", type(value).__name__, value.dtype.str, value.shape, flags, contents)
     if isinstance(value, np.generic):
-        return ("scalar", type(value).__name__, value.dtype.str, _digest(value.tobytes()))
+        return ("scalar", type(value).__name__, value.dtype.str, _digest(_value_bytes(np.asarray(value))))
     if isinstance(value, (tuple, list)):
         return (type(value).__name__, tuple(describe(item) for item in value))
     return ("object", type(value).__name__, repr(value))

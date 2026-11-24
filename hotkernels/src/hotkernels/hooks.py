@@ -3,20 +3,23 @@ self-test for each hook.
 
 A hook is one pointer inside NumPy that the extension module can point at the
 binding. This module says which hooks exist, which kernels each one serves,
-and how to prove after applying a hook that the kernel really is reached. The
-proof is a probe: one small NumPy call with a known answer. `install()` keeps
-a hook only if every probe gives the right answer and the kernel's call
-counter moved. A NumPy that routes a call differently from the one the hooks
-were written for then leaves hotkernels switched off for that call, with
-NumPy untouched.
+and how to prove after applying a hook that the kernel really is reached and
+answers as NumPy does. The proof is a probe: a few small NumPy calls, made
+once on NumPy with no hook applied and once with the hook. `install()` keeps a
+hook only if every probe's answers are the same in every detail a caller
+could see (type, element type, shape, flags and bytes, so the sign of a zero
+too) and the kernel's call counter moved. A NumPy that routes a call
+differently from the one the hooks were written for, or answers it
+differently, then leaves hotkernels switched off for that call, with NumPy
+untouched.
 """
 from __future__ import annotations
 
 import operator
 import platform
+import sys
 from dataclasses import dataclass
 from functools import partial
-from itertools import accumulate
 from typing import Callable
 
 import numpy as np
@@ -140,10 +143,6 @@ PROBE_SORT_TIES = 4
 PROBE_SUM_N = 1003
 PROBE_SUM_DIVISOR = 7
 PROBE_SUM_OFFSET = 0.1
-# Leaves of NumPy's pairwise summation: up to PAIRWISE_LEAF elements, added
-# into PAIRWISE_LANES running sums.
-PAIRWISE_LEAF = 128
-PAIRWISE_LANES = 8
 
 # Element count of the sorted array the search probes look in. It differs
 # from PROBE_N so that a kernel which confused its two lengths would fail.
@@ -156,9 +155,12 @@ class Probe:
 
     # Kernel whose call counter must move when `call` runs.
     kernel: str
-    # Makes one NumPy call the kernel should take and returns whether the
-    # answer was right.
-    call: Callable[[], bool]
+    # Makes the NumPy calls the kernel should take, on inputs it builds
+    # afresh each time, and returns everything a caller could look at
+    # afterwards: the results, and any array the calls changed in place.
+    # `install()` runs it once with no hook applied and once with the hook,
+    # and compares the two with `describe`.
+    call: Callable[[], object]
     # True for a kernel that is not bit-identical to NumPy. Its probe only
     # runs when such kernels were asked for.
     inexact: bool = False
@@ -211,6 +213,40 @@ class KernelInfo:
     implementation: str | None = None
 
 
+def describe(value: object) -> tuple:
+    """Reduce a probe's answer to a value that is equal for two answers exactly when a caller could not tell them apart.
+
+    The comparison of `delivery check` (`describe` in delivery/check.py),
+    which this package cannot import: an array is its type, element type,
+    shape, the flags a caller can see and its bytes, so +0.0 differs from
+    -0.0 and NaNs are compared by their bits; a NumPy scalar is its type,
+    element type and bytes; a tuple or a list is described element by
+    element; anything else is its type and its repr, so the Python int 1
+    differs from np.intp(1), and the Python float 0.0 from -0.0.
+
+    Unlike `delivery check`, it compares every byte of a long double: no
+    probe makes one. On x86-64 a long double is an 80-bit value in 16 bytes
+    whose 6 bytes of padding NumPy leaves as they were, so a probe that made
+    one would need to compare only its first 10 bytes, as
+    delivery/check.py's `_value_bytes` does.
+
+    Args:
+        value: What a probe's calls gave.
+
+    Returns:
+        A nested tuple of plain values, compared with `==`.
+    """
+    if isinstance(value, np.ndarray):
+        contents = repr(value.tolist()) if value.dtype.hasobject else np.ascontiguousarray(value).tobytes()
+        flags = (value.flags.c_contiguous, value.flags.f_contiguous, value.flags.writeable)
+        return ("array", type(value).__name__, value.dtype.str, value.shape, flags, contents)
+    if isinstance(value, np.generic):
+        return ("scalar", type(value).__name__, value.dtype.str, value.tobytes())
+    if isinstance(value, (tuple, list)):
+        return (type(value).__name__, tuple(describe(item) for item in value))
+    return ("object", type(value).__name__, repr(value))
+
+
 def _marked(dtype: type, n: int, index: int, value: float) -> np.ndarray:
     """Return `n` zeros of `dtype` with `value` at `index`."""
     x = np.zeros(n, dtype)
@@ -218,8 +254,8 @@ def _marked(dtype: type, n: int, index: int, value: float) -> np.ndarray:
     return x
 
 
-def _argext_method(dtype: type, method: str, value: float) -> bool:
-    """Probe the type slot: `x.argmax()` or `x.argmin()` on a long array.
+def _argext_method(dtype: type, method: str, value: float) -> np.intp:
+    """Probe the type slot: `x.argmax()` or `x.argmin()` on a long array with one marked element.
 
     Args:
         dtype: Element type of the probe array.
@@ -227,12 +263,12 @@ def _argext_method(dtype: type, method: str, value: float) -> bool:
         value: The one non-zero element: positive for argmax, negative for argmin.
 
     Returns:
-        Whether the method found the marked element.
+        What the method returned.
     """
-    return int(getattr(_marked(dtype, PROBE_N, PROBE_INDEX, value), method)()) == PROBE_INDEX
+    return getattr(_marked(dtype, PROBE_N, PROBE_INDEX, value), method)()
 
 
-def _argext_function(dtype: type, function: Callable, value: float) -> bool:
+def _argext_function(dtype: type, function: Callable, value: float) -> np.intp:
     """Probe the function hook: `np.argmax(x)` or `np.argmin(x)` on a short array.
 
     The array is shorter than the type slot serves, so only the function hook
@@ -244,12 +280,12 @@ def _argext_function(dtype: type, function: Callable, value: float) -> bool:
         value: The one non-zero element: positive for argmax, negative for argmin.
 
     Returns:
-        Whether the function found the marked element.
+        What the function returned.
     """
-    return int(function(_marked(dtype, SMALL_PROBE_N, SMALL_PROBE_INDEX, value))) == SMALL_PROBE_INDEX
+    return function(_marked(dtype, SMALL_PROBE_N, SMALL_PROBE_INDEX, value))
 
 
-def _argext_small_method(dtype: type, method: str, value: float) -> bool:
+def _argext_small_method(dtype: type, method: str, value: float) -> np.intp:
     """Probe the method hook: `x.argmax()` or `x.argmin()` on a short array.
 
     The array is shorter than the type slot serves, so only the method hook
@@ -261,13 +297,12 @@ def _argext_small_method(dtype: type, method: str, value: float) -> bool:
         value: The one non-zero element: positive for argmax, negative for argmin.
 
     Returns:
-        Whether the method found the marked element.
+        What the method returned.
     """
-    x = _marked(dtype, SMALL_PROBE_N, SMALL_PROBE_INDEX, value)
-    return int(getattr(x, method)()) == SMALL_PROBE_INDEX
+    return getattr(_marked(dtype, SMALL_PROBE_N, SMALL_PROBE_INDEX, value), method)()
 
 
-def _argext_rows(dtype: type, rows: Callable[[np.ndarray], np.ndarray], value: float) -> bool:
+def _argext_rows(dtype: type, rows: Callable[[np.ndarray], np.ndarray], value: float) -> np.ndarray:
     """Probe the rows path of a function or method hook: argmax or argmin along axis 1 of a narrow matrix.
 
     Row r holds `value` at column r modulo PROBE_ROWS_COLS and zeros
@@ -280,14 +315,12 @@ def _argext_rows(dtype: type, rows: Callable[[np.ndarray], np.ndarray], value: f
         value: The marked element: positive for argmax, negative for argmin.
 
     Returns:
-        Whether the result is an np.intp array of the marked columns.
+        What the call returned.
     """
     count = PROBE_N // PROBE_ROWS_COLS
     m = np.zeros((count, PROBE_ROWS_COLS), dtype)
-    marked = np.arange(count) % PROBE_ROWS_COLS
-    m[np.arange(count), marked] = value
-    result = rows(m)
-    return result.dtype == np.intp and bool(np.array_equal(result, marked))
+    m[np.arange(count), np.arange(count) % PROBE_ROWS_COLS] = value
+    return rows(m)
 
 
 def _argext_rows_function(function: Callable) -> Callable[[np.ndarray], np.ndarray]:
@@ -300,8 +333,12 @@ def _argext_rows_method(method: str) -> Callable[[np.ndarray], np.ndarray]:
     return lambda m: getattr(m, method)(axis=1)
 
 
-def _clip_with(dtype: type, clip: Callable[[np.ndarray, float, float], np.ndarray]) -> bool:
-    """Probe a clip hook: values from -1 to 1 clamped to the probe bounds.
+def _clip_with(dtype: type, clip: Callable[[np.ndarray, float, float], np.ndarray]) -> np.ndarray:
+    """Probe a clip hook: values from -1 to 1, with zeros of both signs, clamped to the probe bounds.
+
+    A zero keeps its sign through `np.clip` from NumPy 2.1 on, as it does
+    through the kernels; NumPy 2.0 made every zero it returned +0.0. The
+    zeros are inside the bounds, so no bound ties with them.
 
     The loop hook takes every call the function and method hooks take, so
     the probe of those two proves that the result is right and that a clip
@@ -312,11 +349,12 @@ def _clip_with(dtype: type, clip: Callable[[np.ndarray, float, float], np.ndarra
         clip: Clips its first argument to the bounds given by the other two.
 
     Returns:
-        Whether the result has the array's element type and the right values.
+        The clipped array.
     """
     x = np.linspace(-1.0, 1.0, PROBE_N).astype(dtype)
-    result = clip(x, PROBE_LO, PROBE_HI)
-    return result.dtype == dtype and bool(np.array_equal(result, np.minimum(np.maximum(x, PROBE_LO), PROBE_HI)))
+    x[PROBE_INDEX] = -0.0
+    x[SMALL_PROBE_INDEX] = 0.0
+    return clip(x, PROBE_LO, PROBE_HI)
 
 
 def _clip_method(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
@@ -324,71 +362,57 @@ def _clip_method(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return x.clip(lo, hi)
 
 
-def _clip(dtype: type) -> bool:
+def _clip(dtype: type) -> np.ndarray:
     """Probe the clip loop or the function hook: `np.clip(x, lo, hi)`."""
     return _clip_with(dtype, np.clip)
 
 
-def _inplace(plain: Callable[[np.ndarray, np.ndarray], np.ndarray],
-             in_place: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> bool:
+def _inplace(in_place: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> tuple[bool, np.ndarray]:
     """Probe an in-place loop: `w += b` or `w -= b` on PROBE_INPLACE_N float64 elements.
 
-    The answer is computed first by the operator that makes a new array,
-    which the in-place loops never take.
-
     Args:
-        plain: The operator, `operator.add` or `operator.sub`.
-        in_place: Its in-place form, `operator.iadd` or `operator.isub`.
+        in_place: The in-place operator, `operator.iadd` or `operator.isub`.
 
     Returns:
-        Whether `w` holds the same values afterwards as the new array.
+        Whether the operator returned `w` itself, and `w` afterwards.
     """
     w = np.arange(PROBE_INPLACE_N, dtype=np.float64)
     b = np.full(PROBE_INPLACE_N, PROBE_INPLACE_STEP)
-    expected = plain(w, b)
-    result = in_place(w, b)
-    return result is w and bool(np.array_equal(w, expected))
+    return in_place(w, b) is w, w
 
 
-def _clip_i64_with(clip: Callable[[np.ndarray, int, int], np.ndarray]) -> bool:
+def _clip_i64_with(clip: Callable[[np.ndarray, int, int], np.ndarray]) -> np.ndarray:
     """Probe the int64 path of a clip hook: SMALL_PROBE_N values around zero clamped to PROBE_INT_BOUNDS.
 
     Args:
         clip: Clips its first argument to the bounds given by the other two.
 
     Returns:
-        Whether the result is int64 and holds the clamped values.
+        The clipped array.
     """
     x = np.arange(SMALL_PROBE_N, dtype=np.int64) - SMALL_PROBE_N // 2
     lo, hi = PROBE_INT_BOUNDS
-    result = clip(x, lo, hi)
-    return result.dtype == np.int64 and result.tolist() == [min(max(v, lo), hi) for v in x.tolist()]
+    return clip(x, lo, hi)
 
 
-def _round_with(round_: Callable[[np.ndarray, int], np.ndarray]) -> bool:
+def _round_with(round_: Callable[[np.ndarray, int], np.ndarray]) -> tuple[np.ndarray, list]:
     """Probe a round hook: SMALL_PROBE_N multiples of PROBE_ROUND_STEP rounded to PROBE_DECIMALS decimals.
 
-    The expected values are computed in plain Python: `round` of a float to
-    an int goes to the even neighbour on a tie, as `rint` does, and the
-    products are exact. Each value is also rounded alone, as an np.float64
-    and as a zero-dimensional array, both of which give an np.float64.
+    The multiples meet ties, which go to the even neighbour, and the small
+    negative ones round to -0.0. Each value is also rounded alone, as an
+    np.float64 and as a zero-dimensional array.
 
     Args:
         round_: Rounds its first argument to the number of decimals given by
             the second.
 
     Returns:
-        Whether the results are float64 and hold the rounded values.
+        The rounded array, and the list of the values rounded alone.
     """
     scale = 10.0 ** PROBE_DECIMALS
     x = (np.arange(SMALL_PROBE_N) - SMALL_PROBE_N // 2) * PROBE_ROUND_STEP / scale
-    expected = [round(v * scale) / scale for v in x.tolist()]
-    result = round_(x, PROBE_DECIMALS)
-    if result.dtype != np.float64 or result.tolist() != expected:
-        return False
     alone = [round_(number, PROBE_DECIMALS) for v in x for number in (v, np.array(v))]
-    return all(type(r) is np.float64 for r in alone) and [float(r) for r in alone[::2]] == expected \
-        and [float(r) for r in alone[1::2]] == expected
+    return round_(x, PROBE_DECIMALS), alone
 
 
 def _round_method(x: np.ndarray, decimals: int) -> np.ndarray:
@@ -396,7 +420,7 @@ def _round_method(x: np.ndarray, decimals: int) -> np.ndarray:
     return x.round(decimals)
 
 
-def _median() -> bool:
+def _median() -> list:
     """Probe the function hook: `np.median(x)` on the halves of 1 to n, short and long.
 
     SMALL_PROBE_N and SMALL_PROBE_N - 1 halves, in descending order, reach
@@ -406,19 +430,17 @@ def _median() -> bool:
     answered from its middle places without it. The even counts are asked
     as `np.median(x, axis=None)`. The even count's median is the mean of its
     two middle elements and the odd count's its middle element, so a loop
-    that took the wrong element, or did not order them, fails. Halves of
-    small whole numbers and their means are exact.
+    that took the wrong element, or did not order them, fails.
 
     Returns:
-        Whether all four medians are np.float64 and right.
+        The four medians.
     """
     answers = []
     for n in (SMALL_PROBE_N, SMALL_PROBE_N - 1, PROBE_N, PROBE_N - 1):
         order = np.arange(n, 0, -1) if n <= SMALL_PROBE_N else np.arange(n) * PROBE_SORT_STEP % n + 1
         x = order * 0.5
-        result = np.median(x, axis=None) if n % 2 == 0 else np.median(x)
-        answers.append(type(result) is np.float64 and float(result) == (n + 1) * 0.25)
-    return all(answers)
+        answers.append(np.median(x, axis=None) if n % 2 == 0 else np.median(x))
+    return answers
 
 
 def _stride_mask() -> np.ndarray:
@@ -426,13 +448,31 @@ def _stride_mask() -> np.ndarray:
     return np.arange(PROBE_N) % PROBE_STRIDE == 0
 
 
-def _compress(dtype: type) -> bool:
-    """Probe the indexing hook: `x[mask]`."""
+def _selection_values(dtype: type) -> np.ndarray:
+    """Return the array the selection and masked-assignment probes work on: 0 to PROBE_N - 1, with -0.0 first.
+
+    The first PROBE_STRIDE elements are set to -0.0, which is a negative zero
+    in a float type and a plain zero in any other. The stride mask selects
+    the first of them and not the others, so a kernel that lost the sign of
+    a zero it moved, or of one it should have left, fails.
+
+    Args:
+        dtype: Element type of the array.
+
+    Returns:
+        A new array of PROBE_N elements.
+    """
     x = np.arange(PROBE_N).astype(dtype)
-    return bool(np.array_equal(x[_stride_mask()], x[::PROBE_STRIDE]))
+    x[:PROBE_STRIDE] = -0.0
+    return x
 
 
-def _compress_function(dtype: type, function: Callable) -> bool:
+def _compress(dtype: type) -> np.ndarray:
+    """Probe the indexing hook: `x[mask]`."""
+    return _selection_values(dtype)[_stride_mask()]
+
+
+def _compress_function(dtype: type, function: Callable) -> np.ndarray:
     """Probe a function hook: `np.compress(mask, x)` or `np.extract(mask, x)`.
 
     Args:
@@ -440,10 +480,9 @@ def _compress_function(dtype: type, function: Callable) -> bool:
         function: `np.compress` or `np.extract`; both take the mask first.
 
     Returns:
-        Whether the function selected every PROBE_STRIDE-th element.
+        What the function returned.
     """
-    x = np.arange(PROBE_N).astype(dtype)
-    return bool(np.array_equal(function(_stride_mask(), x), x[::PROBE_STRIDE]))
+    return function(_stride_mask(), _selection_values(dtype))
 
 
 def _assign(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
@@ -462,7 +501,7 @@ def _copyto(x: np.ndarray, mask: np.ndarray, fill: object) -> None:
 
 
 def _maskfill(assign: Callable[[np.ndarray, np.ndarray, object], None], dtype: type = np.float64,
-              fill: object = PROBE_FILL) -> bool:
+              fill: object = PROBE_FILL) -> np.ndarray:
     """Probe a masked assignment: `x[mask] = value` or one of its function forms.
 
     Args:
@@ -472,13 +511,11 @@ def _maskfill(assign: Callable[[np.ndarray, np.ndarray, object], None], dtype: t
         fill: The value written, of a kind the binding takes for `dtype`.
 
     Returns:
-        Whether exactly the selected elements were set.
+        The array afterwards.
     """
-    x = np.arange(PROBE_N).astype(dtype)
-    expected = x.copy()
-    expected[::PROBE_STRIDE] = fill
+    x = _selection_values(dtype)
     assign(x, _stride_mask(), fill)
-    return bool(np.array_equal(x, expected))
+    return x
 
 
 def _nonzero_method(mask: np.ndarray) -> tuple:
@@ -486,61 +523,55 @@ def _nonzero_method(mask: np.ndarray) -> tuple:
     return mask.nonzero()
 
 
-def _nonzero(function: Callable[[np.ndarray], tuple]) -> bool:
-    """Probe `mask.nonzero()` or `np.where(mask)`.
+def _nonzero(function: Callable[[np.ndarray], tuple]) -> tuple:
+    """Probe `mask.nonzero()` or `np.where(mask)` on the stride mask.
 
     Args:
         function: Takes the mask and returns NumPy's tuple of index arrays.
 
     Returns:
-        Whether the one index array holds every PROBE_STRIDE-th position.
+        What the function returned.
     """
-    (indices,) = function(_stride_mask())
-    return bool(np.array_equal(indices, np.arange(0, PROBE_N, PROBE_STRIDE)))
+    return function(_stride_mask())
 
 
-def _nonzero_2d(function: Callable[[np.ndarray], tuple]) -> bool:
-    """Probe `mask.nonzero()` or `np.where(mask)` on a boolean matrix.
-
-    The mask is the stride mask of PROBE_N elements in PROBE_ROWS rows.
+def _nonzero_2d(function: Callable[[np.ndarray], tuple]) -> tuple:
+    """Probe `mask.nonzero()` or `np.where(mask)` on a boolean matrix: the stride mask in PROBE_ROWS rows.
 
     Args:
         function: Takes the mask and returns NumPy's tuple of index arrays.
 
     Returns:
-        Whether the two index arrays hold the row and the column of every
-        PROBE_STRIDE-th element.
+        What the function returned.
     """
-    mask = _stride_mask().reshape(PROBE_ROWS, -1)
-    rows, cols = function(mask)
-    expected_rows, expected_cols = np.divmod(np.arange(0, PROBE_N, PROBE_STRIDE), mask.shape[1])
-    return bool(np.array_equal(rows, expected_rows) and np.array_equal(cols, expected_cols))
+    return function(_stride_mask().reshape(PROBE_ROWS, -1))
 
 
-def _where() -> bool:
+def _where() -> np.ndarray:
     """Probe the function hook: `np.where(mask, a, b)` on float64, with a mask True at every PROBE_STRIDE-th position.
 
     The two arrays differ at every position, so an element taken from the
-    wrong one fails the probe.
+    wrong one fails the probe. The first element of `a`, which is taken, and
+    the second of `b`, which is taken too, are -0.0.
+
+    Returns:
+        What the call returned.
     """
     a = np.arange(PROBE_N, dtype=np.float64)
     b = -a - 1.0
-    expected = b.copy()
-    expected[::PROBE_STRIDE] = a[::PROBE_STRIDE]
-    result = np.where(_stride_mask(), a, b)
-    return result.dtype == np.float64 and bool(np.array_equal(result, expected))
+    a[0] = -0.0
+    b[1] = -0.0
+    return np.where(_stride_mask(), a, b)
 
 
-def _cumsum(dtype: type) -> bool:
+def _cumsum(dtype: type) -> np.ndarray:
     """Probe the method hook: `x.cumsum()` on ones, whose running sum is exact in every type."""
-    return bool(np.array_equal(np.ones(PROBE_N, dtype).cumsum(), np.arange(1, PROBE_N + 1).astype(dtype)))
+    return np.ones(PROBE_N, dtype).cumsum()
 
 
-def _cumsum_bool() -> bool:
+def _cumsum_bool() -> np.ndarray:
     """Probe the method hook: `mask.cumsum()` on a mask that is True at every PROBE_STRIDE-th position."""
-    mask = _stride_mask()
-    result = mask.cumsum()
-    return result.dtype == np.intp and bool(np.array_equal(result, np.arange(PROBE_N) // PROBE_STRIDE + 1))
+    return _stride_mask().cumsum()
 
 
 def _running_max_probe() -> list[float]:
@@ -553,33 +584,19 @@ def _running_max_probe() -> list[float]:
     return [float(i if i % 2 else -i) for i in range(PROBE_N)]
 
 
-def _running_max(values: list[float]) -> list[float]:
-    """Return the running maximum of `values` in plain Python, a NaN never replacing the value so far.
-
-    Args:
-        values: The elements; the first is not NaN.
-
-    Returns:
-        Element i is the largest of the elements up to i that are not NaN.
-    """
-    return list(accumulate(values, lambda so_far, v: v if v > so_far else so_far))
-
-
-def _cummax(ufunc: np.ufunc) -> bool:
+def _cummax(ufunc: np.ufunc) -> np.ndarray:
     """Probe the ufunc method hook: `ufunc.accumulate(x)` on int64, for np.maximum or np.fmax.
 
     Args:
         ufunc: `np.maximum` or `np.fmax`; on integers both are the running maximum.
 
     Returns:
-        Whether the result is int64 and holds the running maximum.
+        What the call returned.
     """
-    values = _running_max_probe()
-    result = ufunc.accumulate(np.array(values, np.int64))
-    return result.dtype == np.int64 and result.tolist() == [int(v) for v in _running_max(values)]
+    return ufunc.accumulate(np.array(_running_max_probe(), np.int64))
 
 
-def _cumfmax() -> bool:
+def _cumfmax() -> np.ndarray:
     """Probe the ufunc method hook: `np.fmax.accumulate(x)` on float64 with a NaN at every PROBE_STRIDE-th position after the first.
 
     A kernel that let a NaN through, or that NumPy's NaN-propagating
@@ -588,65 +605,39 @@ def _cumfmax() -> bool:
     values = _running_max_probe()
     for i in range(PROBE_STRIDE, PROBE_N, PROBE_STRIDE):
         values[i] = float("nan")
-    result = np.fmax.accumulate(np.array(values, np.float64))
-    return result.dtype == np.float64 and result.tolist() == _running_max(values)
+    return np.fmax.accumulate(np.array(values, np.float64))
 
 
-def _down_columns(values: list[float], operation: Callable[[float, float], float]) -> list[list[float]]:
-    """Return the accumulation of a PROBE_ROWS-row matrix down its columns, in plain Python.
-
-    Args:
-        values: The matrix's elements in C order, PROBE_N of them.
-        operation: The step: element i of a column is operation(element i-1
-            of the result, element i of the column).
-
-    Returns:
-        The result's rows, as lists.
-    """
-    cols = len(values) // PROBE_ROWS
-    rows = [values[i * cols:(i + 1) * cols] for i in range(PROBE_ROWS)]
-    result = [rows[0]]
-    for row in rows[1:]:
-        result.append([operation(a, b) for a, b in zip(result[-1], row)])
-    return result
-
-
-def _rows_probe(call: Callable[[np.ndarray], np.ndarray], values: list[float],
-                operation: Callable[[float, float], float]) -> bool:
+def _rows_probe(call: Callable[[np.ndarray], np.ndarray], values: list[float]) -> np.ndarray:
     """Probe a row loop: an accumulation along the first axis of a PROBE_ROWS-row float64 matrix.
 
     Args:
         call: Makes the NumPy call on the matrix.
-        values: The matrix's elements in C order. None of the results is a NaN.
-        operation: The step of the accumulation, in plain Python.
+        values: The matrix's elements in C order.
 
     Returns:
-        Whether the result is float64, of the matrix's shape, and holds the
-        accumulation down each column.
+        What the call returned.
     """
-    matrix = np.array(values, np.float64).reshape(PROBE_ROWS, -1)
-    result = call(matrix)
-    return result.dtype == np.float64 and result.shape == matrix.shape and result.tolist() == _down_columns(
-        values, operation)
+    return call(np.array(values, np.float64).reshape(PROBE_ROWS, -1))
 
 
-def _rows_cumsum(call: Callable[[np.ndarray], np.ndarray]) -> bool:
+def _rows_cumsum(call: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
     """Probe the row loop of np.add: `call` sums the running-maximum probe values down the columns, exactly."""
-    return _rows_probe(call, _running_max_probe(), lambda a, b: a + b)
+    return _rows_probe(call, _running_max_probe())
 
 
-def _rows_cumprod() -> bool:
+def _rows_cumprod() -> np.ndarray:
     """Probe the row loop of np.multiply: `m.cumprod(axis=0)` on whole numbers 1 to PROBE_FACTOR, exactly."""
     values = [float(1 + i % PROBE_FACTOR) for i in range(PROBE_N)]
-    return _rows_probe(lambda m: m.cumprod(axis=0), values, lambda a, b: a * b)
+    return _rows_probe(lambda m: m.cumprod(axis=0), values)
 
 
-def _rows_cummax() -> bool:
+def _rows_cummax() -> np.ndarray:
     """Probe the row loop of np.maximum: `np.maximum.accumulate(m)` on the running-maximum probe values."""
-    return _rows_probe(np.maximum.accumulate, _running_max_probe(), max)
+    return _rows_probe(np.maximum.accumulate, _running_max_probe())
 
 
-def _rows_cumfmax() -> bool:
+def _rows_cumfmax() -> np.ndarray:
     """Probe the row loop of np.fmax: `np.fmax.accumulate(m)` with a NaN at every PROBE_STRIDE-th element after the first row.
 
     The first row holds numbers, so no result is a NaN; a loop that let a NaN
@@ -656,10 +647,10 @@ def _rows_cumfmax() -> bool:
     cols = PROBE_N // PROBE_ROWS
     for i in range(cols, PROBE_N, PROBE_STRIDE):
         values[i] = float("nan")
-    return _rows_probe(np.fmax.accumulate, values, lambda a, b: a if b != b or b <= a else b)
+    return _rows_probe(np.fmax.accumulate, values)
 
 
-def _fmax_reduceat() -> bool:
+def _fmax_reduceat() -> np.ndarray:
     """Probe the ufunc method hook: `np.fmax.reduceat(x, starts)` on float64, in runs of PROBE_RUN.
 
     The values are those of the running-maximum probes, with a NaN at every
@@ -673,13 +664,10 @@ def _fmax_reduceat() -> bool:
         values[i] = float("nan")
     starts = list(range(0, PROBE_N, PROBE_RUN))
     starts.insert(-1, starts[-1])
-    ends = [*starts[1:], PROBE_N]
-    expected = [max(v for v in values[start:max(end, start + 1)] if v == v) for start, end in zip(starts, ends)]
-    result = np.fmax.reduceat(np.array(values, np.float64), np.array(starts, np.intp))
-    return result.dtype == np.float64 and result.tolist() == expected
+    return np.fmax.reduceat(np.array(values, np.float64), np.array(starts, np.intp))
 
 
-def _any_rows(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
+def _any_rows(reduce: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
     """Probe an any(axis=1) hook on a boolean matrix of PROBE_COLS columns.
 
     Every PROBE_STRIDE-th row holds one True, at a column that moves from row
@@ -690,15 +678,13 @@ def _any_rows(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
         reduce: Takes the matrix and returns NumPy's `m.any(axis=1)` for it.
 
     Returns:
-        Whether the result is a one-dimensional boolean array with True at
-        exactly the rows that hold one.
+        What the call returned.
     """
     rows = PROBE_N // PROBE_COLS
     m = np.zeros((rows, PROBE_COLS), np.bool_)
     marked = np.arange(0, rows, PROBE_STRIDE)
     m[marked, marked % PROBE_COLS] = True
-    result = reduce(m)
-    return result.dtype == np.bool_ and bool(np.array_equal(result, np.arange(rows) % PROBE_STRIDE == 0))
+    return reduce(m)
 
 
 def _any_method(m: np.ndarray) -> np.ndarray:
@@ -711,7 +697,7 @@ def _any_function(m: np.ndarray) -> np.ndarray:
     return np.any(m, axis=1)
 
 
-def _any_cols(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
+def _any_cols(reduce: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
     """Probe an any(axis=0) hook on a boolean matrix of PROBE_COLS columns.
 
     Every PROBE_STRIDE-th column holds one True, at a row that moves from
@@ -724,17 +710,14 @@ def _any_cols(reduce: Callable[[np.ndarray], np.ndarray]) -> bool:
         reduce: Takes the matrix and returns NumPy's `m.any(axis=0)` for it.
 
     Returns:
-        Whether the result is a one-dimensional boolean array of bytes 0 and
-        1 with True at exactly the columns that hold one.
+        What the call returned.
     """
     rows = PROBE_N // PROBE_COLS
     m = np.zeros((rows, PROBE_COLS), np.bool_)
     marked = np.arange(0, PROBE_COLS, PROBE_STRIDE)
     m[(marked * PROBE_STRIDE) % rows, marked] = True
     m.view(np.uint8)[0, 0] = PROBE_TRUE_BYTE
-    result = reduce(m)
-    return (result.dtype == np.bool_ and bool(result.view(np.uint8).max() == 1)
-            and bool(np.array_equal(result, np.arange(PROBE_COLS) % PROBE_STRIDE == 0)))
+    return reduce(m)
 
 
 def _any_cols_method(m: np.ndarray) -> np.ndarray:
@@ -747,60 +730,22 @@ def _any_cols_function(m: np.ndarray) -> np.ndarray:
     return np.any(m, axis=0)
 
 
-def _astype() -> bool:
+def _astype() -> np.ndarray:
     """Probe the method hook: `x.astype(np.float32)` on bytes."""
-    result = np.full(PROBE_N, PROBE_BYTE, np.uint8).astype(np.float32)
-    return result.dtype == np.float32 and bool(np.all(result == PROBE_BYTE))
+    return np.full(PROBE_N, PROBE_BYTE, np.uint8).astype(np.float32)
 
 
-def _sum_method() -> bool:
+def _sum_method() -> np.generic:
     """Probe the method hook: `x.sum()` on bytes."""
-    return int(np.full(PROBE_N, PROBE_BYTE, np.uint8).sum()) == PROBE_N * PROBE_BYTE
+    return np.full(PROBE_N, PROBE_BYTE, np.uint8).sum()
 
 
-def _sum_function() -> bool:
+def _sum_function() -> np.generic:
     """Probe the function hook: `np.sum(x)` on bytes."""
-    return int(np.sum(np.full(PROBE_N, PROBE_BYTE, np.uint8))) == PROBE_N * PROBE_BYTE
+    return np.sum(np.full(PROBE_N, PROBE_BYTE, np.uint8))
 
 
-def _pairwise(values: list) -> np.generic:
-    """Add NumPy scalars in the order of NumPy's pairwise summation, in plain Python.
-
-    The order of `pairwise_sum` in NumPy's `loops_utils.h.src`: fewer than
-    PAIRWISE_LANES values one after another from zero; up to PAIRWISE_LEAF
-    into PAIRWISE_LANES running sums, value i into sum i mod PAIRWISE_LANES,
-    combined in pairs and then the values left over one after another; more
-    split at half the count rounded down to a multiple of PAIRWISE_LANES.
-
-    Args:
-        values: The elements as NumPy scalars of one float type, whose own
-            arithmetic rounds each addition to that type.
-
-    Returns:
-        The sum, a scalar of the same type.
-    """
-    n = len(values)
-    if n < PAIRWISE_LANES:
-        # +0.0 of the values' type: NumPy's sum of negative zeros is +0.0.
-        total = type(values[0])(0) if values else 0
-        for value in values:
-            total = total + value
-        return total
-    if n <= PAIRWISE_LEAF:
-        sums = list(values[:PAIRWISE_LANES])
-        whole = n - n % PAIRWISE_LANES
-        for start in range(PAIRWISE_LANES, whole, PAIRWISE_LANES):
-            sums = [a + b for a, b in zip(sums, values[start:start + PAIRWISE_LANES])]
-        total = ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]))
-        for value in values[whole:]:
-            total = total + value
-        return total
-    half = n // 2
-    half -= half % PAIRWISE_LANES
-    return _pairwise(values[:half]) + _pairwise(values[half:])
-
-
-def _sum_float(dtype: type, call: Callable[[np.ndarray], object]) -> bool:
+def _sum_float(dtype: type, call: Callable[[np.ndarray], object]) -> object:
     """Probe `np.sum(x)` or `x.sum()` on floats whose sum depends on the order of the additions.
 
     Args:
@@ -808,14 +753,10 @@ def _sum_float(dtype: type, call: Callable[[np.ndarray], object]) -> bool:
         call: Makes the call on the array.
 
     Returns:
-        Whether the result is a scalar of `dtype` with the bits of the sum in
-        NumPy's pairwise order, worked out here one addition at a time.
+        What the call returned.
     """
     steps = (np.arange(PROBE_SUM_N) * PROBE_SORT_STEP) % PROBE_SUM_N - PROBE_SUM_N // 2
-    x = (steps / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET).astype(dtype)
-    expected = dtype(0) + _pairwise([dtype(value) for value in x.tolist()])
-    result = call(x)
-    return type(result) is dtype and result.tobytes() == expected.tobytes()
+    return call((steps / PROBE_SUM_DIVISOR + PROBE_SUM_OFFSET).astype(dtype))
 
 
 def _sum_method_of(x: np.ndarray) -> object:
@@ -823,68 +764,55 @@ def _sum_method_of(x: np.ndarray) -> object:
     return x.sum()
 
 
-def _count_nonzero(dtype: type) -> bool:
-    """Probe the function hook: `np.count_nonzero(x)`."""
-    return int(np.count_nonzero(_stride_mask().astype(dtype))) == len(range(0, PROBE_N, PROBE_STRIDE))
+def _count_nonzero(dtype: type) -> object:
+    """Probe the function hook: `np.count_nonzero(x)` on the stride mask as `dtype`."""
+    return np.count_nonzero(_stride_mask().astype(dtype))
 
 
-def _histogram() -> bool:
+def _histogram() -> tuple:
     """Probe the function hook: `np.histogram` on values that fill each bin equally."""
-    x = (np.arange(PROBE_N) % PROBE_BINS) + 0.5
-    counts, edges = np.histogram(x, PROBE_BINS, PROBE_RANGE)
-    return bool(np.all(counts == PROBE_N // PROBE_BINS)) and len(edges) == PROBE_BINS + 1
+    return np.histogram((np.arange(PROBE_N) % PROBE_BINS) + 0.5, PROBE_BINS, PROBE_RANGE)
 
 
-def _bincount() -> bool:
+def _bincount() -> np.ndarray:
     """Probe the function hook: `np.bincount` on equal bytes."""
-    counts = np.bincount(np.full(PROBE_N, PROBE_BYTE, np.uint8))
-    return len(counts) == PROBE_BYTE + 1 and int(counts[PROBE_BYTE]) == PROBE_N
+    return np.bincount(np.full(PROBE_N, PROBE_BYTE, np.uint8))
 
 
-def _bincount_codes(dtype: type) -> bool:
+def _bincount_codes(dtype: type) -> np.ndarray:
     """Probe the function hook: `np.bincount` on int16 or int64 codes that cycle through PROBE_CODES values.
 
     Args:
         dtype: np.int16 or np.int64.
 
     Returns:
-        Whether the result is an intp array of PROBE_CODES counts, each the
-        number of positions below PROBE_N that leave its code modulo
-        PROBE_CODES.
+        What the call returned.
     """
-    counts = np.bincount(np.arange(PROBE_N, dtype=dtype) % PROBE_CODES)
-    expected = [len(range(code, PROBE_N, PROBE_CODES)) for code in range(PROBE_CODES)]
-    return counts.dtype == np.intp and counts.tolist() == expected
+    return np.bincount(np.arange(PROBE_N, dtype=dtype) % PROBE_CODES)
 
 
-def _unique() -> bool:
+def _unique() -> np.ndarray:
     """Probe the function hook: `np.unique` on PROBE_N int64 values with gaps, below zero and above it.
 
     The elements are -3, 0 and 7 repeated, so a kernel that wrote every value
     of the range, or lost the sign, or did not sort, fails.
-
-    Returns:
-        Whether the result is the int64 array [-3, 0, 7].
     """
-    result = np.unique(np.resize(np.array([7, -3, 0], np.int64), PROBE_N))
-    return result.dtype == np.int64 and result.tolist() == [-3, 0, 7]
+    return np.unique(np.resize(np.array([7, -3, 0], np.int64), PROBE_N))
 
 
-def _isin(dtype: type = np.int64) -> bool:
+def _isin(dtype: type = np.int64) -> np.ndarray:
     """Probe the function hook: `np.isin` with two test values.
 
     Args:
         dtype: Element type of the array searched, np.int64 or np.int32.
 
     Returns:
-        Whether exactly the two elements equal to the test values were found.
+        What the call returned.
     """
-    x = np.arange(PROBE_N, dtype=dtype)
-    result = np.isin(x, [PROBE_INDEX, SMALL_PROBE_INDEX])
-    return int(result.sum()) == 2 and bool(result[PROBE_INDEX]) and bool(result[SMALL_PROBE_INDEX])
+    return np.isin(np.arange(PROBE_N, dtype=dtype), [PROBE_INDEX, SMALL_PROBE_INDEX])
 
 
-def _searchsorted() -> bool:
+def _searchsorted() -> list:
     """Probe the method hook: `np.searchsorted` for needles between whole numbers.
 
     The needles are searched as float64 and as float32, which the float64
@@ -892,11 +820,10 @@ def _searchsorted() -> bool:
     """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N) + 0.5
-    expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return all(bool(np.array_equal(np.searchsorted(table, v), expected)) for v in (needles, needles.astype(np.float32)))
+    return [np.searchsorted(table, v) for v in (needles, needles.astype(np.float32))]
 
 
-def _searchsorted_right() -> bool:
+def _searchsorted_right() -> list:
     """Probe the method hook: `np.searchsorted` with `side='right'` for needles that are elements.
 
     Every needle equals one element, so the left side's answer is one less at
@@ -905,12 +832,10 @@ def _searchsorted_right() -> bool:
     """
     table = np.arange(PROBE_TABLE_N, dtype=np.float64)
     needles = (np.arange(PROBE_N) % PROBE_TABLE_N).astype(np.float64)
-    expected = (np.arange(PROBE_N) % PROBE_TABLE_N) + 1
-    return all(bool(np.array_equal(np.searchsorted(table, v, side="right"), expected))
-               for v in (needles, needles.astype(np.float32)))
+    return [np.searchsorted(table, v, side="right") for v in (needles, needles.astype(np.float32))]
 
 
-def _searchsorted_i64(side: str) -> bool:
+def _searchsorted_i64(side: str) -> np.ndarray:
     """Probe the method hook: `np.searchsorted` on int64 for needles that are elements.
 
     Every needle equals one element, so the two sides differ by one at each of
@@ -920,24 +845,17 @@ def _searchsorted_i64(side: str) -> bool:
         side: The `side` argument of the call, 'left' or 'right'.
 
     Returns:
-        Whether the result is an `intp` array holding each needle's own index
-        for 'left', and the index after it for 'right'.
+        What the call returned.
     """
     table = np.arange(PROBE_TABLE_N, dtype=np.int64)
-    needles = np.arange(PROBE_N, dtype=np.int64) % PROBE_TABLE_N
-    expected = needles + 1 if side == "right" else needles
-    result = np.searchsorted(table, needles, side=side)
-    return result.dtype == np.intp and bool(np.array_equal(result, expected))
+    return np.searchsorted(table, np.arange(PROBE_N, dtype=np.int64) % PROBE_TABLE_N, side=side)
 
 
-def _interp() -> bool:
-    """Probe the function hook: `np.interp` through points on the line y = 2x.
-
-    Halves and doubles of small whole numbers are exact, so the answer is too.
-    """
+def _interp() -> np.ndarray:
+    """Probe the function hook: `np.interp` through points on the line y = 2x."""
     points = np.arange(PROBE_TABLE_N, dtype=np.float64)
     queries = (np.arange(PROBE_N) % (PROBE_TABLE_N - 1)) + 0.5
-    return bool(np.array_equal(np.interp(queries, points, 2.0 * points), 2.0 * queries))
+    return np.interp(queries, points, 2.0 * points)
 
 
 def _bottleneck_probe_matrix() -> np.ndarray:
@@ -959,56 +877,41 @@ def _bottleneck_probe_matrix() -> np.ndarray:
     return x
 
 
-def _bottleneck(function: str, hook: str) -> bool:
-    """Probe a bottleneck hook: the function along axis 0, against bottleneck's own answer.
+def _bottleneck(function: str) -> list:
+    """Probe a bottleneck hook: the function along axis 0 of the probe matrix, in two layouts.
 
-    The probe matrix is reduced twice in each of two layouts, C order and a
-    view of rolling windows: with the hook removed, which is bottleneck's own
-    loop, and with it applied. bottleneck is in sys.modules when this runs.
+    The layouts are C order and a view of rolling windows. bottleneck is in
+    sys.modules when this runs. With the hook removed this is bottleneck's
+    own loop, so `install()` compares the kernel with the bottleneck in use.
 
     Args:
         function: "nanmean", "nanstd", "nanmin" or "nanmax"; nanstd is called
             with ddof=1, as empyrical calls it.
-        hook: Name of the hook, which is applied when the probe starts and is
-            applied again when it ends.
 
     Returns:
-        Whether every result with the hook has the same bits as without it.
+        The two results.
     """
-    import importlib
-    import sys
-
-    from .environment import BINDING_MODULE
-
-    binding = importlib.import_module(BINDING_MODULE)
     call = getattr(sys.modules[BOTTLENECK_MODULE], function)
     keywords = {"ddof": 1} if function == "nanstd" else {}
     x = _bottleneck_probe_matrix()
     windows = np.lib.stride_tricks.as_strided(x.ravel(), (x.shape[0], x.size - x.shape[0] + 1), (8, 8))
-    binding.remove(hook)
-    expected = [call(a, axis=0, **keywords) for a in (x, windows)]
-    binding.apply(hook)
-    got = [call(a, axis=0, **keywords) for a in (x, windows)]
-    return all(type(g) is np.ndarray and g.dtype == e.dtype and g.shape == e.shape and g.tobytes() == e.tobytes()
-               for e, g in zip(expected, got))
+    return [call(a, axis=0, **keywords) for a in (x, windows)]
 
 
-def _argsort(dtype: type) -> bool:
+def _argsort(dtype: type) -> np.ndarray:
     """Probe the method hook: `np.argsort(x, kind="stable")` on shuffled values with ties.
 
-    The expected order is worked out by Python's own sort of (value, index)
-    pairs, which is stable by construction and shares no code with NumPy's.
+    The values come in groups of PROBE_SORT_TIES equal elements, which a sort
+    that is not stable would put in another order.
 
     Args:
         dtype: Element type of the probe array.
 
     Returns:
-        Whether the result is the stable order, as `np.intp`.
+        What the call returned.
     """
     values = [(PROBE_SORT_STEP * i % PROBE_N) // PROBE_SORT_TIES for i in range(PROBE_N)]
-    expected = sorted(range(PROBE_N), key=lambda i: (values[i], i))
-    result = np.argsort(np.array(values, dtype), kind="stable")
-    return result.dtype == np.intp and result.tolist() == expected
+    return np.argsort(np.array(values, dtype), kind="stable")
 
 
 # Element count of the ufunc lane's probes: far below every threshold of the lane.
@@ -1033,73 +936,44 @@ def _lane_values(offset: float, step: float, n: int = LANE_PROBE_N) -> list[floa
     return [offset + step * i for i in range(n)]
 
 
-def _lane_add() -> bool:
-    """Probe the ufunc lane: `a + b` on two float64 arrays of one shape.
-
-    The expected values are Python's own float additions, which are the same
-    IEEE operations.
-
-    Returns:
-        Whether the result is a float64 array of the sums.
-    """
-    a, b = _lane_values(0.25, 0.5), _lane_values(-3.0, 0.125)
-    result = np.array(a) + np.array(b)
-    return result.dtype == np.float64 and result.tolist() == [x + y for x, y in zip(a, b)]
+def _lane_add() -> np.ndarray:
+    """Probe the ufunc lane: `a + b` on two float64 arrays of one shape."""
+    return np.array(_lane_values(0.25, 0.5)) + np.array(_lane_values(-3.0, 0.125))
 
 
-def _lane_number_f32() -> bool:
+def _lane_number_f32() -> np.ndarray:
     """Probe the ufunc lane: `f * 2.0` with a Python float, on float32.
 
     The Python float must be converted to float32, as NumPy converts a Python
     number of no fixed type (NEP 50), and the result must stay float32.
-
-    Returns:
-        Whether the result is a float32 array of the doubled values.
     """
-    values = _lane_values(-1.5, 0.25)
-    result = np.array(values, np.float32) * 2.0
-    return result.dtype == np.float32 and result.tolist() == [2.0 * v for v in values]
+    return np.array(_lane_values(-1.5, 0.25), np.float32) * 2.0
 
 
-def _lane_compare() -> bool:
-    """Probe the ufunc lane: `i > 3` on int64, a comparison with a Python int.
-
-    Returns:
-        Whether the result is the boolean array Python's comparisons give.
-    """
-    values = list(range(LANE_PROBE_N))
-    result = np.array(values, np.int64) > LANE_PROBE_THRESHOLD
-    return result.dtype == np.bool_ and result.tolist() == [v > LANE_PROBE_THRESHOLD for v in values]
+def _lane_compare() -> np.ndarray:
+    """Probe the ufunc lane: `i > 3` on int64, a comparison with a Python int."""
+    return np.arange(LANE_PROBE_N, dtype=np.int64) > LANE_PROBE_THRESHOLD
 
 
-def _lane_row() -> bool:
-    """Probe the ufunc lane: `np.subtract(m, row)`, a row taken from every row of a matrix.
-
-    Returns:
-        Whether every row of the result is that row of the matrix minus the row.
-    """
+def _lane_row() -> np.ndarray:
+    """Probe the ufunc lane: `np.subtract(m, row)`, a row taken from every row of a matrix."""
     rows, cols = LANE_PROBE_SHAPE
     matrix = [_lane_values(r, 0.5, cols) for r in range(rows)]
-    row = _lane_values(0.75, -0.25, cols)
-    result = np.subtract(np.array(matrix), np.array(row))
-    return result.shape == LANE_PROBE_SHAPE and result.tolist() == [[x - y for x, y in zip(line, row)]
-                                                                    for line in matrix]
+    return np.subtract(np.array(matrix), np.array(_lane_values(0.75, -0.25, cols)))
 
 
-def _lane_inplace() -> bool:
+def _lane_inplace() -> tuple[bool, np.ndarray]:
     """Probe the ufunc lane with an output: `x += y`, then `np.add(x, y, out=x)`.
 
     Returns:
-        Whether `x` holds `x + 2 * y` afterwards and the second call returned `x` itself.
+        Whether the second call returned `x` itself, and `x` afterwards.
     """
-    a, b = _lane_values(1.0, 0.5), _lane_values(0.0, 0.25)
-    x, y = np.array(a), np.array(b)
+    x, y = np.array(_lane_values(1.0, 0.5)), np.array(_lane_values(0.0, 0.25))
     x += y
-    returned = np.add(x, y, out=x)
-    return returned is x and x.tolist() == [p + q + q for p, q in zip(a, b)]
+    return np.add(x, y, out=x) is x, x
 
 
-def _lane_flags() -> bool:
+def _lane_flags() -> tuple[bool, np.ndarray, np.ndarray]:
     """Probe the ufunc lane's floating-point errors: `a / 0.0` under `np.errstate(divide="raise")`.
 
     The lane must hand the divide-by-zero flag to NumPy's handler, which
@@ -1107,18 +981,19 @@ def _lane_flags() -> bool:
     plain call moves the lane's counter.
 
     Returns:
-        Whether the division raised FloatingPointError, then gave infinities.
+        Whether the division raised FloatingPointError, its result with the
+        flag ignored, and the result of the plain call.
     """
     a = np.array(_lane_values(1.0, 1.0))
+    raised = False
     try:
         with np.errstate(divide="raise"):
             a / 0.0
-        return False
     except FloatingPointError:
-        pass
+        raised = True
     with np.errstate(divide="ignore"):
         result = a / 0.0
-    return result.tolist() == [float("inf")] * LANE_PROBE_N and (a + a).tolist() == [v + v for v in a.tolist()]
+    return raised, result, a + a
 
 
 # Every hook, in the order install() applies them: the deepest first.
@@ -1130,9 +1005,9 @@ HOOKS: tuple[Hook, ...] = (
     Hook("loop.clip.f32", INNER_LOOP, (Probe("clip_f32", partial(_clip, np.float32)),)),
     Hook("loop.clip.f64", INNER_LOOP, (Probe("clip_f64", partial(_clip, np.float64)),)),
     *((
-        Hook("loop.add.f64", INNER_LOOP, (Probe("add_inplace_f64", partial(_inplace, operator.add, operator.iadd)),)),
+        Hook("loop.add.f64", INNER_LOOP, (Probe("add_inplace_f64", partial(_inplace, operator.iadd)),)),
         Hook("loop.subtract.f64", INNER_LOOP,
-             (Probe("subtract_inplace_f64", partial(_inplace, operator.sub, operator.isub)),)),
+             (Probe("subtract_inplace_f64", partial(_inplace, operator.isub)),)),
     ) if ON_ARM64 else ()),
     Hook("function.argmax", FUNCTION, (
         Probe("argmax_f32", partial(_argext_function, np.float32, np.argmax, 1.0)),
@@ -1284,7 +1159,7 @@ HOOKS: tuple[Hook, ...] = (
     )),
     # bottleneck's functions, applied only when bottleneck is imported.
     *(Hook(f"bottleneck.{function}", BOTTLENECK,
-           (Probe(f"{function}_cols_f64", partial(_bottleneck, function, f"bottleneck.{function}")),),
+           (Probe(f"{function}_cols_f64", partial(_bottleneck, function)),),
            module=BOTTLENECK_MODULE)
       for function in ("nanmean", "nanstd", "nanmin", "nanmax")),
     # The ufunc lane, last: the inner-loop hooks above can change which loop
