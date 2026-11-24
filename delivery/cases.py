@@ -6413,8 +6413,11 @@ LANE_BUFFER_ELEMENTS = 8192
 LANE_THREADS_ELEMENTS = 500
 # Element types the lane takes, as spec names.
 LANE_DTYPES = ("f64", "f32", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "bool")
-# Element types it leaves to NumPy, as NumPy type names.
-LANE_OTHER_DTYPES = ("float16", "complex128", "longdouble")
+# Element types it leaves to NumPy, as NumPy type names. Not long double: on
+# x86-64 it is 10 bytes of an 80-bit number in 16 of storage, and the 6 bytes
+# of padding NumPy leaves as they were differ from one run to the next, so its
+# results cannot be compared bytewise.
+LANE_OTHER_DTYPES = ("float16", "complex64", "complex128")
 # Sizes of the sweep over values: below and on both sides of NumPy's
 # threshold for releasing the lock.
 LANE_VALUE_SIZES = (1, 3, 16, LANE_THREADS_ELEMENTS, LANE_THREADS_ELEMENTS + 1)
