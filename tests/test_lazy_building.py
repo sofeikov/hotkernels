@@ -554,6 +554,7 @@ def test_a_plain_assignment_does_not_ask_numpy(monkeypatch):
     """`x[i] = v` with whole numbers and slices is deferred without a question; anything else is asked about, and errors are NumPy's."""
     counted = Counted(array._assignment_fits)
     monkeypatch.setattr(array, "_assignment_fits", counted)
+    array._assignable.clear()
     data = numpy.random.default_rng(SEED).standard_normal((4,))
     x, plain = lazy.zeros((6, 4)), numpy.zeros((6, 4))
     for turn in range(6):
@@ -678,6 +679,21 @@ def test_the_core_stands_in_for_the_python_and_can_be_put_away(lazy_core):
     finally:
         array.use_core(core)
     assert array.core_in_use() and (x * 2).gather().tobytes() == (data * 2).tobytes()
+
+
+def test_a_selection_is_strict_if_its_index_or_its_array_is():
+    """`x[mask]` refuses its values when the mask or the array is strict, and a view method keeps its arguments as Python puts them: the second time as the first."""
+    data = numpy.arange(12.0).reshape(3, 4)
+    plain_x, strict_x = lazy.asarray(data) + 0, strict.asarray(data) + 0
+    row = lazy.arange(4.0) + 0
+    for _ in range(3):
+        by_strict_mask, of_strict_array, neither = plain_x[strict_x[:, 0] > 3], strict_x[plain_x[:, 0] > 3], plain_x[plain_x[:, 0] > 3]
+        assert by_strict_mask._node.pending and by_strict_mask._node.strict and of_strict_array._node.strict and not neither._node.strict
+        # One whole number is one axis, not a tuple of axes; several are a tuple; a tuple is itself.
+        assert row.transpose(0)._node.args[1:] == ((0,),) and row.reshape(4)._node.args[1:] == (4,)
+        assert plain_x.transpose(1, 0)._node.args[1:] == plain_x.transpose((1, 0))._node.args[1:] == ((1, 0),)
+        assert plain_x.reshape(4, 3)._node.args[1:] == plain_x.reshape((4, 3))._node.args[1:] == ((4, 3),)
+    assert neither.gather().tobytes() == data[data[:, 0] > 3].tobytes()
 
 
 class Heard:
@@ -932,6 +948,7 @@ def forget_everything() -> None:
     rules._plans.clear()
     rules._admissible_specs.clear()
     array._fitting.clear()
+    array._assignable.clear()
     graph._origins.clear()
 
 
@@ -965,6 +982,7 @@ def test_random_programs_are_written_alike_with_and_without_the_memories(monkeyp
             off.setattr(rules, "_key", lambda operation, args, kwargs, marks: None)
             off.setattr(rules, "basic_shape", lambda shape, index: None)
             off.setattr(array, "_fit_key", lambda written_by, target, operands: None)
+            off.setattr(array, "_assignment_key", lambda target, parts, value: None)
             off.setattr(graph, "_remembered", lambda frame: None)
             off.setattr(graph, "_error_settings", graph._NoRecord)
             try:

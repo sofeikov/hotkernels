@@ -71,6 +71,10 @@ FIT_MEMORY_LIMIT = 4096
 _fitting: set[tuple] = set()
 # The keys hold numbers of shapes, which mean nothing once that memory is emptied.
 graph.spec_memory_emptied.append(_fitting.clear)
+# The assignments through an index of pending arrays that `_assignment_fits` found to fit, by what
+# `_assignment_key` writes down of each. Only those, as for `_fitting`, and within the same bound.
+_assignable: set[tuple] = set()
+graph.spec_memory_emptied.append(_assignable.clear)
 
 
 @dataclass(eq=False, slots=True)
@@ -1077,6 +1081,49 @@ def _assignment_fits(target: "LazyArray", parts: tuple, value: Any) -> bool:
     return True
 
 
+def _assignment_key(target: "LazyArray", parts: tuple, value: Any) -> tuple | None:
+    """Write down everything that decides whether `x[index] = value` fits, for an index that holds pending arrays, or decline.
+
+    `_assignment_fits` asks NumPy, on stand-ins without memory. Its answer
+    depends on the shape assigned into, on the index as `rules._key` writes
+    an index down (each pending array by its shape and element type, each
+    other item by its value, a length that is not known by a placeholder),
+    and on the value's shape, in which a length that is not known gets the
+    placeholder of the mask it came from, or one of its own. Not on any
+    array's values: every array in such an index is stood in for.
+
+    Args:
+        target: The array assigned into.
+        parts: What `_index_parts` returned for the index.
+        value: What is assigned.
+
+    Returns:
+        A tuple that two assignments share only if `_assignment_fits`
+        answers them alike. None when the array is a view by a step that is
+        not plain, when its shape or the value's is not one the layer knows,
+        or when the index holds what `rules._key` does not write down: a
+        list or an `ndarray`, whose values NumPy checks against the bounds.
+    """
+    fill, pending, _ = parts
+    whole = target._cell.node
+    if not (whole.spec or graph.spec(whole)):
+        return None
+    held = None
+    for step in target._steps:
+        if not step.plain:
+            return None
+        held = step.shape
+    shape = _shape_of(value)
+    if shape is None:
+        return None
+    marks: dict[int, int] = {}
+    index = rules._key(operator.getitem, (whole, fill(tuple(lazy._node for lazy in pending))), {}, marks)
+    if index is None:
+        return None
+    written = tuple(length if length < graph.UNKNOWN_FLOOR else marks.setdefault(length, -len(marks) - 1) for length in shape)
+    return (held, written, index)
+
+
 def _select(target: "LazyArray", parts: tuple, frame: FrameType | None = None) -> "LazyArray | None":
     """Defer `x[index]` for an index that holds lazy arrays still pending.
 
@@ -1696,7 +1743,12 @@ class LazyArray:
                 _defer_write(self, "setitem", _Assign(index), (value,), sys._getframe(1))
                 return
             parts = _index_parts(index)
-            if parts is not None and _assignment_fits(self, parts, value):
+            key = None if parts is None else _assignment_key(self, parts, value)
+            if parts is not None and ((key is not None and key in _assignable) or _assignment_fits(self, parts, value)):
+                if key is not None:
+                    if len(_assignable) >= FIT_MEMORY_LIMIT:
+                        _assignable.clear()
+                    _assignable.add(key)
                 fill = parts[0]
 
                 def assign(view: np.ndarray, assigned: Any, *found: Any) -> None:
