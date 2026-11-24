@@ -1,4 +1,9 @@
-"""Indices of the True elements of a boolean array: `np.nonzero(mask)[0]`."""
+"""Indices of the True elements of a boolean array: `np.nonzero(mask)[0]`.
+
+Every mask byte is 0 or 1. NumPy takes any non-zero byte of a boolean array
+as True; a caller that may hold other bytes checks for them before the call,
+and the binding sends such a mask to NumPy.
+"""
 import numpy as np
 
 from judge.spec import USED_RETURN, In, Kernel, Out, Size

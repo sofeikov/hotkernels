@@ -1,5 +1,10 @@
 """Running sum: `np.cumsum(x)` for float32 data, within a declared tolerance.
 
+`out` does not overlap `x`, not even as `x` itself: the ARM64 kernels redo a
+chunk that fails their fast path from `x` after storing it, and in place give
+wrong sums after an infinity or a NaN (issue 7). The binding takes the kernel
+only for a call without `out`, which writes into a new array.
+
 A fast running sum adds the elements in a different order from NumPy, which
 rounds differently, so the output is compared with a tolerance. NaN and
 infinity must still appear exactly where NumPy has them.

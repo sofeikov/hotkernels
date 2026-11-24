@@ -1,5 +1,10 @@
 """Clamp to a range: `np.clip(x, LO, HI)` for float64 data.
 
+`out` does not overlap `x`, not even as `x` itself: in place the ARM64
+kernels redo part of the array from `x` after storing to `out` and give a
+wrong zero or NaN (issue 7). The binding clips in place through a buffer of
+its own.
+
 The kernel is defined for `lo <= hi` with neither bound NaN. Outside that
 NumPy returns `hi` for every non-NaN element (reversed bounds) or NaN (a NaN
 bound) and `naive.c` does not, so whatever calls the kernel must send such
