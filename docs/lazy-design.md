@@ -587,7 +587,7 @@ The tables above are a program's later turns. The first time a line runs it asks
 
 | Program, built once in a fresh process | Operations | Different calls | Asking each time | Now | NumPy computing it for the first time |
 |---|---|---|---|---|---|
-| The regression, 1 gradient step | 23 | 18 | 0.59 ms | 0.36 ms | 0.08 ms |
+| The regression, 1 gradient step | 23 | 19 | 0.59 ms | 0.36 ms | 0.08 ms |
 | The regression, 50 gradient steps | 954 | 21 | 16.8 ms | 1.34 ms | 0.46 ms |
 | The transformer block | 55 | 45 | 1.29 ms | 0.73 ms | 0.27 ms |
 
@@ -712,7 +712,7 @@ What is left of a node's 1.5 µs is the interpreter's own work, in these shares 
 
 ### The C core
 
-`prototypes/lazy/_core.c` is the hot path in C: about 2,500 lines that write one node of the graph when every answer it needs is remembered. It takes `a * b` from 1.5 µs to 0.41 µs.
+`prototypes/lazy/_core.c` is the hot path in C: about 2,400 lines that write one node of the graph when every answer it needs is remembered. It takes `a * b` from 1.5 µs to 0.41 µs.
 
 - **It is the quick road of functions that exist in Python, and nothing else.** `graph.deferred`, `array._try_defer`, `array._plain_item`, `array._select` for an index that holds pending arrays, the in-place operators, `x[i] = v` through a plain index and through one that holds pending arrays, a write through `out=`, the view methods, and the stand-in's `np.name` and `np.name(...)` each have a road in the core for the calls where everything the Python function would look up is already in the memories of the section above. The Python functions are the definition. A node the core makes is, field for field, the node they would have made.
 - **It reads the memories and never writes them, and holds one rule.** The rule is broadcasting, for an element-by-element call whose operand types were met before: the shapes lined up at their last axis, the lengths along each axis equal apart from those that are 1. Everything else about a shape or a type is Python's and NumPy's. Where a new shape needs a number, or an answer is to be kept, the core asks Python to do it. The core builds the key Python builds and looks it up. Where it finds nothing, or meets anything it is not sure of (an argument it does not know how to write down, a subclass, a collection that may hold a lazy array, a pending set at its limit, an array that has its values and is read by one element), it returns a marker and the Python function takes the call unchanged: works the answer out, raises NumPy's error, makes the call at once, and fills the memory, so that the next such call is one the core can take. A mistake in a key the core writes therefore costs time and not correctness, unless it makes two calls look alike that are not; the tests of [What writing a node costs](#what-writing-a-node-costs) are aimed at that.
