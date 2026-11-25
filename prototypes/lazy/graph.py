@@ -110,9 +110,12 @@ class NotGathered(TypeError):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Origin:
-    """The line of the user's code that wrote an operation."""
+    """The line of the user's code that wrote an operation.
+
+    With slots, so that the C core can make one for a line it has not met.
+    """
 
     # File of the user's code.
     filename: str

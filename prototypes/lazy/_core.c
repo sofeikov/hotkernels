@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 13
+#define CORE_VERSION 14
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -82,6 +82,13 @@ static PyObject *assignable;         /* `array._assignable` */
 static PyObject *types;              /* `rules._types` */
 static PyObject *python_keep;        /* `rules.keep` */
 static PyObject *python_spec_of;     /* `graph.spec_of` */
+static PyTypeObject *Origin;         /* `graph.Origin` */
+static Py_ssize_t origin_at[4];      /* Its fields: filename, lineno, module, registry. */
+static PyObject *internal_files;     /* `graph._internal_files` */
+/* The call the rules were last asked about here and said "not deferred" to: its operation, its arguments and its
+ * keywords. The Python method that then takes the call asks `try_defer` first, and is told so at once instead of
+ * the rules being asked again. Forgotten at the next call into this file, whatever it is. */
+static PyObject *declined_operation, *declined_args, *declined_kwargs;
 static PyObject *elementwise_kind;   /* `rules.ELEMENTWISE` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
@@ -115,7 +122,7 @@ static PyObject *Miss;
 static PyObject *zero, *one, *empty_tuple;
 static PyObject *s_node, *s_made, *s_deferred, *s_observer, *s_limit, *s_settings, *s_last, *s_registry, *s_name,
     *s_unknown, *s_shape, *s_dtype, *s_doubt, *s_call, *s_getitem, *s_basic_shape, *s_out, *s_dunder_name, *s_kind, *s_b,
-    *s_setitem;
+    *s_setitem, *s_plan, *s_origin_limit;
 
 /* ---- Making the layer's objects. ---- */
 
@@ -199,6 +206,61 @@ node_of(PyObject *lazy)
 
 /* ---- What `graph.deferred` looks up. ---- */
 
+/* The line a frame is at, for a frame that is not remembered: what `graph.caller(frame)` does then. A frame of a
+ * file known to be the user's gets its `Origin` made and remembered here, by the steps of that function; a frame of
+ * the layer's or NumPy's, or of a file not looked at yet, is handed to it, which walks the stack. */
+static PyObject *
+new_origin(PyFrameObject *frame)
+{
+    PyCodeObject *code = PyFrame_GetCode(frame);
+    PyObject *names = NULL, *line = NULL, *identity = NULL, *offset = NULL, *key = NULL, *origin = NULL, *kept = NULL;
+    PyObject *internal = PyDict_GetItemWithError(internal_files, code->co_filename);
+    if (internal != Py_False) {
+        Py_DECREF(code);
+        return PyErr_Occurred() ? NULL : PyObject_CallOneArg(python_caller, (PyObject *)frame);
+    }
+    names = PyFrame_GetGlobals(frame);
+    PyObject *module = PyDict_GetItemWithError(names, s_name);
+    if (module == NULL) {
+        module = s_unknown;
+    }
+    PyObject *registry = PyDict_GetItemWithError(names, s_registry);
+    if (registry == NULL && !PyErr_Occurred()) {
+        /* `names.setdefault("__warningregistry__", {})`. */
+        PyObject *fresh = PyDict_New();
+        registry = fresh ? PyDict_SetDefault(names, s_registry, fresh) : NULL;
+        Py_XDECREF(fresh);
+    }
+    line = registry ? PyLong_FromLong(PyFrame_GetLineNumber(frame)) : NULL;
+    identity = line ? PyLong_FromVoidPtr(code) : NULL;
+    offset = identity ? PyLong_FromLong(PyFrame_GetLasti(frame)) : NULL;
+    key = offset ? PyTuple_Pack(2, identity, offset) : NULL;
+    origin = key ? Origin->tp_alloc(Origin, 0) : NULL;
+    if (origin != NULL) {
+        SLOT(origin, origin_at[0]) = Py_NewRef(code->co_filename);
+        SLOT(origin, origin_at[1]) = Py_NewRef(line);
+        SLOT(origin, origin_at[2]) = Py_NewRef(module);
+        SLOT(origin, origin_at[3]) = Py_NewRef(registry);
+        kept = PyTuple_Pack(4, (PyObject *)code, origin, registry, module);
+        PyObject *limit = PyDict_GetItemWithError(graph_names, s_origin_limit);
+        Py_ssize_t most = limit ? PyLong_AsSsize_t(limit) : 0;
+        if (PyDict_GET_SIZE(origins) >= most) {
+            PyDict_Clear(origins);
+        }
+        if (kept == NULL || PyErr_Occurred() || PyDict_SetItem(origins, key, kept) < 0) {
+            Py_CLEAR(origin);
+        }
+    }
+    Py_DECREF(code);
+    Py_XDECREF(names);
+    Py_XDECREF(line);
+    Py_XDECREF(identity);
+    Py_XDECREF(offset);
+    Py_XDECREF(key);
+    Py_XDECREF(kept);
+    return origin;
+}
+
 /* The line of the user's code a frame is at: `graph.caller(frame)`. Found in the memory when the frame is one of
  * the user's and its module still has the name and the record of warnings it had, as `graph._remembered` checks;
  * otherwise the Python function is asked, which walks the stack and remembers. Returns a new reference. */
@@ -236,7 +298,7 @@ origin_of(PyFrameObject *frame)
             return Py_NewRef(PyTuple_GET_ITEM(found, 1));
         }
     }
-    return PyObject_CallOneArg(python_caller, (PyObject *)frame);
+    return new_origin(frame);
 }
 
 /* The `np.errstate` in effect: `graph.errstate()`. The remembered dictionary when NumPy's record of the settings
@@ -976,7 +1038,23 @@ try_defer(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs,
         goto fail;
     }
     if (signature == Miss) {
-        goto done;
+        /* The first call of its kind: the rules are asked, in Python, where they are. `rules.plan` works the answer
+         * out and keeps it, raises NumPy's error, or says None for a call that is made at once. The node is then
+         * made here all the same, without the rest of Python's road. */
+        PyObject *plan = PyDict_GetItemWithError(rules_names, s_plan);
+        signature = plan ? PyObject_CallFunctionObjArgs(plan, ruled_as ? ruled_as : operation, unwrapped, kwargs, NULL) : NULL;
+        if (signature == NULL) {
+            goto fail;
+        }
+        if (signature == Py_None || !PyTuple_Check(signature) || PyTuple_GET_SIZE(signature) != 4) {
+            if (signature == Py_None) {
+                Py_XSETREF(declined_operation, Py_NewRef(operation));
+                Py_XSETREF(declined_args, Py_NewRef(args));
+                Py_XSETREF(declined_kwargs, Py_NewRef(kwargs));
+            }
+            Py_DECREF(signature);
+            goto done;
+        }
     }
     int full = at_the_limit();
     if (full != 0) {
@@ -1835,6 +1913,15 @@ typedef struct {
     int reflected;       /* For a binary operator: whether the lazy array is on the right. */
 } Road;
 
+/* Forget the call the rules last declined. */
+static void
+forget_declined(void)
+{
+    Py_CLEAR(declined_operation);
+    Py_CLEAR(declined_args);
+    Py_CLEAR(declined_kwargs);
+}
+
 /* Take one call of the method a road stands for. `args[0]` is the lazy array. */
 static PyObject *
 road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames)
@@ -1845,6 +1932,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
     PyObject *result = Miss, *operands = NULL, *kwargs = NULL, *name = NULL;
     /* The frame that made this call: C has none of its own, so it is the one the method's caller is in. */
     PyFrameObject *frame = PyEval_GetFrame();
+    forget_declined();
     if (!enabled || frame == NULL || count < 1) {
         goto python;
     }
@@ -2205,7 +2293,33 @@ module_try_defer(PyObject *module, PyObject *const *args, Py_ssize_t count)
     if (frame == NULL && PyErr_Occurred()) {
         return NULL;
     }
+    if (declined_operation != NULL) {
+        /* Was this very call, with these very objects, just asked about, and declined by the rules? */
+        int same = declined_operation == args[0] && PyTuple_GET_SIZE(declined_args) == PyTuple_GET_SIZE(args[2])
+                   && PyDict_GET_SIZE(declined_kwargs) == PyDict_GET_SIZE(args[3]);
+        for (Py_ssize_t place = 0; same && place < PyTuple_GET_SIZE(args[2]); place++) {
+            same = PyTuple_GET_ITEM(declined_args, place) == PyTuple_GET_ITEM(args[2], place);
+        }
+        Py_ssize_t position = 0;
+        PyObject *name, *value;
+        while (same && PyDict_Next(args[3], &position, &name, &value)) {
+            same = PyDict_GetItemWithError(declined_kwargs, name) == value;
+        }
+        forget_declined();
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        if (same) {
+            Py_RETURN_NONE;
+        }
+    }
     PyObject *result = try_defer(args[0], args[1], args[2], args[3], args[4] == Py_None ? NULL : args[4], frame);
+    if (result == Miss && declined_operation != NULL) {
+        /* The rules were asked just now, for this call, and declined it. They are not to be asked again: working an
+         * answer out can itself compute something, as comparing a slice that holds a lazy array does. */
+        forget_declined();
+        Py_RETURN_NONE;
+    }
     return result == Miss ? Py_NewRef(Miss) : result;
 }
 
@@ -2350,6 +2464,16 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Into = (PyTypeObject *)Py_NewRef(into);
+    PyObject *origin = PyDict_GetItemString(given, "Origin");
+    static const char *const ORIGIN_FIELDS[4] = {"filename", "lineno", "module", "registry"};
+    if (origin == NULL || !PyType_Check(origin) || offsets((PyTypeObject *)origin, ORIGIN_FIELDS, 4, origin_at)
+        || take(given, "internal_files", &PyDict_Type, &internal_files)) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_KeyError, "setup() was not given the class 'Origin'");
+        }
+        return NULL;
+    }
+    Origin = (PyTypeObject *)Py_NewRef(origin);
     if (take(given, "types", &PyDict_Type, &types) || take(given, "keep", NULL, &python_keep) || take(given, "spec_of", NULL, &python_spec_of)
         || take(given, "elementwise", &PyUnicode_Type, &elementwise_kind)) {
         return NULL;
@@ -2418,9 +2542,11 @@ PyInit__core(void)
     s_kind = PyUnicode_InternFromString("kind");
     s_b = PyUnicode_InternFromString("b");
     s_setitem = PyUnicode_InternFromString("setitem");
+    s_plan = PyUnicode_InternFromString("plan");
+    s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
-        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem) {
+        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit) {
         Py_DECREF(module);
         return NULL;
     }
