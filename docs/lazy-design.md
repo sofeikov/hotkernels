@@ -429,7 +429,7 @@ Other systems that build a graph put assignment in it: TensorFlow's graphs had a
 
 At once means what a write meant before: everything pending is computed in the order written, and NumPy writes into the memory. It is always right and it cuts the graph, and it is logged as `write`.
 
-**What it costs.** A deferred write is computed as a copy of what the array held, with the write made into the copy. NumPy's write in place makes no copy. The results are the same; the work is not, until whatever computes a graph sees that nothing else reads the old contents and writes into them. That is left for when computing a graph differently is taken up, with every other question of speed.
+**What it costs.** A deferred write is computed as a copy of what the array held, with the write made into the copy. NumPy's write in place makes no copy. The results are the same; the work is not, until whatever computes a graph sees that nothing else reads the old contents and writes into them. With fusion switched on, a write into the whole of a float64 array is one call with no copy, and an expression assigned to part of one is computed straight into the part of the copy ([lazy-fusion-design.md](lazy-fusion-design.md#writes)); writing into the old contents themselves is still not done, and is what a program that updates its arrays in place loses most by.
 
 ### What differs from NumPy
 
@@ -662,7 +662,7 @@ A subpackage of Python with one optional C source, `hotkernels/src/hotkernels/la
 | `report.py`, `templates/report.txt.j2` | What was computed without being asked, ranked | [report.py](../prototypes/lazy/report.py) |
 | `view.py`, `templates/graph.html.j2`, `graph.js`, `graph.css` | The program's code and its graphs as a page | [view.py](../prototypes/lazy/view.py), [templates/](../prototypes/lazy/templates) |
 
-`graph` knows nothing of the others; `rules` and `evaluate` work on nodes and never see a `LazyArray`; `array` is the only module the user's calls enter. `record` hears of nodes and computations through one hook that `graph` offers, and `view` sees only what `record` wrote down. Whatever computes a graph differently later replaces one function of `evaluate`.
+`graph` knows nothing of the others; `rules` and `evaluate` work on nodes and never see a `LazyArray`; `array` is the only module the user's calls enter. `record` hears of nodes and computations through one hook that `graph` offers, and `view` sees only what `record` wrote down. Whatever computes a graph differently is asked by `evaluate` before each computation which nodes it takes together ([Computing](#computing)); the prototype's `fuse.py` is one such, and nothing imports it until it is switched on.
 
 The prototype stays outside the package on purpose. Inside `hotkernels/` it would be shipped to users and would read as the implementation; in `prototypes/` it is a study object that the implementation is free to depart from.
 
@@ -745,6 +745,7 @@ What is left of a node's 1.5 µs is the interpreter's own work, in these shares 
 - **Warnings are recorded and issued again.** Left alone, NumPy's warning would name a line inside the layer. Each node's call runs inside `warnings.catch_warnings(record=True)`, and what NumPy issued is issued again with NumPy's own message and category, at the file and line the node was written at, through that module's record of warnings shown, so Python shows it once per line as it would for the eager program. Recording changes the process's warning filters for the length of the call, which is safe only because every evaluation holds the layer's lock.
 - An exception gets a note naming that line (`add_note`), is kept on the node, and is raised.
 - The first build therefore makes exactly the calls the eager program makes, spelled the same way, on the same operands. Whatever computes a graph differently later is held to the same results by the check below.
+- **One place lets a computation be done differently.** `evaluate.planner` is empty unless something sets it. When set, it is called before each computation with the nodes about to be computed and answers with groups of them that it will compute together, each group under the node whose value it gives. A group that cannot be computed that way says so, and its nodes are then computed by their own calls, in order, with their own lines and error settings: a planner can make a computation faster and cannot change what it gives or reports. The nodes inside a group have no value of their own; a write made at once, after which nothing may be pending, computes any of them something still holds. `evaluate.meter` and `evaluate.CLOCK` are for the tools that measure: the time of each call, and the time and size of each computation. [lazy-fusion-design.md](lazy-fusion-design.md) is the design of the one planner there is.
 
 ### Pending work and writes
 
@@ -836,7 +837,7 @@ The prototype's tests are the first and fourth parts of this in small.
 
 ## What the graph is for
 
-Not part of this build, and no gain is claimed. It is here so that the first build is shaped for what comes after.
+Not part of this build, and no gain is claimed here. It is here so that the first build is shaped for what comes after. The third way of the second point below, one kernel for a whole expression, has a design and a first build of its own, with what it gains measured on twelve programs: [lazy-fusion-design.md](lazy-fusion-design.md).
 
 - **A fusible group can be read off the graph:** connected element-by-element nodes of one output shape, optionally ending in a reduction. In the regression above, `(X @ w - y) ** 2` then `mean` is one group after the product; in the transformer block the eight operations of GELU are one. The page of the [debugging tools](#debugging-tools) is where such groups would first be shown, as boxes.
 - **A group can be computed three ways,** and the graph does not care which: node by node with NumPy, as now; with NumPy's own loops a cache-sized block at a time, which removes passes over memory and keeps NumPy's bits; or with one kernel for the whole expression.
