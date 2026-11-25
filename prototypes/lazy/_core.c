@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 14
+#define CORE_VERSION 15
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -90,6 +90,12 @@ static PyObject *internal_files;     /* `graph._internal_files` */
  * the rules being asked again. Forgotten at the next call into this file, whatever it is. */
 static PyObject *declined_operation, *declined_args, *declined_kwargs;
 static PyObject *elementwise_kind;   /* `rules.ELEMENTWISE` */
+static PyObject *matrix_kind;        /* `rules.MATRIX_PRODUCT` */
+static PyObject *matmul;             /* `np.matmul` */
+static PyObject *numpy_dtype;        /* `np.dtype` */
+/* The identities of the `dtype` objects found to be NumPy's own for their type: `np.dtype(d.type) is d`. Such an
+ * object lives as long as NumPy does, so what is noted of it stays true. */
+static PyObject *own_dtypes;
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
 static PyObject *write_kind;         /* `rules.WRITE` */
@@ -122,7 +128,7 @@ static PyObject *Miss;
 static PyObject *zero, *one, *empty_tuple;
 static PyObject *s_node, *s_made, *s_deferred, *s_observer, *s_limit, *s_settings, *s_last, *s_registry, *s_name,
     *s_unknown, *s_shape, *s_dtype, *s_doubt, *s_call, *s_getitem, *s_basic_shape, *s_out, *s_dunder_name, *s_kind, *s_b,
-    *s_setitem, *s_plan, *s_origin_limit;
+    *s_setitem, *s_plan, *s_origin_limit, *s_resolve;
 
 /* ---- Making the layer's objects. ---- */
 
@@ -764,18 +770,94 @@ key_of(PyObject *rule, PyObject *unwrapped, PyObject *kwargs, Marks *marks)
     return key;
 }
 
-/* The answer for an element-by-element ufunc call whose operands' types were met before and whose shapes were
- * not: the element type is the one NumPy's resolver gave for those types (`rules._types`), and the shape is the
- * operands' shapes broadcast, which is the one rule of a shape this file holds; a test holds it to NumPy's. `key` is
- * the call's plain key, under which Python then keeps the answer. A new reference; `Miss` wherever the types are
- * not remembered or `rules._plan` would say anything but "deferred": an operand of length zero, shapes that do not
- * broadcast, which NumPy has words for. */
+/* NumPy's broadcasting, for `count` shapes given as their items and their numbers of dimensions: the shapes are
+ * lined up at their last axis; along each axis the lengths are one number, apart from those that are 1. A new
+ * tuple; `Miss` for a length of zero, which is nothing to compute on, and for shapes that do not broadcast, which
+ * NumPy has an error for. */
 static PyObject *
-first_elementwise(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
+broadcast(PyObject **const *items, const Py_ssize_t *sizes, Py_ssize_t count)
 {
-    Py_ssize_t count = PyTuple_GET_SIZE(unwrapped), dimensions = 0;
-    PyObject *shapes[8] = {NULL};
-    PyObject *result = Miss, *shape = NULL;
+    Py_ssize_t dimensions = 0;
+    for (Py_ssize_t place = 0; place < count; place++) {
+        dimensions = sizes[place] > dimensions ? sizes[place] : dimensions;
+    }
+    PyObject *shape = PyTuple_New(dimensions);
+    if (shape == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t back = 1; back <= dimensions; back++) {
+        PyObject *length = one;
+        for (Py_ssize_t place = 0; place < count; place++) {
+            if (back > sizes[place]) {
+                continue;
+            }
+            PyObject *here = items[place][sizes[place] - back];
+            Py_ssize_t value = PyLong_AsSsize_t(here);
+            if (value == -1 && PyErr_Occurred()) {
+                Py_DECREF(shape);
+                return NULL;
+            }
+            if (value == 0) {
+                Py_DECREF(shape);
+                return Miss;
+            }
+            if (value == 1) {
+                continue;
+            }
+            if (length == one) {
+                length = here;
+            } else {
+                int equal = PyObject_RichCompareBool(length, here, Py_EQ);
+                if (equal <= 0) {
+                    Py_DECREF(shape);
+                    return equal < 0 ? NULL : Miss;
+                }
+            }
+        }
+        PyTuple_SET_ITEM(shape, dimensions - back, Py_NewRef(length));
+    }
+    return shape;
+}
+
+/* Whether a `dtype` object is NumPy's own for its type, `np.dtype(d.type) is d`, as `rules._resolver_types` asks:
+ * another byte order and metadata are other objects. 1, 0, or -1 with an error set. */
+static int
+is_own_dtype(PyObject *dtype)
+{
+    PyObject *identity = PyLong_FromVoidPtr(dtype);
+    if (identity == NULL) {
+        return -1;
+    }
+    int own = PyDict_Contains(own_dtypes, identity);
+    if (own == 0) {
+        PyObject *type = PyObject_GetAttrString(dtype, "type");
+        PyObject *usual = type ? PyObject_CallOneArg(numpy_dtype, type) : NULL;
+        Py_XDECREF(type);
+        own = usual == NULL ? -1 : usual == dtype;
+        Py_XDECREF(usual);
+        if (own == 1 && PyDict_SetItem(own_dtypes, identity, Py_True) < 0) {
+            own = -1;
+        }
+    }
+    Py_DECREF(identity);
+    return own;
+}
+
+/* The answer for the first call of a ufunc on its operands, where `rules._plan` would get the element type from
+ * NumPy's resolver: an element-by-element call or a matrix product, on arrays of NumPy's own element types and
+ * numbers with a fraction. The type is the one remembered for the operands' types (`rules._types`), or the
+ * resolver's, asked here as `rules._resolved_type` asks it. The shape is by the two rules of a shape this file
+ * holds, broadcasting and the matrix product's, each held to Python's by a test. `key` is the call's plain key,
+ * under which Python then keeps the answer. A new reference; `Miss` wherever `rules._plan` would do anything
+ * else: decline, ask by a call on arrays of one element, or let NumPy raise. */
+static PyObject *
+first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(unwrapped);
+    PyObject *shapes[8] = {NULL}, *given[8] = {NULL};
+    PyObject **items[8];
+    Py_ssize_t sizes[8];
+    PyObject *result = Miss, *shape = NULL, *dtype = NULL, *kind = NULL, *asked = NULL;
     if (count == 0 || count > 8) {
         return Miss;
     }
@@ -786,96 +868,163 @@ first_elementwise(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
     PyTuple_SET_ITEM(written, 0, Py_NewRef(ufunc));
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *arg = PyTuple_GET_ITEM(unwrapped, place);
-        PyObject *part = NULL;
         if (Py_TYPE(arg) == Node) {
-            part = PyLong_FromVoidPtr(SLOT(arg, node_at[N_DTYPE]));
+            given[place] = Py_NewRef(SLOT(arg, node_at[N_DTYPE]));
             shapes[place] = Py_NewRef(SLOT(arg, node_at[N_SHAPE]));
         } else if (Py_TYPE(arg) == Ndarray) {
-            PyObject *dtype = PyObject_GetAttr(arg, s_dtype);
-            part = dtype ? PyLong_FromVoidPtr(dtype) : NULL;
-            Py_XDECREF(dtype); /* The array keeps it alive. */
+            given[place] = PyObject_GetAttr(arg, s_dtype);
             shapes[place] = PyObject_GetAttr(arg, s_shape);
         } else if (PyFloat_CheckExact(arg) || PyComplex_CheckExact(arg)) {
-            part = Py_NewRef((PyObject *)Py_TYPE(arg));
+            given[place] = Py_NewRef((PyObject *)Py_TYPE(arg)); /* A Python number, which takes the array's type. */
             shapes[place] = Py_NewRef(empty_tuple);
         } else {
             /* A NumPy scalar with a fraction: by its `dtype`, as an array of none. Anything else has no entry. */
             int fractional = PySet_Contains(fractional_scalars, (PyObject *)Py_TYPE(arg));
-            PyObject *dtype = fractional > 0 ? PyObject_GetAttr(arg, s_dtype) : NULL;
-            part = dtype ? PyLong_FromVoidPtr(dtype) : NULL;
-            Py_XDECREF(dtype);
-            shapes[place] = Py_NewRef(empty_tuple);
-            if (fractional == 0) {
+            if (fractional <= 0) {
+                if (fractional < 0) {
+                    goto fail;
+                }
                 goto done;
             }
+            given[place] = PyObject_GetAttr(arg, s_dtype);
+            shapes[place] = Py_NewRef(empty_tuple);
         }
-        if (part == NULL || shapes[place] == NULL || !PyTuple_CheckExact(shapes[place])) {
-            Py_XDECREF(part);
+        if (given[place] == NULL || shapes[place] == NULL || !PyTuple_CheckExact(shapes[place])) {
+            goto fail;
+        }
+        PyObject *part = PyType_Check(given[place]) ? Py_NewRef(given[place]) : PyLong_FromVoidPtr(given[place]);
+        if (part == NULL) {
             goto fail;
         }
         PyTuple_SET_ITEM(written, 1 + place, part);
-        if (PyTuple_GET_SIZE(shapes[place]) > dimensions) {
-            dimensions = PyTuple_GET_SIZE(shapes[place]);
-        }
+        items[place] = &PyTuple_GET_ITEM(shapes[place], 0);
+        sizes[place] = PyTuple_GET_SIZE(shapes[place]);
     }
     PyObject *found = PyDict_GetItemWithError(types, written); /* (dtype, kind), borrowed. */
-    if (found == NULL) {
+    if (found != NULL) {
+        dtype = Py_NewRef(PyTuple_GET_ITEM(found, 0));
+        kind = PyTuple_GET_ITEM(found, 1);
+    } else {
         if (PyErr_Occurred()) {
             goto fail;
         }
-        goto done;
+        /* These types for the first time: what `rules._kind` and `rules._resolved_type` do for a ufunc. */
+        PyObject *takes = PyObject_GetAttrString(ufunc, "nin"), *gives = PyObject_GetAttrString(ufunc, "nout");
+        PyObject *core = PyObject_GetAttrString(ufunc, "signature");
+        int fits = takes && gives && core && PyLong_AsSsize_t(takes) == count;
+        kind = !fits ? NULL : ufunc == matmul ? matrix_kind : (core == Py_None && PyLong_AsSsize_t(gives) == 1) ? elementwise_kind : NULL;
+        Py_XDECREF(takes);
+        Py_XDECREF(gives);
+        Py_XDECREF(core);
+        if (PyErr_Occurred()) {
+            goto fail;
+        }
+        if (kind == NULL) {
+            goto done;
+        }
+        asked = PyTuple_New(count + 1);
+        if (asked == NULL) {
+            goto fail;
+        }
+        PyTuple_SET_ITEM(asked, count, Py_NewRef(Py_None));
+        for (Py_ssize_t place = 0; place < count; place++) {
+            PyTuple_SET_ITEM(asked, place, Py_NewRef(given[place]));
+        }
+        for (Py_ssize_t place = 0; place < count; place++) {
+            if (PyType_Check(given[place])) {
+                continue;
+            }
+            /* An element type the layer defers (`rules.DEFERRED_KINDS`), and NumPy's own object for it. */
+            PyObject *letter = PyObject_GetAttr(given[place], s_kind);
+            int deferred_kind = letter && PyUnicode_CheckExact(letter) && PyUnicode_GET_LENGTH(letter) == 1
+                                && strchr("biufc", (int)PyUnicode_READ_CHAR(letter, 0)) != NULL;
+            Py_XDECREF(letter);
+            int own = deferred_kind ? is_own_dtype(given[place]) : 0;
+            if (PyErr_Occurred() || own < 0) {
+                goto fail;
+            }
+            if (!own) {
+                goto done;
+            }
+        }
+        PyObject *resolved = PyObject_CallMethodOneArg(ufunc, s_resolve, asked);
+        if (resolved == NULL) {
+            PyErr_Clear(); /* NumPy has no loop for these types: its error comes from the call, in Python. */
+            goto done;
+        }
+        dtype = PyTuple_Check(resolved) && PyTuple_GET_SIZE(resolved) == count + 1 ? Py_NewRef(PyTuple_GET_ITEM(resolved, count)) : NULL;
+        Py_DECREF(resolved);
+        if (dtype == NULL) {
+            goto done;
+        }
     }
-    int same = PyObject_RichCompareBool(PyTuple_GET_ITEM(found, 1), elementwise_kind, Py_EQ);
-    if (same < 0) {
+    int product = PyObject_RichCompareBool(kind, matrix_kind, Py_EQ);
+    if (product < 0) {
         goto fail;
     }
-    if (!same) {
-        goto done; /* A matrix product: its shape is Python's to work out. */
+    if (!product) {
+        shape = broadcast(items, sizes, count);
+    } else if (count == 2 && sizes[0] > 0 && sizes[1] > 0) {
+        /* `rules._matmul_shape`: an operand of one dimension is a row on the left and a column on the right, and
+         * that dimension is dropped; the inner sizes agree; the leading dimensions broadcast. */
+        Py_ssize_t left = sizes[0], right = sizes[1];
+        PyObject *inner = right > 1 ? items[1][right - 2] : items[1][0];
+        int agree = PyObject_RichCompareBool(items[0][left - 1], inner, Py_EQ);
+        if (agree < 0) {
+            goto fail;
+        }
+        PyObject **lead_items[2] = {items[0], items[1]};
+        Py_ssize_t lead_sizes[2] = {left > 1 ? left - 2 : 0, right > 1 ? right - 2 : 0};
+        PyObject *lead = agree ? broadcast(lead_items, lead_sizes, 2) : Miss;
+        /* A length of zero anywhere is nothing to compute on: made at once. */
+        int empty = 0;
+        for (Py_ssize_t place = 0; place < 2 && lead != NULL && lead != Miss; place++) {
+            for (Py_ssize_t axis = 0; axis < sizes[place]; axis++) {
+                Py_ssize_t value = PyLong_AsSsize_t(items[place][axis]);
+                empty = empty || value == 0;
+            }
+        }
+        if (lead == NULL || PyErr_Occurred()) {
+            Py_XDECREF(lead == Miss ? NULL : lead);
+            goto fail;
+        }
+        if (lead == Miss || empty) {
+            if (lead != Miss) {
+                Py_DECREF(lead);
+            }
+            goto done;
+        }
+        PyObject *kept = PyTuple_New((left > 1) + (right > 1));
+        if (kept != NULL) {
+            if (left > 1) {
+                PyTuple_SET_ITEM(kept, 0, Py_NewRef(items[0][left - 2]));
+            }
+            if (right > 1) {
+                PyTuple_SET_ITEM(kept, left > 1, Py_NewRef(items[1][right - 1]));
+            }
+            shape = PySequence_Concat(lead, kept);
+        }
+        Py_DECREF(lead);
+        Py_XDECREF(kept);
+    } else {
+        goto done;
     }
-    /* NumPy's broadcasting: the shapes are lined up at their last axis; along each axis the lengths are one
-     * number, apart from those that are 1. */
-    shape = PyTuple_New(dimensions);
     if (shape == NULL) {
         goto fail;
     }
-    for (Py_ssize_t back = 1; back <= dimensions; back++) {
-        PyObject *length = one;
-        for (Py_ssize_t place = 0; place < count; place++) {
-            Py_ssize_t own = PyTuple_GET_SIZE(shapes[place]);
-            if (back > own) {
-                continue;
-            }
-            PyObject *here = PyTuple_GET_ITEM(shapes[place], own - back);
-            Py_ssize_t value = PyLong_AsSsize_t(here);
-            if (value == -1 && PyErr_Occurred()) {
-                goto fail;
-            }
-            if (value == 0) {
-                goto done; /* Nothing to compute on: made at once. */
-            }
-            if (value == 1) {
-                continue;
-            }
-            if (length == one) {
-                length = here;
-            } else {
-                int equal = PyObject_RichCompareBool(length, here, Py_EQ);
-                if (equal < 0) {
-                    goto fail;
-                }
-                if (!equal) {
-                    goto done; /* They do not broadcast: NumPy's error to raise. */
-                }
-            }
-        }
-        PyTuple_SET_ITEM(shape, dimensions - back, Py_NewRef(length));
+    if (shape == Miss) {
+        shape = NULL;
+        goto done;
     }
-    result = PyObject_CallFunctionObjArgs(python_keep, key, shape, PyTuple_GET_ITEM(found, 0), elementwise_kind, NULL);
+    result = PyObject_CallFunctionObjArgs(python_keep, key, shape, dtype, kind, asked ? written : Py_None, NULL);
 done:
     Py_XDECREF(written);
     Py_XDECREF(shape);
+    Py_XDECREF(dtype);
+    Py_XDECREF(asked);
     for (Py_ssize_t place = 0; place < count; place++) {
         Py_XDECREF(shapes[place]);
+        Py_XDECREF(given[place]);
     }
     return result;
 fail:
@@ -887,7 +1036,7 @@ fail:
  * returns a signature. First by the plain key; then, as `rules._plan_marked`, by the key with placeholders, with
  * the call's own stand-ins put back into the shape. `Miss` (borrowed) when nothing is remembered. */
 static PyObject *
-remembered_plan(PyObject *rule, PyObject *unwrapped, PyObject *kwargs)
+remembered_plan(PyObject *rule, PyObject *unwrapped, PyObject *kwargs, PyObject **missed)
 {
     PyObject *key = key_of(rule, unwrapped, kwargs, NULL);
     if (key == NULL) {
@@ -897,9 +1046,13 @@ remembered_plan(PyObject *rule, PyObject *unwrapped, PyObject *kwargs)
         PyObject *kept = PyDict_GetItemWithError(plans, key);
         PyObject *answer = kept ? Py_NewRef(kept) : PyErr_Occurred() ? NULL : Miss;
         if (answer == Miss && Py_TYPE(rule) == Ufunc) {
-            answer = first_elementwise(rule, unwrapped, key);
+            answer = first_ufunc(rule, unwrapped, key);
         }
-        Py_DECREF(key);
+        if (answer == Miss && missed != NULL) {
+            *missed = key; /* The caller asks Python, and hands it the key so that it is not written twice. */
+        } else {
+            Py_DECREF(key);
+        }
         return answer;
     }
     /* `rules._plan_marked` keeps no answer for a call whose arrays are too large for it to hold for every stand-in
@@ -1033,7 +1186,7 @@ try_defer(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs,
             }
         }
     }
-    PyObject *signature = remembered_plan(ruled_as ? ruled_as : operation, unwrapped, kwargs); /* (shape, dtype, kind, spec) */
+    PyObject *signature = remembered_plan(ruled_as ? ruled_as : operation, unwrapped, kwargs, &key); /* (shape, dtype, kind, spec) */
     if (signature == NULL) {
         goto fail;
     }
@@ -1041,8 +1194,8 @@ try_defer(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs,
         /* The first call of its kind: the rules are asked, in Python, where they are. `rules.plan` works the answer
          * out and keeps it, raises NumPy's error, or says None for a call that is made at once. The node is then
          * made here all the same, without the rest of Python's road. */
-        PyObject *plan = PyDict_GetItemWithError(rules_names, s_plan);
-        signature = plan ? PyObject_CallFunctionObjArgs(plan, ruled_as ? ruled_as : operation, unwrapped, kwargs, NULL) : NULL;
+        PyObject *plan = PyDict_GetItemWithError(rules_names, s_plan); /* `rules.first` */
+        signature = plan ? PyObject_CallFunctionObjArgs(plan, key ? key : Py_None, ruled_as ? ruled_as : operation, unwrapped, kwargs, NULL) : NULL;
         if (signature == NULL) {
             goto fail;
         }
@@ -1413,7 +1566,7 @@ select_item(PyObject *target, PyObject *index, PyFrameObject *frame)
     if (kwargs == NULL) {
         goto fail;
     }
-    signature = remembered_plan(getitem, unwrapped, kwargs);
+    signature = remembered_plan(getitem, unwrapped, kwargs, NULL);
     if (signature == NULL) {
         goto fail;
     }
@@ -2331,7 +2484,7 @@ module_plan(PyObject *module, PyObject *const *args, Py_ssize_t count)
     if (!enabled || count != 3 || !PyTuple_CheckExact(args[1]) || !PyDict_CheckExact(args[2])) {
         return Py_NewRef(Miss);
     }
-    PyObject *result = remembered_plan(args[0], args[1], args[2]);
+    PyObject *result = remembered_plan(args[0], args[1], args[2], NULL);
     return result == Miss ? Py_NewRef(Miss) : result;
 }
 
@@ -2474,6 +2627,10 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Origin = (PyTypeObject *)Py_NewRef(origin);
+    if (take(given, "dtype", NULL, &numpy_dtype) || take(given, "matmul", NULL, &matmul)
+        || take(given, "matrix_product", &PyUnicode_Type, &matrix_kind)) {
+        return NULL;
+    }
     if (take(given, "types", &PyDict_Type, &types) || take(given, "keep", NULL, &python_keep) || take(given, "spec_of", NULL, &python_spec_of)
         || take(given, "elementwise", &PyUnicode_Type, &elementwise_kind)) {
         return NULL;
@@ -2542,11 +2699,13 @@ PyInit__core(void)
     s_kind = PyUnicode_InternFromString("kind");
     s_b = PyUnicode_InternFromString("b");
     s_setitem = PyUnicode_InternFromString("setitem");
-    s_plan = PyUnicode_InternFromString("plan");
+    s_plan = PyUnicode_InternFromString("first");
+    s_resolve = PyUnicode_InternFromString("resolve_dtypes");
+    own_dtypes = PyDict_New();
     s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
-        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit) {
+        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes) {
         Py_DECREF(module);
         return NULL;
     }

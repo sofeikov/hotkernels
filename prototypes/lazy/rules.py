@@ -1496,19 +1496,47 @@ def _resolver_types(args: tuple) -> list | None:
     return given
 
 
-def keep(key: tuple, shape: tuple[int, ...], dtype: np.dtype, kind: str) -> Signature:
-    """Keep an answer the C core worked out from a remembered element type and the shapes of a call.
+def keep(key: tuple, shape: tuple[int, ...], dtype: np.dtype, kind: str, types: tuple | None = None) -> Signature:
+    """Keep an answer the C core worked out for a ufunc: the element type from NumPy's resolver, the shape by its own rule.
 
     Args:
         key: What `_key` writes down of the call.
-        shape: The operands' shapes, broadcast.
-        dtype: The element type `_types` holds for the operands' types.
+        shape: The shape the core's rule gave: the operands' shapes broadcast, or the matrix product's.
+        dtype: The element type NumPy's resolver gave for the operands' types.
         kind: The call's kind.
+        types: The key of `_types` to keep the element type under, when the
+            core has just asked the resolver; None when it found the type there.
 
     Returns:
         The signature as `_remember` keeps it.
     """
+    if types is not None:
+        if len(_types) >= TYPE_MEMORY_LIMIT:
+            _types.clear()
+        _types[types] = (dtype, kind)
     return _remember(key, Signature(shape, dtype, kind))
+
+
+def first(key: tuple | None, operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
+    """Answer a call the C core found no remembered answer for: what `plan` does once its key is not found.
+
+    Args:
+        key: The key the core wrote for the call, as `_key` writes it without
+            placeholders; None when it wrote none, and `plan` is to see to everything.
+        operation: The NumPy callable.
+        args: Its positional arguments, with a `Node` for each lazy operand.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        What `plan` returns.
+
+    Raises:
+        Exception: Whatever NumPy raises for these shapes and types.
+    """
+    if key is None:
+        return plan(operation, args, kwargs)
+    signature = _plan(operation, args, kwargs)
+    return None if signature is None else _remember(key, signature)
 
 
 def probe(operand: Any) -> Any:
