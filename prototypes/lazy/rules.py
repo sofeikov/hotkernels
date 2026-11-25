@@ -22,14 +22,34 @@ Three devices do the work:
 - An error comes from NumPy: the real call is made on stand-ins that have the
   operand's shape and no memory (a ghost), and NumPy raises before it reads
   anything.
+
+Those calls cost several times what writing the node does, and a program
+asks the same question on every turn of a loop. So `plan()` remembers its
+answers. The answer to a call depends on the operation, on the shape and
+element type of each array among the arguments and on the other arguments as
+written, and on nothing else: not on any array's values, which a stand-in
+never has. `_key` writes exactly those down, and a call whose key was seen
+before gets the answer that was worked out then. Whatever `_key` cannot write
+down, it does not: the answer is then worked out as if nothing were
+remembered. The shape of a plain index (`x[i]`, `x[2:6]`, `x[i, 1:]`) is the
+one answer worked out here instead of asked of NumPy, since the index differs
+on every turn; `basic_shape` gives it only where it is sure.
+
+A length that is not known is a different integer for every mask, so a call
+on what a mask selected would never be seen twice. For those the key is
+written with the stand-ins replaced by placeholders, numbered in the order
+they are met, and the answer is kept with the same placeholders in its
+shape: the rules treat a stand-in as a length equal to itself and to nothing
+else, so the answer for one mask is the answer for any other with the
+stand-ins exchanged. An index that holds pending arrays is remembered the
+same way.
 """
 from __future__ import annotations
 
 import math
 import operator
 import warnings
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
 from numpy.lib.array_utils import normalize_axis_tuple
@@ -121,10 +141,37 @@ WRITE = "write"
 # layout does not allow a view, which is not known before the argument is computed.
 SURE_VIEWS = frozenset({np.transpose, np.swapaxes, np.expand_dims, np.squeeze})
 
+# Answers of `plan` remembered at most, before the memory is emptied and starts again.
+PLAN_MEMORY_LIMIT = 8192
+# The answer to a call with a length that is not known is remembered only if
+# its arrays have, between them and with that length left out, no more
+# elements than this. A stand-in is below 2**41 and an element takes at most
+# 32 bytes, so no size NumPy works out on a stand-in of such a call can pass
+# 2**62, whichever mask the stand-in is of: NumPy raises for a size that
+# does not fit 63 bits, and it must raise for every mask or for none.
+UNKNOWN_MEMORY_ELEMENTS = 2 ** 16
+# Types of an argument that is written into a key as its type and its value:
+# two of them that compare equal and are of one type are the same argument to NumPy.
+_PLAIN_SETTINGS = frozenset({int, bool, float, complex, str, type(None), type(Ellipsis)})
+# Python numbers that are whole: as an operand of a ufunc, the value decides
+# whether NumPy raises (`uint8 + 300`, an integer to the power -1).
+_WHOLE_NUMBERS = frozenset({int, bool})
+# Python numbers with a fraction: as an operand of a ufunc only the type
+# counts. NumPy 2 takes the element type of the result from the types alone,
+# and under the settings a probe runs with, no value of one makes a ufunc raise.
+_FRACTIONAL_NUMBERS = frozenset({float, complex})
+# NumPy's scalar types for which the same holds, and those that are whole.
+_FRACTIONAL_SCALARS = frozenset(kind for kind in np.sctypeDict.values() if issubclass(kind, np.inexact))
+_WHOLE_SCALARS = frozenset(kind for kind in np.sctypeDict.values() if issubclass(kind, (np.integer, np.bool_)))
 
-@dataclass(frozen=True)
-class Signature:
-    """What is known about a deferred call's result before it is computed."""
+
+class Signature(NamedTuple):
+    """What is known about a deferred call's result before it is computed.
+
+    A tuple with names: it cannot be changed, so one that is remembered can
+    be handed to every call it answers, and making one costs little, which
+    counts for the calls that get theirs made anew (`_plan_marked`).
+    """
 
     # Shape of the result.
     shape: tuple[int, ...]
@@ -132,6 +179,40 @@ class Signature:
     dtype: np.dtype
     # The kind of deferred operation: ELEMENTWISE, MATRIX_PRODUCT, REDUCTION, VIEW, INDEXING, ORDERING, NONZERO, SCAN or SEARCH.
     kind: str
+    # The number `graph.spec_of` gives the shape and element type, for the
+    # node that is made; 0 when it was not worked out.
+    spec: int = 0
+
+
+# The answers of `plan` so far, by what `_key` writes down of a call.
+_plans: dict[tuple, Signature] = {}
+# The element type NumPy's resolver gave for a ufunc and the types of its operands, with the call's kind, by
+# the ufunc and one item per operand: the identity of an array's or a NumPy scalar's `dtype` object, which is
+# NumPy's own and lives as long as NumPy does, or the type of a Python number. The answer does not depend on
+# any shape, so a call that differs from an earlier one in its shapes alone needs only the shapes broadcast,
+# which the C core does itself (`first_ufunc` in `_core.c`).
+_types: dict[tuple, tuple[np.dtype, str]] = {}
+# A Python `int` among a ufunc's operands can make NumPy raise by its value: one that does not fit the array's
+# integer type, a negative power of an integer. Within these bounds it cannot, and NumPy's resolver answers for it
+# by its type as for a float: from 0 to SMALL_WHOLE beside arrays of any type, which every integer type holds; and
+# up to LARGE_WHOLE either side of zero beside arrays with a fraction only, which take it as a float, or, where
+# the ufunc wants a whole number there (`np.ldexp`), as a 32-bit one, which holds it. A test holds both to the
+# call for every ufunc.
+SMALL_WHOLE, LARGE_WHOLE = 127, 2 ** 31 - 1
+# Entries of `_types` kept at most.
+TYPE_MEMORY_LIMIT = 4096
+# The shapes and element types that allow deferring, by their number: what
+# `_admissible` says of an operand, remembered.
+_admissible_specs: dict[int, bool] = {}
+
+
+def _forget_plans() -> None:
+    """Empty what `plan` remembers: the numbers its keys were written with are being forgotten."""
+    _plans.clear()
+    _admissible_specs.clear()
+
+
+graph.spec_memory_emptied.append(_forget_plans)
 
 
 def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
@@ -150,10 +231,427 @@ def plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature 
     Raises:
         Exception: Whatever NumPy raises for these shapes and types.
     """
-    kind = _kind(operation, args, kwargs)
-    if kind is None or not all(_admissible(operand) for operand in _array_operands(kind, operation, args)):
+    key = _key(operation, args, kwargs, None)
+    if key is None:
+        return _plan_marked(operation, args, kwargs)
+    signature = _plans.get(key)
+    if signature is None:
+        signature = _plan(operation, args, kwargs)
+        if signature is not None:
+            signature = _remember(key, signature)
+    return signature
+
+
+def _remember(key: tuple, signature: Signature) -> Signature:
+    """Keep the answer to a call.
+
+    Args:
+        key: What `_key` wrote down of the call.
+        signature: The answer `_plan` gave: not None, since a call that is
+            made at once is looked at again every time.
+
+    Returns:
+        The signature as it is kept, with the number of its shape and
+        element type where the shape has no placeholder and no stand-in.
+    """
+    if len(_plans) >= PLAN_MEMORY_LIMIT:
+        _plans.clear()
+    numbered = all(0 <= length < graph.UNKNOWN_FLOOR for length in signature.shape)
+    kept = _plans[key] = Signature(signature.shape, signature.dtype, signature.kind,
+                                   graph.spec_of(signature.shape, signature.dtype) if numbered else 0)
+    return kept
+
+
+def _plan_marked(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
+    """Answer a call that `_key` could not write down plainly: one with a length that is not known, or an index.
+
+    Args:
+        operation: The NumPy callable.
+        args: Its positional arguments, with a `Node` for each lazy operand.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        What `_plan` answers. The key is written with a placeholder for each
+        stand-in, and the answer kept under it has the same placeholders in
+        its shape; a call that finds it gets it with its own stand-ins put
+        back. A call that still cannot be written down, or whose arrays are
+        too large for the answer to be sure to hold for every stand-in, is
+        worked out as if nothing were remembered.
+    """
+    marks: dict[int, int] = {}
+    key = _key(operation, args, kwargs, marks) if _is_moderate(args[:1] if operation is operator.getitem else args) else None
+    if key is None:
+        return _plan(operation, args, kwargs)
+    kept = _plans.get(key)
+    if kept is None:
+        signature = _plan(operation, args, kwargs)
+        if signature is not None:
+            # With the placeholders of this call's stand-ins. A stand-in the call did not bring is not expected; the answer is then not kept.
+            shape = tuple(marks.get(length, length) for length in signature.shape)
+            if graph.is_known(shape):
+                _remember(key, Signature(shape, signature.dtype, signature.kind))
+        return signature
+    if not marks:
+        return kept
+    stood_for = {placeholder: length for length, placeholder in marks.items()}
+    shape = [stood_for[length] if length < 0 else length for length in kept.shape]
+    return Signature(tuple(shape), kept.dtype, kept.kind)
+
+
+def _is_moderate(operands: tuple) -> bool:
+    """Say whether a call's arrays are small enough for its answer to be remembered under placeholders.
+
+    Args:
+        operands: The call's positional arguments; for an index, the array
+            indexed alone, since a pending array in an index is stood in for
+            by its own shape and never by a length that is not known.
+
+    Returns:
+        True when no node among them has a length that is not known: NumPy
+        is then shown no stand-in at all. Otherwise, True when the nodes and
+        `ndarray`s have, between them and with that length left out, at most
+        UNKNOWN_MEMORY_ELEMENTS elements.
+    """
+    elements = 1
+    unknown = False
+    for operand in operands:
+        if type(operand) is Node or type(operand) is np.ndarray:
+            for length in operand.shape:
+                if length < graph.UNKNOWN_FLOOR:
+                    elements *= length
+                else:
+                    unknown = True
+    return not unknown or elements <= UNKNOWN_MEMORY_ELEMENTS
+
+
+def _key(operation: Callable[..., Any], args: tuple, kwargs: dict, marks: dict[int, int] | None) -> tuple | None:
+    """Write down everything the answer to a call depends on, or decline.
+
+    Args:
+        operation: The NumPy callable.
+        args: Its positional arguments, with a `Node` for each lazy operand.
+        kwargs: Its keyword arguments.
+        marks: None to decline a call with a length that is not known, and
+            an index. Otherwise a dictionary, empty at first, that gains a
+            placeholder for each stand-in the call brings: a negative
+            integer, by the stand-in. Such a call is then written down with
+            the placeholders, as `_marked_part` says.
+
+    Returns:
+        A tuple that two calls share only if `_plan` answers them alike, up
+        to the stand-ins that `marks` names: the operation, then for each
+        argument what `_plan` reads of it. None for a call whose answer is
+        not remembered: one with an argument this function does not know how
+        to write down, and the positions of what is not zero, whose mark is
+        a new one.
+    """
+    if type(operation) is np.ufunc:
+        if kwargs:
+            return None  # Not deferred; see `_kind`.
+        parts = [operation]
+        for arg in args:
+            # A node is the commonest operand: its number is read here, without the call.
+            part = (arg.spec or graph.spec(arg) or _marked_part(arg, marks)) if type(arg) is Node else operand_part(arg)
+            if not part:
+                return None
+            parts.append(part)
+        return tuple(parts)
+    if operation is operator.getitem:
+        return None if marks is None else _index_key(args, marks)
+    if operation in NONZEROS:
         return None
-    unknown = not all(graph.is_known(_shape(operand)) for operand in _array_operands(kind, operation, args))
+    # `np.count_nonzero` is deferred or not by a fact about this NumPy, which a test changes.
+    parts = [operation, COUNT_IS_A_NUMPY_SCALAR] if operation is np.count_nonzero else [operation]
+    for arg in args:
+        kind = type(arg)
+        if kind is Node:
+            part = arg.spec or graph.spec(arg) or _marked_part(arg, marks)
+        elif kind is int:
+            part = (int, arg)  # An axis: what `_setting_part` gives, without the call.
+        else:
+            part = _array_part(arg) or _setting_part(arg)
+        if not part:
+            return None
+        parts.append(part)
+    for name, value in kwargs.items():
+        part = _setting_part(value)
+        if not part:
+            return None
+        parts.append(name)
+        parts.append(part)
+    return tuple(parts)
+
+
+def _marked_part(node: Node, marks: dict[int, int] | None) -> int:
+    """Write down a node with a length that is not known, with a placeholder for the stand-in.
+
+    Args:
+        node: A node whose shape has a stand-in.
+        marks: The placeholders given so far in this call, by stand-in; it
+            gains one for a stand-in met for the first time. None when the
+            call is being written down without placeholders.
+
+    Returns:
+        The number `graph.spec_of` gives the node's element type with its
+        shape, the stand-in replaced by its placeholder: -1 for the first
+        stand-in of the call, -2 for the second. Two operands selected by
+        one mask get one placeholder, so the key says they have one length.
+        0 when `marks` is None.
+    """
+    if marks is None:
+        return 0
+    shape = [length if length < graph.UNKNOWN_FLOOR else marks.setdefault(length, -len(marks) - 1) for length in node.shape]
+    return graph.spec_of(tuple(shape), node.dtype)
+
+
+def _index_key(args: tuple, marks: dict[int, int]) -> tuple | None:
+    """Write down `x[index]` for a key.
+
+    Args:
+        args: The node indexed, then the index, with a `Node` for each lazy array in it that is still pending.
+        marks: The placeholders of the call's stand-ins; see `_key`.
+
+    Returns:
+        The node, then the index item by item: a pending array by its shape
+        and element type, a whole number, `None` and `...` as written, a
+        slice by its three parts. The length a pending mask selects is the
+        mask's own stand-in, which `marks` gains, so the answer is kept with
+        a placeholder where that length goes. None for an index that holds
+        an `ndarray` or a list, whose values NumPy checks against the bounds.
+    """
+    if len(args) != 2 or type(args[0]) is not Node:
+        return None
+    target, index = args
+    plain = type(index) is not tuple
+    if plain and isinstance(index, tuple):
+        return None
+    parts = [operator.getitem, target.spec or graph.spec(target) or _marked_part(target, marks), plain]
+    for item in ((index,) if plain else index):
+        kind = type(item)
+        if kind is Node:
+            part = item.spec or graph.spec(item) or _marked_part(item, marks)
+            if item.dtype.kind == "b":
+                marks.setdefault(graph.unknown_length(item), -len(marks) - 1)
+        elif kind is slice:
+            part = (slice, _setting_part(item.start), _setting_part(item.stop), _setting_part(item.step))
+            if None in part:
+                return None
+        else:
+            part = _setting_part(item)
+        if not part:
+            return None
+        parts.append(part)
+    return tuple(parts)
+
+
+def _array_part(arg: Any) -> int:
+    """Write down a node or an `ndarray` for a key.
+
+    Args:
+        arg: One argument of a call.
+
+    Returns:
+        For a node, the number of its shape and element type; for an exact
+        `ndarray` the same number negated, since some rules take a node
+        where they refuse an `ndarray`. 0 for anything else, and for a shape
+        with a length that is not known. `_plan` reads nothing else of
+        either: a probe and a ghost have the shape and the type and no values.
+    """
+    kind = type(arg)
+    if kind is Node:
+        return arg.spec or graph.spec(arg)
+    if kind is np.ndarray:
+        return -graph.spec_of(arg.shape, arg.dtype)
+    return 0
+
+
+def operand_part(arg: Any) -> Any:
+    """Write down one operand of a ufunc for a key.
+
+    Args:
+        arg: A node, an `ndarray`, a number or anything else.
+
+    Returns:
+        What `_array_part` gives for a node or an `ndarray`. For a number
+        with a fraction, Python's or NumPy's, its type: see
+        `_FRACTIONAL_NUMBERS`. For a whole number its type and its value.
+        A false value for anything else, a subclass of these included.
+    """
+    kind = type(arg)
+    if kind is Node:
+        return arg.spec or graph.spec(arg)
+    if kind in _FRACTIONAL_NUMBERS or kind in _FRACTIONAL_SCALARS:
+        return kind
+    if kind in _WHOLE_NUMBERS:
+        return (kind, arg)
+    if kind is np.ndarray:
+        return -graph.spec_of(arg.shape, arg.dtype)
+    if kind in _WHOLE_SCALARS:
+        return (kind, arg.item())
+    return None
+
+
+def _setting_part(arg: Any) -> tuple | None:
+    """Write down an argument that is not an array, for a key: an axis, a shape, an element type, a number.
+
+    Args:
+        arg: One argument of a call, positional or by keyword.
+
+    Returns:
+        The type with the value for a Python number, a string, `None` and
+        `...`; the same for a tuple of those, item by item, so that `(0, 1)`
+        and `(0.0, True)`, which compare equal, are told apart; the type
+        itself for a type, such as `np.float32`. None for anything else:
+        a list, a `dtype` object, a lazy array inside a tuple.
+    """
+    kind = type(arg)
+    if kind in _PLAIN_SETTINGS:
+        return (kind, arg)
+    if kind is tuple:
+        items = tuple(_setting_part(item) for item in arg)
+        return None if None in items else (tuple, items)
+    if kind is type:
+        return (type, arg)
+    return None
+
+
+def basic_shape(shape: tuple[int, ...], index: Any) -> tuple[int, ...] | None:
+    """Work out the shape NumPy gives an array indexed by whole numbers, slices, `None` and `...`.
+
+    Args:
+        shape: The shape of the array, every length known.
+        index: What was written between the brackets.
+
+    Returns:
+        The shape of the view, or None wherever this function is not sure
+        and NumPy has to be asked: an index out of bounds or too long, which
+        NumPy raises for; a step of zero; a second `...`; and anything that
+        is not exactly an `int`, a slice of `int`s and `None`s, `None` or
+        `...`. A `bool`, a NumPy integer and a slice that holds a lazy
+        array are among those.
+    """
+    kind = type(index)
+    if kind is int:
+        # The commonest index: one whole number, which takes one row.
+        if shape and -shape[0] <= index < shape[0]:
+            return shape[1:]
+        return None
+    if kind is tuple:
+        items = index
+    elif kind is slice:
+        items = (index,)
+    else:
+        return None
+    dimensions = len(shape)
+    axis = 0
+    whole = True
+    lengths = []
+    for item in items:
+        kind = type(item)
+        if kind is int:
+            if axis >= dimensions or not -shape[axis] <= item < shape[axis]:
+                return None
+            axis += 1
+        elif kind is slice:
+            if axis >= dimensions:
+                return None
+            start, stop, step = item.start, item.stop, item.step
+            if step is None and start is None and stop is None:
+                lengths.append(shape[axis])
+            elif (step is None or (type(step) is int and step != 0)) and (start is None or type(start) is int) \
+                    and (stop is None or type(stop) is int):
+                # Python's own arithmetic for a slice, which is NumPy's for whole numbers.
+                lengths.append(len(range(*item.indices(shape[axis]))))
+            else:
+                return None
+            axis += 1
+        elif item is None:
+            lengths.append(1)
+        elif item is Ellipsis:
+            if not whole:
+                return None
+            whole = False
+            taken = sum(1 for other in items if other is not None and other is not Ellipsis)
+            if taken > dimensions:
+                return None
+            # `...` stands for the axes the other items do not take.
+            skipped = dimensions - taken
+            lengths.extend(shape[axis:axis + skipped])
+            axis += skipped
+        else:
+            return None
+    lengths.extend(shape[axis:])
+    return tuple(lengths)
+
+
+def broadcasts_into(shape: tuple[int, ...], into: tuple[int, ...]) -> bool:
+    """Say whether an array of one shape is sure to broadcast to another, as an assignment needs.
+
+    Args:
+        shape: The shape of what is assigned.
+        into: The shape assigned into, every length known.
+
+    Returns:
+        True when `shape` has no more dimensions than `into` and each of its
+        lengths, counted from the last, is 1 or the length it meets. False
+        otherwise, which is not a refusal: NumPy also takes a value with
+        more dimensions when the extra ones have length 1, and the caller
+        asks NumPy about whatever this function does not vouch for. A
+        length that is not known equals no known length, so it is not
+        vouched for either.
+    """
+    ahead = len(into) - len(shape)
+    if ahead < 0:
+        return False
+    for position, length in enumerate(shape):
+        if length != 1 and length != into[ahead + position]:
+            return False
+    return True
+
+
+def is_admissible(node: Node) -> bool:
+    """Say whether a node's element type and shape allow deferring, as `_admissible` does, remembering the answer.
+
+    Args:
+        node: A node whose shape is known.
+
+    Returns:
+        What `_admissible` says of it.
+    """
+    number = node.spec or graph.spec(node)
+    found = _admissible_specs.get(number)
+    if found is None:
+        found = _admissible(node)
+        if number:
+            _admissible_specs[number] = found
+    return found
+
+
+def _plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
+    """Work out the answer of `plan` for one call, from the rules and from NumPy, remembering nothing.
+
+    Args:
+        operation: The NumPy callable: a ufunc, a function, or `operator.getitem`.
+        args: Its positional arguments, with a `Node` for each lazy operand.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        The signature of the result, or None when the call must be made at once.
+
+    Raises:
+        Exception: Whatever NumPy raises for these shapes and types.
+    """
+    kind = _kind(operation, args, kwargs)
+    if kind is None:
+        return None
+    # One pass over the operands for what `_admissible` and `graph.is_known` say of each.
+    unknown = False
+    for operand in _array_operands(kind, operation, args):
+        if isinstance(operand, PYTHON_NUMBERS):
+            continue
+        if operand.dtype.kind not in DEFERRED_KINDS or 0 in operand.shape:
+            return None
+        unknown = unknown or not graph.is_known(operand.shape)
     if unknown and not _holds_for_any_length(kind, operation, args, kwargs):
         return None
     try:
@@ -278,20 +776,19 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
     Returns:
         One of the kinds named above, or None for a call this layer does not defer.
     """
-    operands = all(_is_operand(arg) for arg in args)
     if operation is np.dot:
         arrays = len(args) == 2 and not kwargs and all(isinstance(arg, (Node, np.ndarray)) for arg in args)
         return MATRIX_PRODUCT if arrays and all(len(arg.shape) in DOT_DIMENSIONS for arg in args) else None
     if operation in COPIES:
         return ELEMENTWISE if len(args) == 1 and not kwargs and isinstance(args[0], Node) else None
     if isinstance(operation, np.ufunc):
-        if kwargs or not operands or len(args) != operation.nin:
+        if kwargs or len(args) != operation.nin or not _all_operands(args):
             return None  # where=, dtype=, casting= and the like are NumPy's to handle now.
         if operation is np.matmul:
             return MATRIX_PRODUCT
         return ELEMENTWISE if operation.signature is None and operation.nout == 1 else None
     if operation in SELECTIONS:
-        return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
+        return ELEMENTWISE if len(args) == 3 and not kwargs and _all_operands(args) else None
     if operation in ROUNDINGS:
         return ELEMENTWISE if _is_plain_rounding(args, kwargs) else None
     if operation in CASTS:
@@ -566,8 +1063,13 @@ def _is_sound(shape: tuple[int, ...]) -> bool:
         NumPy cannot multiply, or a length that came out of arithmetic on a
         stand-in and stands for nothing.
     """
-    unknown = [length for length in shape if length >= graph.UNKNOWN_FLOOR]
-    return len(unknown) <= 1 and all(graph.is_issued(length) for length in unknown)
+    unknown = 0
+    for length in shape:
+        if length >= graph.UNKNOWN_FLOOR:
+            unknown += 1
+            if unknown > 1 or not graph.is_issued(length):
+                return False
+    return True
 
 
 def _is_plain_reduction(args: tuple, kwargs: dict) -> bool:
@@ -589,6 +1091,21 @@ def _is_plain_reduction(args: tuple, kwargs: dict) -> bool:
     if by_position and ("axis" in kwargs or isinstance(args[1], Node)):
         return False
     return set(kwargs) <= REDUCTION_KEYWORDS
+
+
+def _all_operands(args: tuple) -> bool:
+    """Say whether every argument is something an element-by-element call can take.
+
+    Args:
+        args: The positional arguments of a call.
+
+    Returns:
+        What `_is_operand` says of each, together.
+    """
+    for arg in args:
+        if not _is_operand(arg):
+            return False
+    return True
 
 
 def _is_operand(arg: Any) -> bool:
@@ -666,7 +1183,15 @@ def _elementwise_shape(operation: Callable[..., Any], args: tuple, kwargs: dict)
     Raises:
         ValueError: When the shapes do not broadcast.
     """
-    return np.broadcast_shapes(*(_shape(arg) for arg in _array_operands(ELEMENTWISE, operation, args)))
+    shapes = [_shape(arg) for arg in _array_operands(ELEMENTWISE, operation, args)]
+    # The commonest case needs no arithmetic: every operand has one shape, or is a number. A length that is not
+    # known goes to NumPy all the same, which refuses a size that does not fit the machine.
+    arrays = [shape for shape in shapes if shape != ()]
+    if not arrays:
+        return ()
+    if all(shape == arrays[0] for shape in arrays) and graph.is_known(arrays[0]):
+        return arrays[0]
+    return np.broadcast_shapes(*shapes)
 
 
 def _matmul_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -771,7 +1296,12 @@ def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tup
     """
     if operation is np.ravel:
         return (int(np.prod(args[0].shape, dtype=np.intp)),)
-    return operation(ghost(args[0]), *args[1:], **kwargs).shape
+    shape = args[0].shape
+    # The shape of a view does not depend on the element type, so where every length is known the stand-in is an
+    # array of an element type of no size, which NumPy makes in a tenth of the time `np.broadcast_to` takes. A
+    # length that is not known is larger than NumPy lets an array of its own be.
+    viewed = np.empty(shape, NO_SIZE) if graph.is_known(shape) else ghost(args[0])
+    return operation(viewed, *args[1:], **kwargs).shape
 
 
 def _ordered_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -904,12 +1434,130 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
     """
     if kind in (VIEW, INDEXING, ORDERING):
         return args[0].dtype
+    if type(operation) is np.ufunc:
+        resolved = _resolved_type(operation, args)
+        if resolved is not None:
+            if len(_types) >= TYPE_MEMORY_LIMIT:
+                _types.clear()
+            _types[(operation, *(arg if type(arg) is type else id(arg) for arg in _resolver_types(args)))] = (resolved, kind)
+            return resolved
     if kind == NONZERO:
         return np.flatnonzero(probe(args[0])).dtype  # The three answer with one type, and `np.nonzero` with a tuple.
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
         operands = len(_array_operands(kind, operation, args))
         return np.result_type(operation(*(probe(arg) for arg in args[:operands]), *args[operands:], **kwargs))
+
+
+def _resolved_type(operation: np.ufunc, args: tuple) -> np.dtype | None:
+    """Ask NumPy for a ufunc's result type from the operands' types alone, where that is the whole answer.
+
+    `ufunc.resolve_dtypes` is the step of a ufunc call that picks the loop
+    and the result's type. For operands that are arrays and numbers with a
+    fraction, nothing else in a call on zeros can change the answer or
+    raise, so the call itself, with its arrays of one element, its error
+    state and its warning filter, need not be made. A test holds the two
+    ways to each other for every ufunc of NumPy.
+
+    Args:
+        operation: A ufunc the rules have accepted.
+        args: Its operands.
+
+    Returns:
+        The element type of the result, or None wherever the call has to be
+        made to know: a whole number among the operands, whose value can
+        make NumPy raise; an element type that is not NumPy's own object for
+        it (another byte order, metadata), where the call's result need not
+        be the resolver's; and whenever the resolver raises, so that the
+        error comes from the call, in the call's words.
+    """
+    given = _resolver_types(args)
+    if given is None:
+        return None
+    try:
+        return operation.resolve_dtypes((*given, None))[-1]
+    except Exception:
+        return None
+
+
+def _resolver_types(args: tuple) -> list | None:
+    """Write a ufunc's operands down as NumPy's resolver takes them.
+
+    Args:
+        args: The operands.
+
+    Returns:
+        For each operand, its `dtype` object if it is an array or a NumPy
+        scalar with a fraction, and the type `float`, `complex` or `int` for
+        a Python number, which NumPy lets take the array's type. None when an
+        operand is anything else, has an element type that is not NumPy's
+        own object for it, or is an `int` outside the bounds within which
+        its value cannot make NumPy raise (`SMALL_WHOLE`, `LARGE_WHOLE`).
+    """
+    given = []
+    small = fractional = True
+    for arg in args:
+        kind = type(arg)
+        if kind in _FRACTIONAL_NUMBERS:
+            given.append(kind)
+            continue
+        if kind is int:
+            if not -LARGE_WHOLE <= arg <= LARGE_WHOLE:
+                return None
+            small = small and 0 <= arg <= SMALL_WHOLE
+            given.append(kind)
+            continue
+        if kind is not Node and kind is not np.ndarray and kind not in _FRACTIONAL_SCALARS:
+            return None
+        dtype = arg.dtype
+        if np.dtype(dtype.type) is not dtype:
+            return None
+        fractional = fractional and dtype.kind in "fc"
+        given.append(dtype)
+    return given if small or fractional else None
+
+
+def keep(key: tuple, shape: tuple[int, ...], dtype: np.dtype, kind: str, types: tuple | None = None) -> Signature:
+    """Keep an answer the C core worked out for a ufunc: the element type from NumPy's resolver, the shape by its own rule.
+
+    Args:
+        key: What `_key` writes down of the call.
+        shape: The shape the core's rule gave: the operands' shapes broadcast, or the matrix product's.
+        dtype: The element type NumPy's resolver gave for the operands' types.
+        kind: The call's kind.
+        types: The key of `_types` to keep the element type under, when the
+            core has just asked the resolver; None when it found the type there.
+
+    Returns:
+        The signature as `_remember` keeps it.
+    """
+    if types is not None:
+        if len(_types) >= TYPE_MEMORY_LIMIT:
+            _types.clear()
+        _types[types] = (dtype, kind)
+    return _remember(key, Signature(shape, dtype, kind))
+
+
+def first(key: tuple | None, operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature | None:
+    """Answer a call the C core found no remembered answer for: what `plan` does once its key is not found.
+
+    Args:
+        key: The key the core wrote for the call, as `_key` writes it without
+            placeholders; None when it wrote none, and `plan` is to see to everything.
+        operation: The NumPy callable.
+        args: Its positional arguments, with a `Node` for each lazy operand.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        What `plan` returns.
+
+    Raises:
+        Exception: Whatever NumPy raises for these shapes and types.
+    """
+    if key is None:
+        return plan(operation, args, kwargs)
+    signature = _plan(operation, args, kwargs)
+    return None if signature is None else _remember(key, signature)
 
 
 def probe(operand: Any) -> Any:
