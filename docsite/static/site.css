@@ -246,6 +246,8 @@ td.num, th.num { text-align: right; }
 figure.narrow { max-width: var(--measure) !important; }
 figcaption { font-family: var(--sans); font-size: .86rem; line-height: 1.5; color: var(--muted); margin-top: .9rem; max-width: var(--measure); margin-left: auto; margin-right: auto; }
 figcaption::before { content: "Figure " counter(figure) ". "; font-weight: 700; color: var(--ink); }
+/* a screenshot: a framed image with its caption */
+.prose > figure > img { display: block; max-width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 12px; box-shadow: var(--shadow); }
 figure.diagram { background: var(--bg-raised); border: 1px solid var(--rule); border-radius: 12px; padding: 1.5rem 1rem 1.2rem; box-shadow: var(--shadow); }
 figure.diagram pre.mermaid { margin: 0; text-align: center; overflow-x: auto; font-family: var(--sans); font-size: .8rem; color: var(--muted); line-height: 1.4; }
 figure.diagram pre.mermaid:not([data-processed]) { white-space: pre; text-align: left; opacity: .5; }
