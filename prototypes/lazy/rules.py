@@ -190,7 +190,7 @@ _plans: dict[tuple, Signature] = {}
 # the ufunc and one item per operand: the identity of an array's or a NumPy scalar's `dtype` object, which is
 # NumPy's own and lives as long as NumPy does, or the type of a Python number. The answer does not depend on
 # any shape, so a call that differs from an earlier one in its shapes alone needs only the shapes broadcast,
-# which the C core does itself (`first_elementwise` in `_core.c`).
+# which the C core does itself (`first_ufunc` in `_core.c`).
 _types: dict[tuple, tuple[np.dtype, str]] = {}
 # A Python `int` among a ufunc's operands can make NumPy raise by its value: one that does not fit the array's
 # integer type, a negative power of an integer. Within these bounds it cannot, and NumPy's resolver answers for it
