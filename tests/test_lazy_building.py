@@ -20,7 +20,7 @@ from typing import Any, Callable
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, array, get_lazy, graph, rules
+from prototypes.lazy import LazyArray, NotGathered, array, gather, get_lazy, graph, rules
 from prototypes.lazy.programs import regression
 
 # Seed of every random array and every random program in these tests.
@@ -442,6 +442,24 @@ def test_a_length_that_is_not_known_keeps_its_own_mark(monkeypatch):
     few, many = x[x[:, 0] > 0.5], x[x[:, 0] > -0.5]
     assert (few + few)._node.pending and (many + many)._node.pending
     assert str(raised(lambda: few + many)) == str(raised(lambda: data[data[:, 0] > 0.5] + data[data[:, 0] > -0.5]))
+
+
+def test_the_rules_are_asked_once_about_a_call(monkeypatch):
+    """A call that the rules decline is put to them once: working an answer out can itself compute something."""
+    data = numpy.arange(24.0).reshape(6, 4)
+    counted = Counted(rules._plan)
+    monkeypatch.setattr(rules, "_plan", counted)
+    for _ in range(2):
+        chosen = (lazy.asarray(data) + 0)[lazy.asarray(data)[:, 0] > 7]
+        stop = lazy.asarray(numpy.int64(2))
+        gather(chosen[:, 0] > 0)  # Nothing below is the first of its kind but the slice.
+        graph.COUNTS.reset()
+        before = counted.calls
+        # Part of a length that is not known: declined, and made at once. To decline it the rules compare the slice
+        # with `:`, which compares the lazy `stop` with None, which NumPy answers at once.
+        part = chosen[:stop]
+        assert counted.calls == before + 1 and graph.COUNTS.at_once == {"np.equal": 1, "x[index]": 1}
+        assert part.gather().tobytes() == data[data[:, 0] > 7][:2].tobytes()
 
 
 def test_an_answer_that_could_depend_on_the_mask_is_not_remembered():

@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 13
+CORE_VERSION = 14
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -425,6 +425,8 @@ def _try_defer(operation: Callable[..., Any], name: str, args: tuple, kwargs: di
         Exception: NumPy's own, when the shapes or types are wrong.
     """
     if _core is not None:
+        # A lazy array; or None, when the core has just asked the rules about this very call and they said it is
+        # not deferred; or MISS, when the call is one the core leaves to the lines below.
         made = _core.try_defer(operation, name, args, kwargs, ruled_as, frame)
         if made is not _core.MISS:
             return made
@@ -1929,7 +1931,8 @@ def _set_up(core: Any) -> None:
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
                getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
                slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, AssignThrough=_AssignThrough,
-               assignable=_assignable, types=rules._types, keep=rules.keep, spec_of=graph.spec_of, elementwise=rules.ELEMENTWISE, fitting=_fitting,
+               assignable=_assignable, types=rules._types, keep=rules.keep, spec_of=graph.spec_of, Origin=graph.Origin,
+               internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
 
 
