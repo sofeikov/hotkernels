@@ -1,0 +1,335 @@
+"""Times each program of the corpus three ways: NumPy, the lazy layer node by node, and the lazy layer with fusion.
+
+    uv run --group apps python -m prototypes.lazy.programs.fusion_time --size large
+
+For each program:
+
+- **NumPy** is the program as it is, with `import numpy as np`.
+- **Lazy** is the same program with the stand-in for `np`, its graph
+  computed one node at a time, each with the call the program wrote.
+- **Fused** is the lazy run with `fuse.enable()`: expressions the library
+  has kernels for are computed by one kernel call each.
+
+The results of all three are compared bit for bit before anything is
+printed, and the run stops if they differ.
+
+A lazy run's time is split in two. *Computing* is the time inside the
+layer's two computing functions: NumPy's calls or the kernels', and for a
+fused run the planning before them, which is given by itself as well.
+*Building* is everything else: the program's own Python, writing the nodes,
+and whatever NumPy computes at once. With `--install` every way is also run
+under `hotkernels.install()`, the single-operation kernels.
+
+A second table says what the graphs were: how many, how large, how many
+expressions were found in them, how many nodes a kernel computed in place of
+a NumPy call, and how many bytes of results were written to memory each way.
+
+Timings are only meaningful on a machine that is doing nothing else.
+"""
+from __future__ import annotations
+
+import gc
+import logging
+import time
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+import numpy
+import typer
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+from prototypes.lazy import array, evaluate, fuse, get_lazy, graph
+from prototypes.lazy.array import LazyArray
+from prototypes.lazy.graph import Node
+from prototypes.lazy.programs import corpus
+
+log = logging.getLogger(__name__)
+
+# Where the layer keeps its templates, and the template of this tool's tables.
+TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+TABLE_TEMPLATE = "fusion_time.txt.j2"
+# Nanoseconds in a millisecond, and bytes in a megabyte.
+NS_PER_MS, BYTES_PER_MB = 1e6, 1e6
+# The three ways a program is run.
+NUMPY, LAZY, FUSED = "numpy", "lazy", "fused"
+
+app = typer.Typer(add_completion=False)
+
+
+@dataclass(frozen=True)
+class Timing:
+    """The quickest of several runs of a program one way."""
+
+    # Nanoseconds from the start of the program to its last result.
+    total_ns: int
+    # Of that, nanoseconds inside the layer's computing functions. 0 for NumPy.
+    computing_ns: int = 0
+    # Of that, nanoseconds planning the computations. 0 unless fused.
+    planning_ns: int = 0
+
+    @property
+    def building_ns(self) -> int:
+        """Nanoseconds outside the computing functions: the program's Python, the nodes, calls made at once."""
+        return self.total_ns - self.computing_ns
+
+
+@dataclass
+class Shape:
+    """What a program's graphs were, from one run that is not timed."""
+
+    # Operations deferred, computations made, the nodes of the largest computation.
+    deferred: int = 0
+    graphs: int = 0
+    largest_graph: int = 0
+    # The elements of the largest array a node gave.
+    largest_node: int = 0
+    # Bytes of results written by the nodes' calls: arrays that own their memory.
+    written: int = 0
+
+
+@dataclass
+class Row:
+    """Everything measured for one program."""
+
+    # The program's name and one line on its size.
+    name: str
+    size: str
+    # The quickest run each way, by NUMPY, LAZY and FUSED.
+    timings: dict[str, Timing] = field(default_factory=dict)
+    # The same under `hotkernels.install()`, when asked for.
+    installed: dict[str, Timing] = field(default_factory=dict)
+    # What the graphs were, node by node and fused.
+    lazy: Shape = field(default_factory=Shape)
+    fused: Shape = field(default_factory=Shape)
+    # What fusion did in the fused run that was not timed.
+    stats: fuse.Stats = field(default_factory=fuse.Stats)
+
+    def ratio(self, slower: str, faster: str) -> float:
+        """Return how many times quicker one way is than another."""
+        return self.timings[slower].total_ns / self.timings[faster].total_ns
+
+
+def _values(result: Any) -> Iterator[Any]:
+    """List the arrays and numbers in a program's result, whatever tuples and lists they are in.
+
+    Args:
+        result: What a program returned.
+
+    Yields:
+        Each array or number.
+    """
+    if isinstance(result, (tuple, list)):
+        for item in result:
+            yield from _values(item)
+    else:
+        yield result
+
+
+def _finish(result: Any) -> list:
+    """Gather every lazy array of a program's result.
+
+    Args:
+        result: What a program returned.
+
+    Returns:
+        The values, as `ndarray`s and numbers.
+    """
+    return [value.gather() if isinstance(value, LazyArray) else value for value in _values(result)]
+
+
+def _run(program: corpus.Program, inputs: tuple, way: str) -> list:
+    """Run a program one way, to its values.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        way: NUMPY, LAZY or FUSED.
+
+    Returns:
+        Its results as `ndarray`s and numbers.
+    """
+    if way == NUMPY:
+        return _finish(program.run(numpy, inputs))
+    if way == FUSED:
+        fuse.enable()
+    try:
+        return _finish(program.run(get_lazy(), inputs))
+    finally:
+        fuse.disable()
+
+
+def _same(first: list, second: list) -> bool:
+    """Say whether two runs gave the same results, in type, shape and bits.
+
+    Args:
+        first: One run's values.
+        second: The other's.
+
+    Returns:
+        True when they match value for value.
+    """
+    if len(first) != len(second):
+        return False
+    for one, other in zip(first, second):
+        one, other = numpy.asarray(one), numpy.asarray(other)
+        if one.dtype != other.dtype or one.shape != other.shape or one.tobytes() != other.tobytes():
+            return False
+    return True
+
+
+def quickest(program: corpus.Program, inputs: tuple, way: str, runs: int) -> Timing:
+    """Time a program one way several times and keep the quickest run.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        way: NUMPY, LAZY or FUSED.
+        runs: How many times to run it.
+
+    Returns:
+        The quickest run's times.
+    """
+    best: Timing | None = None
+    for _ in range(runs):
+        gc.collect()
+        evaluate.CLOCK.reset()
+        fuse.STATS.reset()
+        started = time.perf_counter_ns()
+        values = _run(program, inputs, way)
+        taken = Timing(time.perf_counter_ns() - started, evaluate.CLOCK.ns, fuse.STATS.planning_ns)
+        del values
+        if best is None or taken.total_ns < best.total_ns:
+            best = taken
+    assert best is not None
+    return best
+
+
+def shape_of(program: corpus.Program, inputs: tuple, way: str) -> tuple[Shape, fuse.Stats, list]:
+    """Run a program lazily once, not timed, and note what its graphs were.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        way: LAZY or FUSED.
+
+    Returns:
+        (what the graphs were, what fusion did, the program's values).
+    """
+    shape = Shape()
+
+    def note(node: Node, _ns: int) -> None:
+        """Count what one call wrote."""
+        value = node.value
+        if isinstance(value, numpy.ndarray):
+            shape.largest_node = max(shape.largest_node, value.size)
+            if value.flags.owndata:
+                shape.written += value.nbytes
+
+    evaluate.CLOCK.reset()
+    fuse.STATS.reset()
+    before, evaluate.meter = graph.COUNTS.deferred, note
+    try:
+        values = _run(program, inputs, way)
+    finally:
+        evaluate.meter = None
+    shape.deferred = graph.COUNTS.deferred - before
+    shape.graphs, shape.largest_graph = evaluate.CLOCK.computations, evaluate.CLOCK.largest
+    stats = fuse.Stats(**vars(fuse.STATS))
+    stats.calls = dict(stats.calls)
+    return shape, stats, values
+
+
+def measure(program: corpus.Program, size: str, runs: int, install: Callable[[], Any] | None) -> Row:
+    """Measure one program every way.
+
+    Args:
+        program: The program.
+        size: `corpus.SMALL` or `corpus.LARGE`.
+        runs: How many times each way is timed; the quickest counts.
+        install: `hotkernels.enabled`, to time every way under the single-operation kernels as well; or None.
+
+    Returns:
+        The program's row.
+
+    Raises:
+        AssertionError: When a lazy run's results are not NumPy's bit for bit, with the kernels installed or without.
+    """
+    inputs = program.make(size)
+    row = Row(program.name, program.sizes[size])
+    expected = _run(program, inputs, NUMPY)
+    row.lazy, _, lazily = shape_of(program, inputs, LAZY)
+    row.fused, row.stats, fused = shape_of(program, inputs, FUSED)
+    assert _same(expected, lazily), f"{program.name}: the lazy run does not give NumPy's results"
+    assert _same(expected, fused), f"{program.name}: the fused run does not give NumPy's results"
+    del expected, lazily, fused
+    for way in (NUMPY, LAZY, FUSED):
+        row.timings[way] = quickest(program, inputs, way, runs)
+    if install is not None:
+        with install():
+            assert _same(_run(program, inputs, NUMPY), _run(program, inputs, FUSED)), \
+                f"{program.name}: under hotkernels.install() the fused run does not give NumPy's results"
+            for way in (NUMPY, LAZY, FUSED):
+                row.installed[way] = quickest(program, inputs, way, runs)
+    return row
+
+
+def render(rows: list[Row], size: str, runs: int) -> str:
+    """Write the tables as text.
+
+    Args:
+        rows: One row per program.
+        size: The size the programs were run at.
+        runs: How many runs each timing is the quickest of.
+
+    Returns:
+        The tables.
+    """
+    environment = Environment(loader=FileSystemLoader(TEMPLATES), undefined=StrictUndefined, trim_blocks=True,
+                              lstrip_blocks=True)
+    calls: dict[str, int] = {}
+    for row in rows:
+        for name, count in row.stats.calls.items():
+            calls[name] = calls.get(name, 0) + count
+    return environment.get_template(TABLE_TEMPLATE).render(
+        rows=rows, size=size, runs=runs, ns_per_ms=NS_PER_MS, bytes_per_mb=BYTES_PER_MB, core=array.core_in_use(),
+        numpy=NUMPY, lazy=LAZY, fused=FUSED, calls=sorted(calls.items(), key=lambda item: item[1], reverse=True),
+        kernels=len({kernel.name for kernel in fuse.LIBRARY.values()})).strip("\n")
+
+
+@app.command()
+def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are run at: small or large."),
+         program: list[str] = typer.Option(None, help="A program to time; may be given several times. Default: all."),
+         runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
+         install: bool = typer.Option(False, help="Also time every way under hotkernels.install().")) -> None:
+    """Time the corpus three ways and print the tables.
+
+    Args:
+        size: The size the programs are run at.
+        program: The names of the programs to time, or none for all of them that run with NumPy.
+        runs: How many times each way is timed.
+        install: Whether to time every way under `hotkernels.install()` as well.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if not fuse.enable():
+        log.error("the fused kernels are not built: uv run python -m prototypes.lazy.build_fused")
+        raise typer.Exit(1)
+    fuse.disable()
+    enabled = None
+    if install:
+        import hotkernels
+        enabled = hotkernels.enabled
+    asked = corpus.by_name(list(program) if program else None)
+    for each in asked:
+        if not each.available:
+            log.info("skipped %s: it needs %s (uv run --group apps ...)", each.name, ", ".join(each.requires))
+    chosen = [each for each in asked if each.eager and each.available]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rows = [measure(each, size, runs, enabled) for each in chosen]
+    log.info("%s", render(rows, size, runs))
+
+
+if __name__ == "__main__":
+    app()

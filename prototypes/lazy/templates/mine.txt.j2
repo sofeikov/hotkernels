@@ -1,0 +1,37 @@
+Where NumPy's time goes, computing each program's graph one node at a time ({{ size }} size)
+
+{{ "%-18s %8s %7s %8s %9s"|format("program", "deferred", "graphs", "largest", "ms") }}{% for name in classes %} {{ "%12s"|format(name[:12]) }}{% endfor %}
+
+{% for mine in mines %}
+{{ "%-18s %8d %7d %8d %9.1f"|format(mine.name, mine.deferred, mine.graphs, mine.largest, mine.total_ns / ns_per_ms) }}{% for name in classes %} {{ "%11.1f%%"|format(mine.share(name)) }}{% endfor %}
+
+{% endfor %}
+
+Columns after `ms` are shares of that time. `in expressions`: operations a fused kernel could make, in a tree of two
+or more. `simple, alone`: the same operations with nothing to fuse with. `other element by element`: calls into a
+mathematics library and element types other than float64.
+
+Expressions per program
+
+{{ "%-18s %10s %10s %14s"|format("program", "distinct", "computed", "most operations") }}
+{% for mine in mines %}
+{{ "%-18s %10d %10d %14d"|format(mine.name, mine.expressions|length, mine.expressions.values()|sum(attribute="count"), mine.most_operations) }}
+{% endfor %}
+
+The heaviest element-by-element operations outside every expression
+
+{% for key, ns in outside %}
+{{ "%9.1f ms  %s"|format(ns / ns_per_ms, key) }}
+{% endfor %}
+
+The heaviest whole expressions ({{ "%.1f"|format(expression_ns / ns_per_ms) }} ms in expressions over the corpus)
+
+{% for program, mined in whole %}
+{{ "%9.1f ms  %4d ×  %3d operations  %-16s %s"|format(mined.ns / ns_per_ms, mined.count, mined.operations, program, mined.name[:name_width]) }}
+{% endfor %}
+
+A library chosen one shape at a time: the share of the time in expressions saved with the shapes so far
+
+{% for shape in chosen %}
+{{ "%3d  %5.1f%%  %d operations  %-44s %s"|format(loop.index, shape.saved, shape.operations, shape.name, shape.programs|join(", ")) }}
+{% endfor %}
