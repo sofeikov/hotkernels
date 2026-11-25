@@ -1,14 +1,17 @@
-/* The lazy layer's hot path in C: writing one node of the graph when every answer it needs is remembered.
+/* The lazy layer's hot path in C: writing one node of the graph.
  *
  * This file adds nothing to what the layer does. Each function here is the
- * quick road of a function in array.py, graph.py or rules.py, for the calls
- * where everything that function would look up is already in the layer's
- * memories: the answer of `rules.plan`, the line of the user's code, the
- * error settings. It reads those memories and never writes them. Wherever it
- * is not sure, it hands the call to the Python function, unchanged, which
- * does the work, fills the memory, and so makes the next such call one this
- * file can take. The Python functions are the definition; a node made here
- * is, field for field, the node they would have made.
+ * quick road of a function in array.py, graph.py or rules.py. A call met
+ * before is answered from the layer's memories: the answer of `rules.plan`,
+ * the line of the user's code, the error settings. A first call of the
+ * common kinds (a ufunc, a reduction, a view function) is answered here as
+ * well: the element type is NumPy's, asked as rules.py asks, and the shape
+ * is by one of the three rules this file holds beside Python's, broadcasting,
+ * the matrix product's and the axes of a reduction. What is found is kept in
+ * the same memories, by the steps Python keeps it. Wherever this file is not
+ * sure, it hands the call to the Python function, unchanged. The Python
+ * functions are the definition; a node made here is, field for field, the
+ * node they would have made.
  *
  * Why C at all: once nothing is asked twice, what is left of a node's time
  * in Python is the interpreter itself, about ten calls and five objects. Here
