@@ -402,12 +402,14 @@ def test_a_loop_asks_numpy_once(monkeypatch):
     monkeypatch.setattr(rules, "_plan", counted)
     graph.COUNTS.reset()
     first = regression.fit(lazy, features, targets, STEPS)
-    operations, asked = graph.COUNTS.deferred, counted.calls
+    operations, asked, kept = graph.COUNTS.deferred, counted.calls, len(rules._plans)
     # Each line of the loop asks on its first turn. The intercept is a Python
     # number on the first turn and a lazy one afterwards, so two lines ask twice.
-    assert operations > 15 * STEPS and 0 < asked < 40
+    # With the C core the commonest first calls are answered by the core, which asks
+    # NumPy itself, so fewer reach Python's planner, or none; the answers kept are as many.
+    assert operations > 15 * STEPS and 0 < kept < 40 and asked <= kept
     second = regression.fit(lazy, features, targets, STEPS)
-    assert counted.calls == asked and graph.COUNTS.deferred == 2 * operations
+    assert counted.calls == asked and len(rules._plans) == kept and graph.COUNTS.deferred == 2 * operations
     eager = regression.fit(numpy, features, targets, STEPS)
     for expected, one, other in zip((eager[0], eager[1], *eager[2]), (first[0], first[1], *first[2]), (second[0], second[1], *second[2])):
         assert numpy.asarray(expected).tobytes() == numpy.asarray(one.gather()).tobytes() == numpy.asarray(other.gather()).tobytes()
