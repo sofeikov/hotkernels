@@ -245,14 +245,17 @@ def test_the_value_of_a_fraction_never_changes_an_answer():
 def test_the_type_resolver_answers_as_the_call_on_one_element_does(monkeypatch):
     """For every ufunc of NumPy, the first call's answer is the same whether NumPy's resolver gives the type or the call on arrays of one element does.
 
-    The resolver is asked only for arrays of NumPy's own element types and
-    numbers with a fraction. A whole number, another byte order and
-    metadata go to the call, and so does every case the resolver raises for.
+    The resolver is asked only for arrays of NumPy's own element types,
+    numbers with a fraction, and whole numbers small enough that their
+    value cannot make NumPy raise. A larger whole number, another byte
+    order and metadata go to the call, and so does every case the resolver raises for.
     """
     ufuncs = sorted({item for item in vars(numpy).values() if isinstance(item, numpy.ufunc)}, key=lambda item: item.__name__)
     types = [numpy.dtype(kind) for kind in (*ELEMENT_TYPES, numpy.float16, numpy.longdouble, numpy.complex128)]
     types += [numpy.dtype(">f8"), numpy.dtype("f8", metadata={"unit": "m"})]
-    numbers = (2.0, float("nan"), 1e300, 1j, 2, -1, 300, True, numpy.float32(2), numpy.float64(2), numpy.complex64(1j), numpy.int8(-1), numpy.uint8(200))
+    numbers = (2.0, float("nan"), 1e300, 1j, True, numpy.float32(2), numpy.float64(2), numpy.complex64(1j), numpy.int8(-1), numpy.uint8(200),
+               # Whole numbers either side of each bound within which the resolver is asked about one.
+               0, 2, rules.SMALL_WHOLE, rules.SMALL_WHOLE + 1, -1, 300, rules.LARGE_WHOLE, rules.LARGE_WHOLE + 1, -rules.LARGE_WHOLE, -rules.LARGE_WHOLE - 2, 2 ** 70)
     resolver = rules._resolved_type
     checked = resolved = 0
     for ufunc in ufuncs:
@@ -300,7 +303,7 @@ def test_the_core_broadcasts_as_numpy_does(lazy_core):
                 choice = rng.random()
                 dtype, shape = rng.choice(kinds), rng.choice(shapes)
                 operands.append(node_of(shape, dtype) if choice < 0.7 else numpy.zeros(shape, dtype) if choice < 0.85
-                                else rng.choice((2.0, 1j, numpy.float32(2.0), 3)))
+                                else rng.choice((2.0, 1j, numpy.float32(2.0), 3, 0, -5, 127, 128, 2 ** 31 - 1, 2 ** 31, True)))
             args = tuple(operands)
             if not any(isinstance(operand, graph.Node) for operand in args):
                 continue

@@ -192,6 +192,13 @@ _plans: dict[tuple, Signature] = {}
 # any shape, so a call that differs from an earlier one in its shapes alone needs only the shapes broadcast,
 # which the C core does itself (`first_elementwise` in `_core.c`).
 _types: dict[tuple, tuple[np.dtype, str]] = {}
+# A Python `int` among a ufunc's operands can make NumPy raise by its value: one that does not fit the array's
+# integer type, a negative power of an integer. Within these bounds it cannot, and NumPy's resolver answers for it
+# by its type as for a float: from 0 to SMALL_WHOLE beside arrays of any type, which every integer type holds; and
+# up to LARGE_WHOLE either side of zero beside arrays with a fraction only, which take it as a float, or, where
+# the ufunc wants a whole number there (`np.ldexp`), as a 32-bit one, which holds it. A test holds both to the
+# call for every ufunc.
+SMALL_WHOLE, LARGE_WHOLE = 127, 2 ** 31 - 1
 # Entries of `_types` kept at most.
 TYPE_MEMORY_LIMIT = 4096
 # The shapes and element types that allow deferring, by their number: what
@@ -1289,7 +1296,12 @@ def _view_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tup
     """
     if operation is np.ravel:
         return (int(np.prod(args[0].shape, dtype=np.intp)),)
-    return operation(ghost(args[0]), *args[1:], **kwargs).shape
+    shape = args[0].shape
+    # The shape of a view does not depend on the element type, so where every length is known the stand-in is an
+    # array of an element type of no size, which NumPy makes in a tenth of the time `np.broadcast_to` takes. A
+    # length that is not known is larger than NumPy lets an array of its own be.
+    viewed = np.empty(shape, NO_SIZE) if graph.is_known(shape) else ghost(args[0])
+    return operation(viewed, *args[1:], **kwargs).shape
 
 
 def _ordered_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -1476,15 +1488,23 @@ def _resolver_types(args: tuple) -> list | None:
 
     Returns:
         For each operand, its `dtype` object if it is an array or a NumPy
-        scalar with a fraction, and the type `float` or `complex` for a
-        Python number, which NumPy lets take the array's type. None when an
-        operand is anything else, or has an element type that is not
-        NumPy's own object for it.
+        scalar with a fraction, and the type `float`, `complex` or `int` for
+        a Python number, which NumPy lets take the array's type. None when an
+        operand is anything else, has an element type that is not NumPy's
+        own object for it, or is an `int` outside the bounds within which
+        its value cannot make NumPy raise (`SMALL_WHOLE`, `LARGE_WHOLE`).
     """
     given = []
+    small = fractional = True
     for arg in args:
         kind = type(arg)
         if kind in _FRACTIONAL_NUMBERS:
+            given.append(kind)
+            continue
+        if kind is int:
+            if not -LARGE_WHOLE <= arg <= LARGE_WHOLE:
+                return None
+            small = small and 0 <= arg <= SMALL_WHOLE
             given.append(kind)
             continue
         if kind is not Node and kind is not np.ndarray and kind not in _FRACTIONAL_SCALARS:
@@ -1492,8 +1512,9 @@ def _resolver_types(args: tuple) -> list | None:
         dtype = arg.dtype
         if np.dtype(dtype.type) is not dtype:
             return None
+        fractional = fractional and dtype.kind in "fc"
         given.append(dtype)
-    return given
+    return given if small or fractional else None
 
 
 def keep(key: tuple, shape: tuple[int, ...], dtype: np.dtype, kind: str, types: tuple | None = None) -> Signature:

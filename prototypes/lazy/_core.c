@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 16
+#define CORE_VERSION 17
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -96,6 +96,7 @@ static PyObject *numpy_dtype;        /* `np.dtype` */
 /* The identities of the `dtype` objects found to be NumPy's own for their type: `np.dtype(d.type) is d`. Such an
  * object lives as long as NumPy does, so what is noted of it stays true. */
 static PyObject *own_dtypes;
+static long long small_whole, large_whole; /* `rules.SMALL_WHOLE` and `rules.LARGE_WHOLE` */
 static PyObject *spec_numbers;       /* `graph._spec_numbers` */
 static PyTypeObject *Signature;      /* `rules.Signature` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
@@ -936,6 +937,7 @@ first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
     PyObject **items[8];
     Py_ssize_t sizes[8];
     PyObject *result = Miss, *shape = NULL, *dtype = NULL, *kind = NULL, *asked = NULL;
+    int small = 1, fractional = 1; /* As in `rules._resolver_types`: every `int` small, every array with a fraction. */
     if (count == 0 || count > 8) {
         return Miss;
     }
@@ -954,6 +956,16 @@ first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
             shapes[place] = PyObject_GetAttr(arg, s_shape);
         } else if (PyFloat_CheckExact(arg) || PyComplex_CheckExact(arg)) {
             given[place] = Py_NewRef((PyObject *)Py_TYPE(arg)); /* A Python number, which takes the array's type. */
+            shapes[place] = Py_NewRef(empty_tuple);
+        } else if (PyLong_CheckExact(arg)) {
+            /* A Python `int`, within the bounds in which its value cannot make NumPy raise. */
+            int overflow = 0;
+            long long value = PyLong_AsLongLongAndOverflow(arg, &overflow);
+            if (overflow || value < -large_whole || value > large_whole) {
+                goto done;
+            }
+            small = small && value >= 0 && value <= small_whole;
+            given[place] = Py_NewRef((PyObject *)&PyLong_Type);
             shapes[place] = Py_NewRef(empty_tuple);
         } else {
             /* A NumPy scalar with a fraction: by its `dtype`, as an array of none. Anything else has no entry. */
@@ -974,9 +986,28 @@ first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
         if (part == NULL) {
             goto fail;
         }
+
         PyTuple_SET_ITEM(written, 1 + place, part);
         items[place] = &PyTuple_GET_ITEM(shapes[place], 0);
         sizes[place] = PyTuple_GET_SIZE(shapes[place]);
+    }
+    if (!small) {
+        /* An `int` that is not small is taken by its type only beside arrays with a fraction: every one of them,
+         * those after it in the call too. */
+        for (Py_ssize_t place = 0; fractional && place < count; place++) {
+            if (PyType_Check(given[place])) {
+                continue;
+            }
+            PyObject *letter = PyObject_GetAttr(given[place], s_kind);
+            if (letter == NULL) {
+                goto fail;
+            }
+            fractional = PyUnicode_CompareWithASCIIString(letter, "f") == 0 || PyUnicode_CompareWithASCIIString(letter, "c") == 0;
+            Py_DECREF(letter);
+        }
+        if (!fractional) {
+            goto done;
+        }
     }
     PyObject *found = PyDict_GetItemWithError(types, written); /* (dtype, kind), borrowed. */
     if (found != NULL) {
@@ -2712,6 +2743,16 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
     Signature = (PyTypeObject *)signature;
     if (Py_TYPE(spec_numbers)->tp_iternext == NULL || !PyType_IsSubtype(Signature, &PyTuple_Type)) {
         PyErr_SetString(PyExc_TypeError, "setup(): 'spec_numbers' must be an iterator and 'Signature' a kind of tuple");
+        return NULL;
+    }
+    PyObject *few = PyDict_GetItemString(given, "small_whole"), *many = PyDict_GetItemString(given, "large_whole");
+    if (few == NULL || many == NULL) {
+        PyErr_SetString(PyExc_KeyError, "setup() was not given 'small_whole' and 'large_whole'");
+        return NULL;
+    }
+    small_whole = PyLong_AsLongLong(few);
+    large_whole = PyLong_AsLongLong(many);
+    if (PyErr_Occurred()) {
         return NULL;
     }
     if (take(given, "dtype", NULL, &numpy_dtype) || take(given, "matmul", NULL, &matmul)
