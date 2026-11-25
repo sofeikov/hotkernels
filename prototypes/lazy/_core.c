@@ -139,7 +139,8 @@ static PyObject *Miss;
 static PyObject *zero, *one, *empty_tuple;
 static PyObject *s_node, *s_made, *s_deferred, *s_observer, *s_limit, *s_settings, *s_last, *s_registry, *s_name,
     *s_unknown, *s_shape, *s_dtype, *s_doubt, *s_call, *s_getitem, *s_basic_shape, *s_out, *s_dunder_name, *s_kind, *s_b,
-    *s_setitem, *s_plan, *s_origin_limit, *s_resolve;
+    *s_setitem, *s_plan, *s_origin_limit, *s_resolve, *s_spec_limit, *s_plan_limit, *s_type_limit, *s_nin, *s_nout, *s_signature,
+    *s_type;
 
 /* ---- Making the layer's objects. ---- */
 
@@ -438,9 +439,9 @@ fail:
 
 /* Whether a memory has room for one more entry under the bound of that name in a module's namespace. */
 static int
-has_room(PyObject *memory, PyObject *names, const char *bound)
+has_room(PyObject *memory, PyObject *names, PyObject *bound)
 {
-    PyObject *limit = PyDict_GetItemString(names, bound);
+    PyObject *limit = PyDict_GetItemWithError(names, bound);
     Py_ssize_t most = limit ? PyLong_AsSsize_t(limit) : 0;
     if (PyErr_Occurred()) {
         PyErr_Clear();
@@ -465,7 +466,7 @@ spec_number(PyObject *shape, PyObject *dtype)
     if (found != NULL) {
         number = Py_NewRef(PyTuple_GET_ITEM(found, 0));
     } else if (!PyErr_Occurred()) {
-        if (has_room(specs, graph_names, "SPEC_MEMORY_LIMIT")) {
+        if (has_room(specs, graph_names, s_spec_limit)) {
             number = Py_TYPE(spec_numbers)->tp_iternext(spec_numbers);
             PyObject *kept = number ? PyTuple_Pack(2, number, dtype) : NULL;
             if (kept == NULL || PyDict_SetItem(specs, key, kept) < 0) {
@@ -485,7 +486,7 @@ spec_number(PyObject *shape, PyObject *dtype)
 static PyObject *
 keep_answer(PyObject *key, PyObject *shape, PyObject *dtype, PyObject *kind, PyObject *types_key)
 {
-    if (!has_room(plans, rules_names, "PLAN_MEMORY_LIMIT") || (types_key != NULL && !has_room(types, rules_names, "TYPE_MEMORY_LIMIT"))) {
+    if (!has_room(plans, rules_names, s_plan_limit) || (types_key != NULL && !has_room(types, rules_names, s_type_limit))) {
         return PyObject_CallFunctionObjArgs(python_keep, key, shape, dtype, kind, types_key ? types_key : Py_None, NULL);
     }
     if (types_key != NULL) {
@@ -917,7 +918,7 @@ is_own_dtype(PyObject *dtype)
     }
     int own = PyDict_Contains(own_dtypes, identity);
     if (own == 0) {
-        PyObject *type = PyObject_GetAttrString(dtype, "type");
+        PyObject *type = PyObject_GetAttr(dtype, s_type);
         PyObject *usual = type ? PyObject_CallOneArg(numpy_dtype, type) : NULL;
         Py_XDECREF(type);
         own = usual == NULL ? -1 : usual == dtype;
@@ -1026,8 +1027,8 @@ first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
             goto fail;
         }
         /* These types for the first time: what `rules._kind` and `rules._resolved_type` do for a ufunc. */
-        PyObject *takes = PyObject_GetAttrString(ufunc, "nin"), *gives = PyObject_GetAttrString(ufunc, "nout");
-        PyObject *core = PyObject_GetAttrString(ufunc, "signature");
+        PyObject *takes = PyObject_GetAttr(ufunc, s_nin), *gives = PyObject_GetAttr(ufunc, s_nout);
+        PyObject *core = PyObject_GetAttr(ufunc, s_signature);
         int fits = takes && gives && core && PyLong_AsSsize_t(takes) == count;
         kind = !fits ? NULL : ufunc == matmul ? matrix_kind : (core == Py_None && PyLong_AsSsize_t(gives) == 1) ? elementwise_kind : NULL;
         Py_XDECREF(takes);
@@ -2989,11 +2990,19 @@ PyInit__core(void)
     s_setitem = PyUnicode_InternFromString("setitem");
     s_plan = PyUnicode_InternFromString("first");
     s_resolve = PyUnicode_InternFromString("resolve_dtypes");
+    s_spec_limit = PyUnicode_InternFromString("SPEC_MEMORY_LIMIT");
+    s_plan_limit = PyUnicode_InternFromString("PLAN_MEMORY_LIMIT");
+    s_type_limit = PyUnicode_InternFromString("TYPE_MEMORY_LIMIT");
+    s_nin = PyUnicode_InternFromString("nin");
+    s_nout = PyUnicode_InternFromString("nout");
+    s_signature = PyUnicode_InternFromString("signature");
+    s_type = PyUnicode_InternFromString("type");
     own_dtypes = PyDict_New();
     s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
-        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes) {
+        || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type) {
         Py_DECREF(module);
         return NULL;
     }

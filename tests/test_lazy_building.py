@@ -281,44 +281,76 @@ def test_the_type_resolver_answers_as_the_call_on_one_element_does(monkeypatch):
     assert checked > 20_000 and resolved > checked // 4
 
 
-def test_the_core_broadcasts_as_numpy_does(lazy_core):
-    """Where the C core answers the first call of a ufunc itself, its answer is the one the rules and NumPy give.
+def test_the_core_answers_a_first_call_as_the_rules_do(lazy_core):
+    """Where the C core answers the first call of a ufunc, a view function or a reduction itself, its answer is the one the rules and NumPy give.
 
-    The element type is the remembered one, or NumPy's resolver's, asked
-    by the core; the shape is by the two rules the core holds itself,
-    broadcasting and the matrix product's. Shapes that do not fit, operands
-    of length zero and whole numbers are not the core's to answer.
+    For a ufunc the element type is the remembered one, or NumPy's
+    resolver's, asked by the core, and the shape is by the two rules the
+    core holds, broadcasting and the matrix product's. For a view NumPy
+    gives the shape on a stand-in, and for a reduction the core has the rule
+    of the axes. Whatever the rules would decline, or NumPy raise for, is
+    not the core's to answer: it says so, and never anything else.
     """
     if lazy_core != "c":
-        pytest.skip("the rule is the C core's")
+        pytest.skip("these answers are the C core's")
     core = array._core
     rng = random.Random(SEED)
     shapes = ((), (1,), (3,), (4,), (3, 4), (4, 3), (1, 4), (3, 1), (2, 3, 4), (2, 1, 4), (1, 1, 1), (0,), (3, 0), (5, 1, 1, 4))
-    kinds = (numpy.float32, numpy.float64, numpy.int8, numpy.bool_, numpy.complex64)
+    kinds = (numpy.float32, numpy.float64, numpy.int8, numpy.uint8, numpy.bool_, numpy.complex64, numpy.dtype(">f8"),
+             numpy.dtype("f8", metadata={"unit": "m"}), numpy.dtype("U2"))
+    numbers = (2.0, 1j, numpy.float32(2.0), True, 0, 3, -5, rules.SMALL_WHOLE, rules.SMALL_WHOLE + 1, rules.LARGE_WHOLE, rules.LARGE_WHOLE + 1, 2 ** 70)
+    axes = (None, 0, 1, -1, 2, 5, (0, 1), (0, 0), (1, 0), True, 1.0, numpy.int64(0))
+
+    def operand() -> Any:
+        """Draw an operand: mostly a node, sometimes an `ndarray` or a number."""
+        choice = rng.random()
+        if choice < 0.7:
+            return node_of(rng.choice(shapes), rng.choice(kinds))
+        return numpy.zeros(rng.choice(shapes), rng.choice(kinds[:6])) if choice < 0.85 else rng.choice(numbers)
+
+    def call() -> tuple:
+        """Draw a call: a ufunc on operands, or a reduction or a view of one node with its settings."""
+        kind = rng.random()
+        if kind < 0.5:
+            ufunc = rng.choice((numpy.add, numpy.multiply, numpy.maximum, numpy.less, numpy.arctan2, numpy.logical_and, numpy.power,
+                                numpy.ldexp, numpy.negative, numpy.sqrt, numpy.matmul))
+            return ufunc, tuple(operand() for _ in range(ufunc.nin)), {}
+        node = node_of(rng.choice(shapes), rng.choice(kinds))
+        if kind < 0.8:
+            function = rng.choice((numpy.sum, numpy.mean, numpy.max, numpy.std, numpy.any, numpy.argmax, numpy.nanargmin, numpy.count_nonzero))
+            spelt = rng.choice((lambda: ((node,), {}), lambda: ((node, rng.choice(axes)), {}), lambda: ((node,), {"axis": rng.choice(axes)}),
+                                lambda: ((node,), {"axis": rng.choice(axes), "keepdims": rng.choice((True, False, 1))}),
+                                lambda: ((node, rng.choice(axes)), {"axis": 0}), lambda: ((node,), {"dtype": float})))()
+            return function, spelt[0], spelt[1]
+        function, rest = rng.choice(((numpy.transpose, ()), (numpy.transpose, ((1, 0),)), (numpy.transpose, ((0,),)), (numpy.swapaxes, (0, 1)),
+                                     (numpy.swapaxes, (0, 3)), (numpy.reshape, ((-1,),)), (numpy.reshape, ((4, 3),)), (numpy.reshape, ((5,),)),
+                                     (numpy.expand_dims, (0,)), (numpy.squeeze, ()), (numpy.ravel, ())))
+        return function, (node, *rest), {}
+
     answered = declined = 0
-    for ufunc in (numpy.add, numpy.multiply, numpy.maximum, numpy.less, numpy.arctan2, numpy.logical_and, numpy.negative, numpy.sqrt, numpy.matmul):
-        for _ in range(400):
-            operands = []
-            for _ in range(ufunc.nin):
-                choice = rng.random()
-                dtype, shape = rng.choice(kinds), rng.choice(shapes)
-                operands.append(node_of(shape, dtype) if choice < 0.7 else numpy.zeros(shape, dtype) if choice < 0.85
-                                else rng.choice((2.0, 1j, numpy.float32(2.0), 3, 0, -5, 127, 128, 2 ** 31 - 1, 2 ** 31, True)))
-            args = tuple(operands)
-            if not any(isinstance(operand, graph.Node) for operand in args):
-                continue
-            worked_out = outcome(lambda: rules._plan(ufunc, args, {}))  # Also remembers the types, as a first call does.
-            rules._plans.clear()
-            if rng.random() < 0.5:
-                rules._types.clear()  # The types for the first time too: the core asks NumPy's resolver itself.
-            found = core.plan(ufunc, args, {})
-            if found is core.MISS:
-                declined += 1
-                continue
-            answered += 1
-            assert (found[0], found[1], id(found[1]), found[2]) == worked_out, (ufunc.__name__, args)
-            assert rules.plan(ufunc, args, {}) == rules.Signature(*found)
-    assert answered > 500 and declined > 500
+    for _ in range(6_000):
+        function, args, kwargs = call()
+        if not any(isinstance(arg, graph.Node) for arg in args):
+            continue
+        worked_out = outcome(lambda: rules._plan(function, args, kwargs))  # Also remembers the types, as a first call does.
+        rules._plans.clear()
+        if rng.random() < 0.5:
+            rules._types.clear()  # The types for the first time too: the core asks NumPy's resolver itself.
+        try:
+            found = core.plan(function, args, kwargs)
+        except Exception as error:
+            # An error from NumPy's own call for the element type, which the rules raise too.
+            assert worked_out == (type(error).__name__, str(error)), (function.__name__, args, kwargs)
+            continue
+        if found is core.MISS:
+            declined += 1
+            continue
+        answered += 1
+        assert (found[0], found[1], found[2]) == (worked_out[0], worked_out[1], worked_out[3]), (function.__name__, args, kwargs)
+        # Which object the type is counts where it is NumPy's own: for another byte order each call makes a new one.
+        assert numpy.dtype(worked_out[1].type) is not worked_out[1] or id(found[1]) == worked_out[2], (function.__name__, args, kwargs)
+        assert rules.plan(function, args, kwargs) == rules.Signature(*found)
+    assert answered > 1_000 and declined > 1_000
 
 
 def random_index(rng: random.Random, shape: tuple[int, ...]) -> Any:
@@ -766,6 +798,11 @@ def test_the_core_stands_in_for_the_python_and_can_be_put_away(lazy_core):
         watched.setattr(rules, "first", first)  # What the core calls when it finds no answer.
         watched.setattr(array, "_view", by_method)  # What the Python methods `reshape`, `transpose` and `T` call.
         assert all(take()._node.pending for take in takes) and asked.calls == first.calls == by_method.calls == 0
+    # A call the rules declined is remembered as declined only for the Python method that takes it over next, and
+    # only for that very call: a road whose method never asks leaves nothing behind for another call to trip on.
+    stray = core.Road("binary", lambda array, other: "taken over", numpy.add, "add")
+    assert stray(x, [1.0, 2.0, 3.0, 4.0]) == "taken over"
+    assert isinstance(array._try_defer(numpy.add, "add", (x, x), {}), LazyArray)
     # An index that is one item is written as one item, not as a tuple of one.
     target, mask = lazy.zeros((3, 4)), x[:, 0] > 3
     target += 1.0
