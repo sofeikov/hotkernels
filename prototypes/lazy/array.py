@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 11
+CORE_VERSION = 13
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -1929,7 +1929,7 @@ def _set_up(core: Any) -> None:
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
                getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
                slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, AssignThrough=_AssignThrough,
-               assignable=_assignable, fitting=_fitting,
+               assignable=_assignable, types=rules._types, keep=rules.keep, spec_of=graph.spec_of, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
 
 

@@ -186,6 +186,14 @@ class Signature(NamedTuple):
 
 # The answers of `plan` so far, by what `_key` writes down of a call.
 _plans: dict[tuple, Signature] = {}
+# The element type NumPy's resolver gave for a ufunc and the types of its operands, with the call's kind, by
+# the ufunc and one item per operand: the identity of an array's or a NumPy scalar's `dtype` object, which is
+# NumPy's own and lives as long as NumPy does, or the type of a Python number. The answer does not depend on
+# any shape, so a call that differs from an earlier one in its shapes alone needs only the shapes broadcast,
+# which the C core does itself (`first_elementwise` in `_core.c`).
+_types: dict[tuple, tuple[np.dtype, str]] = {}
+# Entries of `_types` kept at most.
+TYPE_MEMORY_LIMIT = 4096
 # The shapes and element types that allow deferring, by their number: what
 # `_admissible` says of an operand, remembered.
 _admissible_specs: dict[int, bool] = {}
@@ -627,9 +635,16 @@ def _plan(operation: Callable[..., Any], args: tuple, kwargs: dict) -> Signature
         Exception: Whatever NumPy raises for these shapes and types.
     """
     kind = _kind(operation, args, kwargs)
-    if kind is None or not all(_admissible(operand) for operand in _array_operands(kind, operation, args)):
+    if kind is None:
         return None
-    unknown = not all(graph.is_known(_shape(operand)) for operand in _array_operands(kind, operation, args))
+    # One pass over the operands for what `_admissible` and `graph.is_known` say of each.
+    unknown = False
+    for operand in _array_operands(kind, operation, args):
+        if isinstance(operand, PYTHON_NUMBERS):
+            continue
+        if operand.dtype.kind not in DEFERRED_KINDS or 0 in operand.shape:
+            return None
+        unknown = unknown or not graph.is_known(operand.shape)
     if unknown and not _holds_for_any_length(kind, operation, args, kwargs):
         return None
     try:
@@ -754,20 +769,19 @@ def _kind(operation: Callable[..., Any], args: tuple, kwargs: dict) -> str | Non
     Returns:
         One of the kinds named above, or None for a call this layer does not defer.
     """
-    operands = all(_is_operand(arg) for arg in args)
     if operation is np.dot:
         arrays = len(args) == 2 and not kwargs and all(isinstance(arg, (Node, np.ndarray)) for arg in args)
         return MATRIX_PRODUCT if arrays and all(len(arg.shape) in DOT_DIMENSIONS for arg in args) else None
     if operation in COPIES:
         return ELEMENTWISE if len(args) == 1 and not kwargs and isinstance(args[0], Node) else None
     if isinstance(operation, np.ufunc):
-        if kwargs or not operands or len(args) != operation.nin:
+        if kwargs or len(args) != operation.nin or not _all_operands(args):
             return None  # where=, dtype=, casting= and the like are NumPy's to handle now.
         if operation is np.matmul:
             return MATRIX_PRODUCT
         return ELEMENTWISE if operation.signature is None and operation.nout == 1 else None
     if operation in SELECTIONS:
-        return ELEMENTWISE if operands and len(args) == 3 and not kwargs else None
+        return ELEMENTWISE if len(args) == 3 and not kwargs and _all_operands(args) else None
     if operation in ROUNDINGS:
         return ELEMENTWISE if _is_plain_rounding(args, kwargs) else None
     if operation in CASTS:
@@ -1042,8 +1056,13 @@ def _is_sound(shape: tuple[int, ...]) -> bool:
         NumPy cannot multiply, or a length that came out of arithmetic on a
         stand-in and stands for nothing.
     """
-    unknown = [length for length in shape if length >= graph.UNKNOWN_FLOOR]
-    return len(unknown) <= 1 and all(graph.is_issued(length) for length in unknown)
+    unknown = 0
+    for length in shape:
+        if length >= graph.UNKNOWN_FLOOR:
+            unknown += 1
+            if unknown > 1 or not graph.is_issued(length):
+                return False
+    return True
 
 
 def _is_plain_reduction(args: tuple, kwargs: dict) -> bool:
@@ -1065,6 +1084,21 @@ def _is_plain_reduction(args: tuple, kwargs: dict) -> bool:
     if by_position and ("axis" in kwargs or isinstance(args[1], Node)):
         return False
     return set(kwargs) <= REDUCTION_KEYWORDS
+
+
+def _all_operands(args: tuple) -> bool:
+    """Say whether every argument is something an element-by-element call can take.
+
+    Args:
+        args: The positional arguments of a call.
+
+    Returns:
+        What `_is_operand` says of each, together.
+    """
+    for arg in args:
+        if not _is_operand(arg):
+            return False
+    return True
 
 
 def _is_operand(arg: Any) -> bool:
@@ -1142,7 +1176,15 @@ def _elementwise_shape(operation: Callable[..., Any], args: tuple, kwargs: dict)
     Raises:
         ValueError: When the shapes do not broadcast.
     """
-    return np.broadcast_shapes(*(_shape(arg) for arg in _array_operands(ELEMENTWISE, operation, args)))
+    shapes = [_shape(arg) for arg in _array_operands(ELEMENTWISE, operation, args)]
+    # The commonest case needs no arithmetic: every operand has one shape, or is a number. A length that is not
+    # known goes to NumPy all the same, which refuses a size that does not fit the machine.
+    arrays = [shape for shape in shapes if shape != ()]
+    if not arrays:
+        return ()
+    if all(shape == arrays[0] for shape in arrays) and graph.is_known(arrays[0]):
+        return arrays[0]
+    return np.broadcast_shapes(*shapes)
 
 
 def _matmul_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> tuple[int, ...]:
@@ -1380,12 +1422,93 @@ def _element_type(kind: str, operation: Callable[..., Any], args: tuple, kwargs:
     """
     if kind in (VIEW, INDEXING, ORDERING):
         return args[0].dtype
+    if type(operation) is np.ufunc:
+        resolved = _resolved_type(operation, args)
+        if resolved is not None:
+            if len(_types) >= TYPE_MEMORY_LIMIT:
+                _types.clear()
+            _types[(operation, *(arg if type(arg) is type else id(arg) for arg in _resolver_types(args)))] = (resolved, kind)
+            return resolved
     if kind == NONZERO:
         return np.flatnonzero(probe(args[0])).dtype  # The three answer with one type, and `np.nonzero` with a tuple.
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")  # A probe holds zeros: 0 / 0 is not the user's doing.
         operands = len(_array_operands(kind, operation, args))
         return np.result_type(operation(*(probe(arg) for arg in args[:operands]), *args[operands:], **kwargs))
+
+
+def _resolved_type(operation: np.ufunc, args: tuple) -> np.dtype | None:
+    """Ask NumPy for a ufunc's result type from the operands' types alone, where that is the whole answer.
+
+    `ufunc.resolve_dtypes` is the step of a ufunc call that picks the loop
+    and the result's type. For operands that are arrays and numbers with a
+    fraction, nothing else in a call on zeros can change the answer or
+    raise, so the call itself, with its arrays of one element, its error
+    state and its warning filter, need not be made. A test holds the two
+    ways to each other for every ufunc of NumPy.
+
+    Args:
+        operation: A ufunc the rules have accepted.
+        args: Its operands.
+
+    Returns:
+        The element type of the result, or None wherever the call has to be
+        made to know: a whole number among the operands, whose value can
+        make NumPy raise; an element type that is not NumPy's own object for
+        it (another byte order, metadata), where the call's result need not
+        be the resolver's; and whenever the resolver raises, so that the
+        error comes from the call, in the call's words.
+    """
+    given = _resolver_types(args)
+    if given is None:
+        return None
+    try:
+        return operation.resolve_dtypes((*given, None))[-1]
+    except Exception:
+        return None
+
+
+def _resolver_types(args: tuple) -> list | None:
+    """Write a ufunc's operands down as NumPy's resolver takes them.
+
+    Args:
+        args: The operands.
+
+    Returns:
+        For each operand, its `dtype` object if it is an array or a NumPy
+        scalar with a fraction, and the type `float` or `complex` for a
+        Python number, which NumPy lets take the array's type. None when an
+        operand is anything else, or has an element type that is not
+        NumPy's own object for it.
+    """
+    given = []
+    for arg in args:
+        kind = type(arg)
+        if kind in _FRACTIONAL_NUMBERS:
+            given.append(kind)
+            continue
+        if kind is not Node and kind is not np.ndarray and kind not in _FRACTIONAL_SCALARS:
+            return None
+        dtype = arg.dtype
+        if np.dtype(dtype.type) is not dtype:
+            return None
+        given.append(dtype)
+    return given
+
+
+def keep(key: tuple, shape: tuple[int, ...], dtype: np.dtype, kind: str) -> Signature:
+    """Keep an answer the C core worked out from a remembered element type and the shapes of a call.
+
+    Args:
+        key: What `_key` writes down of the call.
+        shape: The operands' shapes, broadcast.
+        dtype: The element type `_types` holds for the operands' types.
+        kind: The call's kind.
+
+    Returns:
+        The signature as `_remember` keeps it.
+    """
+    return _remember(key, Signature(shape, dtype, kind))
 
 
 def probe(operand: Any) -> Any:
