@@ -11,6 +11,7 @@ It is written for someone who has used NumPy for years, is comfortable with the 
 - **Twenty-one of 22 beat the compiler**, by anything from 1.1x to 23x, and all 22 beat NumPy at every size measured. [Chapters 5]([[ root ]]report/selection/) and [6]([[ root ]]report/arithmetic/).
 - **They reach unmodified code** by changing a handful of function pointers inside NumPy. A call no kernel takes costs about a nanosecond more. [Chapter 7]([[ root ]]report/delivery/).
 - **Several results are narrower than their headline**, and the judge has blind spots. [Chapter 8]([[ root ]]report/results/).
+- **A kernel for a whole expression needs the expression whole**, which no hook sees. A lazy layer, designed and prototyped but not in the package, writes NumPy code down as a graph and computes it on request, with NumPy's results bit for bit. [Chapter 10]([[ root ]]report/lazy/).
 
 ## The whole system on one page
 
