@@ -370,16 +370,18 @@ def _history_run(index: int, run: H.Run) -> dict:
     """Describe one recorded run for the history figure.
 
     Args:
-        index: The run's position in commit order, by which the series refer to it.
+        index: The run's position in time order, by which the series refer to it.
         run: The run.
 
     Returns:
-        What the night's table shows, with the run's versions and load.
+        What the night's table shows, with the run's versions and load, and
+        placed_at: where the run sits on the time axis.
     """
     meta = run.meta
     return {
         "id": index, "machine": run.machine, "commit": run.commit[:H.SHORT_COMMIT],
-        "commit_date": meta["commit_date"], "recorded_at": meta["recorded_at"], "source": meta["source"],
+        "commit_date": meta["commit_date"], "recorded_at": meta["recorded_at"],
+        "placed_at": run.placed_at.isoformat(), "source": meta["source"],
         "numpy": meta["numpy"], "python": meta["python"], "hotkernels": meta["hotkernels"],
         "load_average": meta.get("load_average"), "load_average_end": meta.get("load_average_end"), "busy": run.busy,
         "rows": [{"workload": r["workload"], "size": r["size"], "identical": r["identical"],

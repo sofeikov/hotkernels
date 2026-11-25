@@ -98,7 +98,7 @@ A **series** is the runs of one workload at one size on one machine. Within a se
 
 The **headline** is the geometric mean, over the workloads, of their speedup at size `M`, one per run. It is comparable only while the set of workloads is the same, so adding or removing a workload is a break in the headline too. Workloads will be added often at first; the per-workload charts under the headline carry the history across those breaks.
 
-Runs are ordered by commit date, and runs of the same commit by `recorded_at`.
+Runs are ordered by `recorded_at`, when they started. A backfill run times a past commit, so it takes its commit's date instead.
 
 ### Changes on the time axis
 
@@ -198,7 +198,7 @@ Steps 2, 3 and 4 are built. The page came before the week of nightly runs, from 
 
 - **`--size` takes a list**, `--size M,L`, instead of a new `--sizes`.
 - **Each row records `requires`**, the libraries the workload needs, so a break is decided per workload without importing the workloads.
-- **The time axis is the commit date.** Runs of one commit under the same versions form a group: the line goes through the group's median, and the group's range is the band. The headline and the per-workload charts use the same rule.
+- **The time axis is the date of the run.** It was first the commit's date, with runs of one commit drawn above one another. Read as a date axis, that put three nights of runs on the morning the commit was merged. Each run now sits at `recorded_at`, a backfill run at its commit's date, and the line goes through every run. Consecutive runs of one commit under the same versions still form a group, and the band encloses the group's dots: its width is the nights, its height the spread. The headline and the per-workload charts use the same rule.
 - **Close merges share one marker.** Many pull requests merge within the same hour, and their labels overlapped.
 - **Where the site reads the runs:** `origin/perf-history`, else a local `perf-history` branch, else no runs and a warning. `pages.yml` warns instead of failing while the branch does not exist.
 - **The night's table sorts by its own column buttons.** No table on the site sorted before, so there was nothing to follow.

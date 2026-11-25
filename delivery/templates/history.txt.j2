@@ -1,8 +1,8 @@
-{# The report of `delivery history`: one block per series, one line per recorded run, in commit order. #}
+{# The report of `delivery history`: one block per series, one line per recorded run, in the order they ran. #}
 {% if not blocks or not blocks | selectattr("lines") | list %}
 No runs of {{ machine }} at size {{ size }} on {{ ref }}.{{ " Machines with runs: " ~ machines | join(", ") if machines else "" }}
 {% else %}
-Runs of {{ machine }} at size {{ size }}, from {{ ref }}, in commit order.
+Runs of {{ machine }} at size {{ size }}, from {{ ref }}, in the order they ran.
 Marks: break = Python, NumPy or a library changed, so the line before is not comparable;
 busy = load average above {{ busy_load }}; manual or backfill = not a nightly run.
 {% for block in blocks %}
