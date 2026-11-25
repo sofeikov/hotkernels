@@ -157,6 +157,15 @@ class Run:
         return datetime.fromisoformat(self.meta["recorded_at"])
 
     @property
+    def placed_at(self) -> datetime:
+        """Return where the run sits on the time axis.
+
+        A run sits at the time it started. A backfill run times a past commit,
+        so it sits at that commit's date, among the runs it would have had.
+        """
+        return self.commit_date if self.meta["source"] == BACKFILL else self.recorded_at
+
+    @property
     def busy(self) -> bool:
         """Return whether the machine was in use at the start or at the end of the run."""
         loads = (self.meta.get("load_average"), self.meta.get("load_average_end"))
@@ -234,7 +243,8 @@ def load_runs(ref: str = DEFAULT_REF, cwd: Path = ROOT) -> list[Run]:
         cwd: The repository.
 
     Returns:
-        The runs, ordered by commit date and, for one commit, by when they ran.
+        The runs, ordered by where they sit on the time axis (Run.placed_at)
+        and, at the same place, by when they ran.
 
     Raises:
         HistoryError: If the ref does not exist.
@@ -247,19 +257,19 @@ def load_runs(ref: str = DEFAULT_REF, cwd: Path = ROOT) -> list[Run]:
     for path, text in zip(paths, _read_blobs(ref, paths, cwd)):
         data = json.loads(text)
         runs.append(Run(path, Path(path).parent.name, data["meta"], tuple(data["rows"])))
-    return sorted(runs, key=lambda r: (r.commit_date, r.recorded_at))
+    return sorted(runs, key=lambda r: (r.placed_at, r.recorded_at))
 
 
 @dataclass(frozen=True)
 class Group:
-    """The runs of one series that timed the same commit under the same versions.
+    """Consecutive runs of one series that timed the same commit under the same versions.
 
     Their spread is how far the figure moves by chance; the chart draws it as a band.
     """
 
     # The commit timed.
     commit: str
-    # Its date: where the group sits on the time axis.
+    # The date of the commit timed.
     commit_date: datetime
     # (run, speedup) for each run in the group, in the order they ran.
     points: tuple[tuple[Run, float], ...]
@@ -282,7 +292,7 @@ class Series:
     workload: str | None
     # The size's name.
     size: str
-    # The groups, in commit order.
+    # The groups, in time order.
     groups: tuple[Group, ...] = field(default=())
 
 
@@ -293,7 +303,7 @@ def _group(machine: str, workload: str | None, size: str, values: list[tuple[Run
         machine: The machine's slug.
         workload: The workload's name, or None for the headline.
         size: The size's name.
-        values: (run, speedup, what must not change) per run, in commit order.
+        values: (run, speedup, what must not change) per run, in time order.
 
     Returns:
         The series. Consecutive runs fall into the same group while the commit
@@ -315,7 +325,7 @@ def workload_series(runs: list[Run], machine: str, workload: str, size: str) -> 
     """Build the series of one workload at one size on one machine.
 
     Args:
-        runs: Every run, in commit order.
+        runs: Every run, in time order (as load_runs returns them).
         machine: The machine's slug.
         workload: The workload's name.
         size: The size's name.
@@ -336,7 +346,7 @@ def headline_series(runs: list[Run], machine: str, size: str = HEADLINE_SIZE) ->
     """Build the headline of one machine: the geometric mean of the workloads' speedups per run.
 
     Args:
-        runs: Every run, in commit order.
+        runs: Every run, in time order (as load_runs returns them).
         machine: The machine's slug.
         size: The size the mean is over.
 
@@ -425,14 +435,15 @@ def changes(runs: list[Run], cwd: Path = ROOT) -> list[Change]:
     can be improved without running anything again.
 
     Args:
-        runs: Every run, in commit order.
+        runs: Every run, in any order.
         cwd: The repository, with the full history of main.
 
     Returns:
         The changes, oldest first. A commit the repository does not have is
         skipped with a warning, as are the changes on either side of it.
     """
-    commits = list(dict.fromkeys(run.commit for run in runs))
+    # The merges between two commits are found in commit order, whatever order the runs were taken in.
+    commits = list(dict.fromkeys(run.commit for run in sorted(runs, key=lambda r: r.commit_date)))
     present = []
     for commit in commits:
         if _has_commit(commit, cwd):

@@ -4,14 +4,14 @@
 
 <figure class="widget">
 <div data-widget="history" data-repo="[[ site.repo ]]"></div>
-<figcaption>The headline is the geometric mean, over the workloads, of how many times faster each runs with hotkernels at size M. Each dot is one run, placed at the date of the commit it timed. A dashed line is a merge to <code>main</code> that left a release note; choose it to read the note. Choose a dot to see that run's workloads in the table, and below it one chart per workload at sizes M and L.</figcaption>
+<figcaption>The headline is the geometric mean, over the workloads, of how many times faster each runs with hotkernels at size M. Each dot is one run, placed at the date it ran. A dashed line is a merge to <code>main</code> that left a release note; choose it to read the note. Choose a dot to see that run's workloads in the table, and below it one chart per workload at sizes M and L.</figcaption>
 </figure>
 
 ## How to read it
 
 **A gap in a line** means that Python, NumPy or a library a workload calls changed between two runs. A speedup that moves at a gap is the new version's doing until shown otherwise. Adding or removing a workload is also a gap in the headline, so the charts per workload carry the history across it.
 
-**A band** is the spread of several runs of one commit. A night with no new commit runs the same code again, so the band shows how far a figure moves by chance. Until the bands are known, a step smaller than them is not a change.
+**A band** encloses consecutive runs of one commit: its width is the nights they ran on, its height their spread. A night with no new commit runs the same code again, so the band shows how far a figure moves by chance. Until the bands are known, a step smaller than them is not a change.
 
 **A hollow dot** is a run taken while the machine was in use: a load average above 1.0 when the run started or when it finished. The speedup is a ratio of two times taken in the same run, and moves less with the load than either time does.
 

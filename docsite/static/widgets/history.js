@@ -2,11 +2,12 @@
 // run, with the merges that changed the package marked on the time axis.
 //
 // Data: data/history.json, which the build reads from the perf-history branch
-// (delivery/history.py). Runs are placed at the date of the commit they timed,
-// so runs of one commit on several nights stand above one another, and their
-// spread is drawn as a band: how far a figure moves by chance. A change of
-// Python, NumPy or a library breaks a line, as does a change of the set of
-// workloads in the headline.
+// (delivery/history.py). Runs are placed at the date and time they started,
+// a backfill run at the date of the commit it timed,
+// and the line goes through every run. Runs of one commit on several nights
+// are enclosed in a band that spans their dates and their values: how far a
+// figure moves by chance. A change of Python, NumPy or a library breaks a
+// line, as does a change of the set of workloads in the headline.
 // Attributes: data-repo  the repository's URL, to link a change to its pull request.
 // Pointing at a dot, or tabbing to it, fills the table under the chart with that run.
 
@@ -23,8 +24,6 @@ const DAY_MS = 86400000;
 // Steps of the date axis, in days; the first that keeps the ticks at MAX_DATE_TICKS or fewer is used.
 const DATE_STEPS = [1, 2, 7, 14, 28, 56, 91, 182, 364];
 const MAX_DATE_TICKS = 7;
-// Horizontal distance between the dots of runs of one commit, in viewBox units, so each can be pointed at.
-const RUN_SPREAD = 5;
 // Rows of change labels above the headline, so that labels of close merges do not overlap.
 const LABEL_ROWS = 2;
 // Merges closer than this on the time axis, in viewBox units, share one marker.
@@ -32,7 +31,7 @@ const MERGE_GAP = 14;
 
 export const css = `
 .hs-line { fill: none; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
-.hs-band { stroke-width: 7; stroke-linecap: round; opacity: .28; }
+.hs-band { opacity: .2; }
 .hs-dot { stroke-width: 1.6; cursor: pointer; outline: none; }
 .hs-dot:hover, .hs-dot:focus { stroke: var(--ink); stroke-width: 2.2; }
 .hs-dot.on { stroke: var(--ink); stroke-width: 2.4; }
@@ -86,9 +85,15 @@ function dateTicks(lo, hi) {
   return out;
 }
 
-// The time span shown: every group, with a margin; at least two days so that one commit sits in the middle.
+// Where a run's dot sits on the time axis, in milliseconds: when it started, or for a
+// backfill run the date of the commit it timed (Run.placed_at in delivery/history.py).
+function runTime(sr, id) {
+  return Date.parse(sr.runs[id].placed_at);
+}
+
+// The time span shown: every run, with a margin; at least a day on each side so that one run sits in the middle.
 function dateDomain(series) {
-  const dates = series.flatMap((sr) => sr.groups.map((g) => Date.parse(g.date)));
+  const dates = series.flatMap((sr) => sr.groups.flatMap((g) => g.runs.map(([id]) => runTime(sr, id))));
   let lo = Math.min(...dates), hi = Math.max(...dates);
   const pad = Math.max(DAY_MS, (hi - lo) * 0.04);
   return [lo - pad, hi + pad];
@@ -137,7 +142,7 @@ function chart(box, series, { changes = [], labels = false, selected = null, onR
   }
   if (box === BIG) {
     axis.append(s("text", { x: LEFT, y: TOP - 14, "text-anchor": "start" }, "faster than NumPy, by"),
-      s("text", { x: (LEFT + W - RIGHT) / 2, y: H - 4, "text-anchor": "middle" }, "date of the commit timed"));
+      s("text", { x: (LEFT + W - RIGHT) / 2, y: H - 4, "text-anchor": "middle" }, "date of the run"));
   }
   svg.append(axis, s("line", { class: "hs-one", x1: LEFT, x2: W - RIGHT, y1: y(1), y2: y(1) }));
 
@@ -153,21 +158,24 @@ function chart(box, series, { changes = [], labels = false, selected = null, onR
   });
 
   for (const sr of series) {
-    // A break starts a new piece of line, so that two runs that cannot be compared are not joined.
-    const d = sr.groups.map((g, i) => `${i === 0 || g.break ? "M" : "L"}${x(Date.parse(g.date)).toFixed(1)} ${y(g.value).toFixed(1)}`).join(" ");
-    svg.append(s("path", { class: "hs-line", d, style: `stroke:${sr.color}` }));
+    // Bands first, so that the lines are drawn over them. A band encloses the dots of one commit's runs.
     for (const g of sr.groups.filter((g) => g.runs.length > 1)) {
-      const vs = g.runs.map((r) => r[1]);
-      const gx = x(Date.parse(g.date));
-      svg.append(s("line", { class: "hs-band", x1: gx, x2: gx, y1: y(Math.min(...vs)), y2: y(Math.max(...vs)), style: `stroke:${sr.color}` }));
+      const ts = g.runs.map(([id]) => x(runTime(sr, id))), vs = g.runs.map((r) => y(r[1]));
+      const x0 = Math.min(...ts) - dot, y0 = Math.min(...vs) - dot;
+      svg.append(s("rect", { class: "hs-band", x: x0, y: y0, width: Math.max(...ts) + dot - x0, height: Math.max(...vs) + dot - y0,
+        rx: dot, style: `fill:${sr.color}` }));
     }
+    // A break starts a new piece of line, so that two runs that cannot be compared are not joined.
+    const d = sr.groups.flatMap((g, i) => g.runs.map(([id, value], j) =>
+      `${(i === 0 || g.break) && j === 0 ? "M" : "L"}${x(runTime(sr, id)).toFixed(1)} ${y(value).toFixed(1)}`)).join(" ");
+    svg.append(s("path", { class: "hs-line", d, style: `stroke:${sr.color}` }));
   }
   // Dots go on top of every line. A busy run is drawn hollow.
   for (const sr of series) {
     for (const g of sr.groups) {
-      g.runs.forEach(([id, value], i) => {
+      g.runs.forEach(([id, value]) => {
         const run = sr.runs[id];
-        const cx = x(Date.parse(g.date)) + (i - (g.runs.length - 1) / 2) * RUN_SPREAD;
+        const cx = x(runTime(sr, id));
         svg.append(s("circle", {
           class: `hs-dot${id === selected ? " on" : ""}`, cx, cy: y(value), r: dot, tabindex: box === BIG ? 0 : null,
           style: `fill:${run.busy ? "var(--bg-raised)" : sr.color};stroke:${run.busy ? sr.color : "var(--bg-raised)"}`,

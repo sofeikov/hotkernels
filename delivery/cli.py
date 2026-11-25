@@ -315,7 +315,7 @@ def history_report(
     size: str = typer.Option(H.HEADLINE_SIZE, help="The size: S, M or L."),
     ref: str = typer.Option(H.DEFAULT_REF, help="The branch the runs are read from."),
 ) -> None:
-    """Print the recorded workload runs of one machine, in commit order.
+    """Print the recorded workload runs of one machine, in the order they ran.
 
     Reads the data branch through git; run `git fetch origin perf-history` first.
 
