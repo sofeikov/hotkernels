@@ -22,6 +22,7 @@ Try it from the repository's root with `uv run python`.
 - Makes a write into an array (`w -= step`, `x[i] = v`, `out=x`) a node of the graph, so a loop that updates its arrays in place is one graph. A write into memory the user also holds is made at once.
 - Gives values through `gather()`, and computes on the spot where something else needs them (`float(x)`, `if x > 0:`, `np.asarray(x)`), saying so in the log once per line and counting every time for `lazy_report()`. A number read from an array that has its values computes nothing and is not counted. `get_lazy(strict=True)` gives arrays that raise `NotGathered` there instead.
 - Computes the graph one node at a time, each with the call the user wrote, spelled the same way, so results are NumPy's and nothing is faster. With `hotkernels.install()` in effect those calls reach the kernels as the eager program's do.
+- With `fuse.enable()`, computes an expression the graph holds, such as `a + s * b` or a whole stencil, by one kernel call in one pass over memory, with NumPy's bits. See [Fusion](#fusion).
 - Writes a node in 1.4 to 2.5 µs in Python, and in 0.4 to 0.7 µs with its C core built. What a node needs and a loop repeats is remembered: the shape and element type of a call, the line that wrote it, the error settings in effect. Each memory gives the answer that asking again would give. The core is the quick road of the Python: it finds a remembered answer, and for the first call of a ufunc, a reduction or a view function it asks NumPy for the element type as the Python does and works the shape out by a rule it holds beside Python's. A program built once in a fresh process takes 0.17 ms for 23 operations and 0.33 ms for the 55 of a transformer block, where NumPy's first run of the same programs takes 0.08 ms and 0.27 ms.
 - Patches nothing: `get_lazy()` returns an object, and the `numpy` module and other modules' imports are as they were. An `ndarray` that exists enters with `np.asarray(a)`.
 
@@ -39,7 +40,10 @@ Try it from the repository's root with `uv run python`.
 | [record.py](record.py) | The graph as an object, and the mode that records the graphs a block of code produced |
 | [report.py](report.py) | What was computed without being asked, ranked: `lazy_report()` |
 | [view.py](view.py), [templates/](templates) | The page: the program's code and its graphs. `graph.html.j2`, `graph.js`, `graph.css` |
-| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write |
+| [fuse.py](fuse.py) | Fusion: reading expressions off the graph, the library of shapes, covering an expression with kernel calls, and computing a group. Optional: nothing imports it until `fuse.enable()` |
+| [_fused.c](_fused.c), [build_fused.py](build_fused.py) | The call into a fused kernel on arrays of any shape, in C, and the command that builds it with the kernels |
+| [kernels/](kernels) | The fused kernels, one directory each, checked by the judge as the kernels of `kernels/` are |
+| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write. For fusion: `corpus.py`, twelve programs that run with NumPy or with the stand-in, three of them copied into `vendor/`; `mine.py`, which ranks the shapes of expression in them; and `fusion_time.py`, which times each three ways |
 
 ## Looking at its graphs
 
@@ -81,10 +85,43 @@ uv run python -m prototypes.lazy.programs.build_time
 
 Writes each example program's graph down and drops it without a gather, and prints the time for the graph and per operation, beside the time NumPy takes to compute the same program on the small arrays used. A second table times single lines, each made and dropped. `--no-core` times Python alone. Run it on a machine that is doing nothing else.
 
+## Fusion
+
+The design and what was measured are in [docs/lazy-fusion-design.md](../../docs/lazy-fusion-design.md).
+
+```bash
+uv run python -m prototypes.lazy.build_fused      # assemble the fused kernels into the module that calls them
+```
+
+```python
+from prototypes.lazy import fuse, get_lazy
+
+fuse.enable()                   # False, and nothing changes, if the module is not built
+np = get_lazy()
+w = np.asarray(weights) - 0.1 * np.asarray(gradient)
+w.gather()                      # one kernel call, one pass, NumPy's bits
+fuse.STATS                      # what was planned, which kernels ran, what was left to NumPy
+fuse.disable()
+```
+
+- **What is fused** is an expression of additions, subtractions, multiplications, divisions, comparisons under `np.where` and a few more on float64 arrays, whose intermediates nothing else reads, where the library has a kernel for its shape or for parts of it. Everything else is computed by NumPy's own calls, as before.
+- **Fourteen kernels**, hand-written NEON for ARM64, in [kernels/](kernels/README.md): nine shapes of two operations that occur across programs, a sum of squares, and four whole stencil expressions. On another architecture each is built from its C reference.
+- **Arrays of fewer than 16,384 elements are left alone:** reading expressions off a graph costs about two microseconds a node, which a kernel wins back only on larger arrays. `fuse.MIN_ELEMENTS` is the floor.
+
+Three tools, all needing `--group apps` for the two programs that use SciPy:
+
+```bash
+uv run --group apps python -m prototypes.lazy.programs.mine --size large          # which shapes occur, and what they cost
+uv run --group apps python -m prototypes.lazy.programs.fusion_time --size large   # each program: NumPy, lazy, fused
+uv run --group apps python -m prototypes.lazy.programs.fusion_time --install      # the same under hotkernels.install() too
+```
+
+Run them on a machine that is doing nothing else.
+
 ## Testing it
 
 ```bash
-uv run --group dev pytest tests/test_lazy_prototype.py tests/test_lazy_graphs.py tests/test_lazy_building.py
+uv run --group dev pytest tests/test_lazy_prototype.py tests/test_lazy_graphs.py tests/test_lazy_building.py tests/test_lazy_fusion.py
 ```
 
-Each test holds one rule of the design to what the real `numpy` module gives for the same lines. Those of `test_lazy_building.py` hold what the layer remembers while it writes a graph to what it would work out from nothing, and what the C core answers for a first call to what the rules answer. Every test runs twice, in Python alone and with the C core, which is built for the run; the second is skipped where clang is missing.
+Each test holds one rule of the design to what the real `numpy` module gives for the same lines. Those of `test_lazy_building.py` hold what the layer remembers while it writes a graph to what it would work out from nothing, and what the C core answers for a first call to what the rules answer. Those of `test_lazy_fusion.py` hold every fused result, warning and error to NumPy's, and run the programs of the corpus with fusion on; they build the fused kernels for the run and are skipped where clang is missing. Every test runs twice, in Python alone and with the C core, which is built for the run; the second is skipped where clang is missing.

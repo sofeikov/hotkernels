@@ -1,7 +1,7 @@
 <p class="lede">Every kernel in this report makes one NumPy call faster. A line of real code is rarely one call: <code>np.exp(a * b + c).sum()</code> is four, and NumPy makes them one after another, each reading its inputs from memory and writing a whole new array for the next to read back. Doing the four in one pass needs something that sees the expression whole, and no hook into NumPy ever does. This chapter is about a design that does: NumPy code whose operations are written down as a graph instead of being computed, and computed when the program asks.</p>
 
 ::: note A design with a prototype, not part of the package
-What this chapter describes is a proposal under review, [docs/lazy-design.md](repo:docs/lazy-design.md), and a prototype that follows it, in [prototypes/lazy/](repo:prototypes/lazy). Nothing here is installed with `hotkernels`, and the names below (`hotkernels.get_lazy()`, `gather()`) are the ones the design proposes. **It makes nothing faster yet, and is not meant to.** Its first job is to write the graph down correctly and give NumPy's results bit for bit; what the graph is for comes [at the end](#what-the-graph-is-for). Every behaviour shown in the figures was run on the prototype, and every timing was taken on an Apple M1 Pro.
+What this chapter describes is a proposal under review, [docs/lazy-design.md](repo:docs/lazy-design.md), and a prototype that follows it, in [prototypes/lazy/](repo:prototypes/lazy). Nothing here is installed with `hotkernels`, and the names below (`hotkernels.get_lazy()`, `gather()`) are the ones the design proposes. **The layer this chapter describes makes nothing faster, and is not meant to.** Its first job is to write the graph down correctly and give NumPy's results bit for bit; what the graph is for comes [at the end](#what-the-graph-is-for), and a first build of it, kernels that compute a whole expression in one pass, is a document of its own, [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md). Every behaviour shown in the figures was run on the prototype, and every timing was taken on an Apple M1 Pro.
 :::
 
 ## One call at a time
@@ -202,7 +202,7 @@ For whole programs, written down and dropped without a gather, so that the time 
 | The regression, 50 gradient steps | 954 | 1.67 ms | 0.52 ms | 0.43 ms |
 | A transformer block, 10 in a row | 550 | 1.35 ms | 0.50 ms | 1.17 ms |
 
-With the core, a node costs what NumPy's own work costs on a little under a thousand elements. On small arrays the first build is therefore slower than NumPy, and close to it on large ones. That is accepted: the first build is there to get the graph right, and nothing computes it faster yet.
+With the core, a node costs what NumPy's own work costs on a little under a thousand elements. On small arrays the first build is therefore slower than NumPy, and close to it on large ones. That is accepted: the first build is there to get the graph right. Computing it faster is what [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md) takes up.
 
 ## Looking at the graph
 
@@ -226,7 +226,7 @@ For more than a dozen operations there is a recording mode and a page. `hotkerne
 
 ## What the graph is for
 
-None of this is part of the first build, and no gain is claimed. It is why the first build is shaped the way it is.
+None of this is part of the first build, and no gain is claimed here. It is why the first build is shaped the way it is. The third way of the second point has a first build in the prototype, with fourteen kernels and its gain measured on twelve programs: [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md).
 
 - **A fusible group can be read off the graph:** connected element-by-element nodes of one output shape, perhaps ending in a reduction. The eight operations of GELU are one; in the regression, `(X @ w - y) ** 2` and its `mean` are one after the matrix product. [Figure 1](#one-call-at-a-time) counts what computing such a group in one pass would save.
 - **A group can be computed three ways, and the graph does not care which:** node by node with NumPy, as now; with NumPy's own calls a cache-sized block at a time, which removes the passes over main memory and keeps NumPy's bits; or with one kernel for the whole expression.
