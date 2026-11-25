@@ -279,11 +279,12 @@ def test_the_type_resolver_answers_as_the_call_on_one_element_does(monkeypatch):
 
 
 def test_the_core_broadcasts_as_numpy_does(lazy_core):
-    """Where the C core answers a call of types it has met and shapes it has not, its answer is the one the rules and NumPy give.
+    """Where the C core answers the first call of a ufunc itself, its answer is the one the rules and NumPy give.
 
-    The element type is the remembered one; the shape is the one rule the
-    core holds itself, broadcasting. Shapes that do not broadcast and
-    operands of length zero are not the core's to answer.
+    The element type is the remembered one, or NumPy's resolver's, asked
+    by the core; the shape is by the two rules the core holds itself,
+    broadcasting and the matrix product's. Shapes that do not fit, operands
+    of length zero and whole numbers are not the core's to answer.
     """
     if lazy_core != "c":
         pytest.skip("the rule is the C core's")
@@ -305,6 +306,8 @@ def test_the_core_broadcasts_as_numpy_does(lazy_core):
                 continue
             worked_out = outcome(lambda: rules._plan(ufunc, args, {}))  # Also remembers the types, as a first call does.
             rules._plans.clear()
+            if rng.random() < 0.5:
+                rules._types.clear()  # The types for the first time too: the core asks NumPy's resolver itself.
             found = core.plan(ufunc, args, {})
             if found is core.MISS:
                 declined += 1
@@ -752,11 +755,12 @@ def test_the_core_stands_in_for_the_python_and_can_be_put_away(lazy_core):
     takes = (lambda: whole + 1, lambda: whole * True, lambda: 2 - x, lambda: row.transpose(0), lambda: x.reshape(2, 6), lambda: x.sum(0))
     for take in takes:
         take()
-    asked, by_method = Counted(rules.plan), Counted(array._view)
+    asked, first, by_method = Counted(rules.plan), Counted(rules.first), Counted(array._view)
     with pytest.MonkeyPatch.context() as watched:
         watched.setattr(rules, "plan", asked)
+        watched.setattr(rules, "first", first)  # What the core calls when it finds no answer.
         watched.setattr(array, "_view", by_method)  # What the Python methods `reshape`, `transpose` and `T` call.
-        assert all(take()._node.pending for take in takes) and asked.calls == 0 and by_method.calls == 0
+        assert all(take()._node.pending for take in takes) and asked.calls == first.calls == by_method.calls == 0
     # An index that is one item is written as one item, not as a tuple of one.
     target, mask = lazy.zeros((3, 4)), x[:, 0] > 3
     target += 1.0
