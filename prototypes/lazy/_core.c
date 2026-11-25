@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 11
+#define CORE_VERSION 13
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -79,6 +79,10 @@ static PyTypeObject *Into;           /* `array._Into` */
 static PyTypeObject *Through;        /* `array._AssignThrough`, with the fields of `_Select` */
 static Py_ssize_t through_at[X_FIELDS];
 static PyObject *assignable;         /* `array._assignable` */
+static PyObject *types;              /* `rules._types` */
+static PyObject *python_keep;        /* `rules.keep` */
+static PyObject *python_spec_of;     /* `graph.spec_of` */
+static PyObject *elementwise_kind;   /* `rules.ELEMENTWISE` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
 static PyObject *write_kind;         /* `rules.WRITE` */
@@ -449,15 +453,22 @@ spec_part(PyObject *node, Marks *marks)
     }
     PyObject *found = PyDict_GetItemWithError(specs, key); /* (number, dtype), borrowed. */
     Py_DECREF(key);
-    if (found == NULL) {
-        return PyErr_Occurred() ? NULL : Miss; /* A shape and type not met before: Python gives them a number. */
+    if (found == NULL && PyErr_Occurred()) {
+        return NULL;
     }
-    if (!unknown) {
-        /* A node that was not asked for its number yet, as a new leaf is: it gets the one its shape and type
-         * have, as `graph.spec` would give it. The number is a fact about the node, not an answer. */
-        Py_SETREF(SLOT(node, node_at[N_SPEC]), Py_NewRef(PyTuple_GET_ITEM(found, 0)));
+    if (unknown) {
+        /* Under placeholders: a shape not met before is left to Python. */
+        return found ? Py_NewRef(PyTuple_GET_ITEM(found, 0)) : Miss;
     }
-    return Py_NewRef(PyTuple_GET_ITEM(found, 0));
+    /* A node that was not asked for its number yet, as a new leaf is: it gets the one its shape and type have,
+     * as `graph.spec` would give it, and Python gives them one if they have none. */
+    PyObject *number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0))
+                             : PyObject_CallFunctionObjArgs(python_spec_of, shape, SLOT(node, node_at[N_DTYPE]), NULL);
+    if (number == NULL) {
+        return NULL;
+    }
+    Py_SETREF(SLOT(node, node_at[N_SPEC]), Py_NewRef(number));
+    return number;
 }
 
 /* What `rules._array_part` writes for an exact `ndarray`: the number of its shape and `dtype` object, negated. */
@@ -468,18 +479,20 @@ ndarray_part(PyObject *array)
     PyObject *dtype = shape ? PyObject_GetAttr(array, s_dtype) : NULL;
     PyObject *identity = dtype ? PyLong_FromVoidPtr(dtype) : NULL;
     PyObject *key = identity ? PyTuple_Pack(2, shape, identity) : NULL;
+    PyObject *number = NULL, *negated = NULL;
+    if (key != NULL) {
+        PyObject *found = PyDict_GetItemWithError(specs, key); /* (number, dtype), borrowed. */
+        /* A shape and type not met before get their number from Python, as `rules._array_part` has it. */
+        number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0))
+                 : PyErr_Occurred() ? NULL : PyObject_CallFunctionObjArgs(python_spec_of, shape, dtype, NULL);
+        negated = number ? PyNumber_Negative(number) : NULL;
+    }
     Py_XDECREF(shape);
-    Py_XDECREF(dtype); /* The array keeps it alive, and so does the memory if it is there. */
+    Py_XDECREF(dtype);
     Py_XDECREF(identity);
-    if (key == NULL) {
-        return NULL;
-    }
-    PyObject *found = PyDict_GetItemWithError(specs, key); /* (number, dtype), borrowed. */
-    Py_DECREF(key);
-    if (found == NULL) {
-        return PyErr_Occurred() ? NULL : Miss;
-    }
-    return PyNumber_Negative(PyTuple_GET_ITEM(found, 0));
+    Py_XDECREF(key);
+    Py_XDECREF(number);
+    return negated;
 }
 
 /* What `rules._setting_part` writes: the type with the value for a plain value, item by item for a tuple, and
@@ -689,6 +702,125 @@ key_of(PyObject *rule, PyObject *unwrapped, PyObject *kwargs, Marks *marks)
     return key;
 }
 
+/* The answer for an element-by-element ufunc call whose operands' types were met before and whose shapes were
+ * not: the element type is the one NumPy's resolver gave for those types (`rules._types`), and the shape is the
+ * operands' shapes broadcast, which is the one rule of a shape this file holds; a test holds it to NumPy's. `key` is
+ * the call's plain key, under which Python then keeps the answer. A new reference; `Miss` wherever the types are
+ * not remembered or `rules._plan` would say anything but "deferred": an operand of length zero, shapes that do not
+ * broadcast, which NumPy has words for. */
+static PyObject *
+first_elementwise(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(unwrapped), dimensions = 0;
+    PyObject *shapes[8] = {NULL};
+    PyObject *result = Miss, *shape = NULL;
+    if (count == 0 || count > 8) {
+        return Miss;
+    }
+    PyObject *written = PyTuple_New(1 + count);
+    if (written == NULL) {
+        return NULL;
+    }
+    PyTuple_SET_ITEM(written, 0, Py_NewRef(ufunc));
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(unwrapped, place);
+        PyObject *part = NULL;
+        if (Py_TYPE(arg) == Node) {
+            part = PyLong_FromVoidPtr(SLOT(arg, node_at[N_DTYPE]));
+            shapes[place] = Py_NewRef(SLOT(arg, node_at[N_SHAPE]));
+        } else if (Py_TYPE(arg) == Ndarray) {
+            PyObject *dtype = PyObject_GetAttr(arg, s_dtype);
+            part = dtype ? PyLong_FromVoidPtr(dtype) : NULL;
+            Py_XDECREF(dtype); /* The array keeps it alive. */
+            shapes[place] = PyObject_GetAttr(arg, s_shape);
+        } else if (PyFloat_CheckExact(arg) || PyComplex_CheckExact(arg)) {
+            part = Py_NewRef((PyObject *)Py_TYPE(arg));
+            shapes[place] = Py_NewRef(empty_tuple);
+        } else {
+            /* A NumPy scalar with a fraction: by its `dtype`, as an array of none. Anything else has no entry. */
+            int fractional = PySet_Contains(fractional_scalars, (PyObject *)Py_TYPE(arg));
+            PyObject *dtype = fractional > 0 ? PyObject_GetAttr(arg, s_dtype) : NULL;
+            part = dtype ? PyLong_FromVoidPtr(dtype) : NULL;
+            Py_XDECREF(dtype);
+            shapes[place] = Py_NewRef(empty_tuple);
+            if (fractional == 0) {
+                goto done;
+            }
+        }
+        if (part == NULL || shapes[place] == NULL || !PyTuple_CheckExact(shapes[place])) {
+            Py_XDECREF(part);
+            goto fail;
+        }
+        PyTuple_SET_ITEM(written, 1 + place, part);
+        if (PyTuple_GET_SIZE(shapes[place]) > dimensions) {
+            dimensions = PyTuple_GET_SIZE(shapes[place]);
+        }
+    }
+    PyObject *found = PyDict_GetItemWithError(types, written); /* (dtype, kind), borrowed. */
+    if (found == NULL) {
+        if (PyErr_Occurred()) {
+            goto fail;
+        }
+        goto done;
+    }
+    int same = PyObject_RichCompareBool(PyTuple_GET_ITEM(found, 1), elementwise_kind, Py_EQ);
+    if (same < 0) {
+        goto fail;
+    }
+    if (!same) {
+        goto done; /* A matrix product: its shape is Python's to work out. */
+    }
+    /* NumPy's broadcasting: the shapes are lined up at their last axis; along each axis the lengths are one
+     * number, apart from those that are 1. */
+    shape = PyTuple_New(dimensions);
+    if (shape == NULL) {
+        goto fail;
+    }
+    for (Py_ssize_t back = 1; back <= dimensions; back++) {
+        PyObject *length = one;
+        for (Py_ssize_t place = 0; place < count; place++) {
+            Py_ssize_t own = PyTuple_GET_SIZE(shapes[place]);
+            if (back > own) {
+                continue;
+            }
+            PyObject *here = PyTuple_GET_ITEM(shapes[place], own - back);
+            Py_ssize_t value = PyLong_AsSsize_t(here);
+            if (value == -1 && PyErr_Occurred()) {
+                goto fail;
+            }
+            if (value == 0) {
+                goto done; /* Nothing to compute on: made at once. */
+            }
+            if (value == 1) {
+                continue;
+            }
+            if (length == one) {
+                length = here;
+            } else {
+                int equal = PyObject_RichCompareBool(length, here, Py_EQ);
+                if (equal < 0) {
+                    goto fail;
+                }
+                if (!equal) {
+                    goto done; /* They do not broadcast: NumPy's error to raise. */
+                }
+            }
+        }
+        PyTuple_SET_ITEM(shape, dimensions - back, Py_NewRef(length));
+    }
+    result = PyObject_CallFunctionObjArgs(python_keep, key, shape, PyTuple_GET_ITEM(found, 0), elementwise_kind, NULL);
+done:
+    Py_XDECREF(written);
+    Py_XDECREF(shape);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        Py_XDECREF(shapes[place]);
+    }
+    return result;
+fail:
+    result = NULL;
+    goto done;
+}
+
 /* The remembered answer of `rules.plan` for a call: a new tuple (shape, dtype, kind, spec), as `rules.plan`
  * returns a signature. First by the plain key; then, as `rules._plan_marked`, by the key with placeholders, with
  * the call's own stand-ins put back into the shape. `Miss` (borrowed) when nothing is remembered. */
@@ -701,8 +833,12 @@ remembered_plan(PyObject *rule, PyObject *unwrapped, PyObject *kwargs)
     }
     if (key != Miss) {
         PyObject *kept = PyDict_GetItemWithError(plans, key);
+        PyObject *answer = kept ? Py_NewRef(kept) : PyErr_Occurred() ? NULL : Miss;
+        if (answer == Miss && Py_TYPE(rule) == Ufunc) {
+            answer = first_elementwise(rule, unwrapped, key);
+        }
         Py_DECREF(key);
-        return kept ? Py_NewRef(kept) : PyErr_Occurred() ? NULL : Miss;
+        return answer;
     }
     /* `rules._plan_marked` keeps no answer for a call whose arrays are too large for it to hold for every stand-in
      * (`rules._is_moderate`), so none is found for such a call here: that rule needs no second copy. */
@@ -2214,6 +2350,10 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Into = (PyTypeObject *)Py_NewRef(into);
+    if (take(given, "types", &PyDict_Type, &types) || take(given, "keep", NULL, &python_keep) || take(given, "spec_of", NULL, &python_spec_of)
+        || take(given, "elementwise", &PyUnicode_Type, &elementwise_kind)) {
+        return NULL;
+    }
     PyObject *through = PyDict_GetItemString(given, "AssignThrough");
     if (through == NULL || !PyType_Check(through) || offsets((PyTypeObject *)through, SELECT_FIELDS, X_FIELDS, through_at)
         || take(given, "assignable", &PySet_Type, &assignable)) {

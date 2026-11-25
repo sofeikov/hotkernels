@@ -242,6 +242,79 @@ def test_the_value_of_a_fraction_never_changes_an_answer():
     assert checked > 30_000
 
 
+def test_the_type_resolver_answers_as_the_call_on_one_element_does(monkeypatch):
+    """For every ufunc of NumPy, the first call's answer is the same whether NumPy's resolver gives the type or the call on arrays of one element does.
+
+    The resolver is asked only for arrays of NumPy's own element types and
+    numbers with a fraction. A whole number, another byte order and
+    metadata go to the call, and so does every case the resolver raises for.
+    """
+    ufuncs = sorted({item for item in vars(numpy).values() if isinstance(item, numpy.ufunc)}, key=lambda item: item.__name__)
+    types = [numpy.dtype(kind) for kind in (*ELEMENT_TYPES, numpy.float16, numpy.longdouble, numpy.complex128)]
+    types += [numpy.dtype(">f8"), numpy.dtype("f8", metadata={"unit": "m"})]
+    numbers = (2.0, float("nan"), 1e300, 1j, 2, -1, 300, True, numpy.float32(2), numpy.float64(2), numpy.complex64(1j), numpy.int8(-1), numpy.uint8(200))
+    resolver = rules._resolved_type
+    checked = resolved = 0
+    for ufunc in ufuncs:
+        for shape in ((2,), (), (2, 2)):
+            nodes = [node_of(shape, dtype) for dtype in types]
+            if ufunc.nin == 1:
+                calls = [(node,) for node in nodes]
+            elif ufunc.nin == 2:
+                calls = [(left, right) for left in nodes for right in nodes[::3]]
+                calls += [pair for node in nodes for number in numbers for pair in ((node, number), (number, node))]
+            else:
+                calls = [(left, right, nodes[5]) for left in nodes[::2] for right in nodes[::3]]
+            for args in calls:
+                by_resolver = outcome(lambda: rules._plan(ufunc, args, {}))
+                resolved += resolver(ufunc, args) is not None and by_resolver[0] != "made at once"
+                monkeypatch.setattr(rules, "_resolved_type", lambda operation, operands: None)
+                by_call = outcome(lambda: rules._plan(ufunc, args, {}))
+                monkeypatch.setattr(rules, "_resolved_type", resolver)
+                # Which object the type is counts only for NumPy's own: for another byte order each call makes a new one.
+                own = len(by_call) == 4 and numpy.dtype(by_call[1].type) is by_call[1]
+                assert by_resolver == by_call if own else (by_resolver[:2], by_resolver[3:]) == (by_call[:2], by_call[3:]), (ufunc.__name__, args)
+                checked += 1
+    assert checked > 20_000 and resolved > checked // 4
+
+
+def test_the_core_broadcasts_as_numpy_does(lazy_core):
+    """Where the C core answers a call of types it has met and shapes it has not, its answer is the one the rules and NumPy give.
+
+    The element type is the remembered one; the shape is the one rule the
+    core holds itself, broadcasting. Shapes that do not broadcast and
+    operands of length zero are not the core's to answer.
+    """
+    if lazy_core != "c":
+        pytest.skip("the rule is the C core's")
+    core = array._core
+    rng = random.Random(SEED)
+    shapes = ((), (1,), (3,), (4,), (3, 4), (4, 3), (1, 4), (3, 1), (2, 3, 4), (2, 1, 4), (1, 1, 1), (0,), (3, 0), (5, 1, 1, 4))
+    kinds = (numpy.float32, numpy.float64, numpy.int8, numpy.bool_, numpy.complex64)
+    answered = declined = 0
+    for ufunc in (numpy.add, numpy.multiply, numpy.maximum, numpy.less, numpy.arctan2, numpy.logical_and, numpy.negative, numpy.sqrt, numpy.matmul):
+        for _ in range(400):
+            operands = []
+            for _ in range(ufunc.nin):
+                choice = rng.random()
+                dtype, shape = rng.choice(kinds), rng.choice(shapes)
+                operands.append(node_of(shape, dtype) if choice < 0.7 else numpy.zeros(shape, dtype) if choice < 0.85
+                                else rng.choice((2.0, 1j, numpy.float32(2.0), 3)))
+            args = tuple(operands)
+            if not any(isinstance(operand, graph.Node) for operand in args):
+                continue
+            worked_out = outcome(lambda: rules._plan(ufunc, args, {}))  # Also remembers the types, as a first call does.
+            rules._plans.clear()
+            found = core.plan(ufunc, args, {})
+            if found is core.MISS:
+                declined += 1
+                continue
+            answered += 1
+            assert (found[0], found[1], id(found[1]), found[2]) == worked_out, (ufunc.__name__, args)
+            assert rules.plan(ufunc, args, {}) == rules.Signature(*found)
+    assert answered > 500 and declined > 500
+
+
 def random_index(rng: random.Random, shape: tuple[int, ...]) -> Any:
     """Draw an index for an array: mostly whole numbers and slices, in and out of bounds, sometimes what is neither.
 
@@ -655,6 +728,25 @@ def test_the_core_stands_in_for_the_python_and_can_be_put_away(lazy_core):
     roads = ("__add__", "__rmul__", "__neg__", "__lt__", "sum", "astype", "__array_ufunc__", "__array_function__", "__getitem__")
     assert all(type(vars(LazyArray)[name]) is core.Road and vars(LazyArray)[name].fallback is array._stood_in_for[name] for name in roads)
     assert graph.deferred is core.deferred
+    # Once an answer is remembered the core takes the call without asking Python's planner: with a whole number among
+    # the operands, with one whole number as the axes of a transpose, as with anything else.
+    whole, row = lazy.asarray(numpy.arange(6)) + 0, lazy.arange(4.0) + 0
+    takes = (lambda: whole + 1, lambda: whole * True, lambda: 2 - x, lambda: row.transpose(0), lambda: x.reshape(2, 6), lambda: x.sum(0))
+    for take in takes:
+        take()
+    asked, by_method = Counted(rules.plan), Counted(array._view)
+    with pytest.MonkeyPatch.context() as watched:
+        watched.setattr(rules, "plan", asked)
+        watched.setattr(array, "_view", by_method)  # What the Python methods `reshape`, `transpose` and `T` call.
+        assert all(take()._node.pending for take in takes) and asked.calls == 0 and by_method.calls == 0
+    # An index that is one item is written as one item, not as a tuple of one.
+    target, mask = lazy.zeros((3, 4)), x[:, 0] > 3
+    target += 1.0
+    for _ in range(2):
+        target[mask] = 0.0
+        assert target._node.operation.perform.whole is False
+        target[mask, 1:] = 2.0
+        assert target._node.operation.perform.whole is True
     # What the core does not take, the method does: a call made at once, an error, a bound method.
     assert (x + [1.0, 2.0, 3.0, 4.0]).gather().tobytes() == (data + [1.0, 2.0, 3.0, 4.0]).tobytes()
     assert str(raised(lambda: x + numpy.ones(5))) == str(raised(lambda: data + numpy.ones(5)))
