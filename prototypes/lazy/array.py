@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 16
+CORE_VERSION = 17
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -1931,7 +1931,8 @@ def _set_up(core: Any) -> None:
                sure_views=rules.SURE_VIEWS, fractional_scalars=rules._FRACTIONAL_SCALARS, nonzeros=rules.NONZEROS,
                getitem=operator.getitem, count_nonzero=np.count_nonzero, unknown_floor=graph.UNKNOWN_FLOOR, Select=_Select,
                slots=tuple(_Slot(place) for place in range(SLOTS_MADE)), Write=_Write, Assign=_Assign, Into=_Into, AssignThrough=_AssignThrough,
-               assignable=_assignable, types=rules._types, keep=rules.keep, spec_of=graph.spec_of, Origin=graph.Origin, dtype=np.dtype, spec_numbers=graph._spec_numbers, Signature=rules.Signature,
+               assignable=_assignable, types=rules._types, keep=rules.keep, spec_of=graph.spec_of, Origin=graph.Origin, dtype=np.dtype, small_whole=rules.SMALL_WHOLE, large_whole=rules.LARGE_WHOLE,
+               spec_numbers=graph._spec_numbers, Signature=rules.Signature,
                matmul=np.matmul, matrix_product=rules.MATRIX_PRODUCT,
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
