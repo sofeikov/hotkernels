@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 15
+#define CORE_VERSION 16
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -96,6 +96,8 @@ static PyObject *numpy_dtype;        /* `np.dtype` */
 /* The identities of the `dtype` objects found to be NumPy's own for their type: `np.dtype(d.type) is d`. Such an
  * object lives as long as NumPy does, so what is noted of it stays true. */
 static PyObject *own_dtypes;
+static PyObject *spec_numbers;       /* `graph._spec_numbers` */
+static PyTypeObject *Signature;      /* `rules.Signature` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
 static PyObject *slots;              /* A tuple of `array._Slot(0)`, `_Slot(1)`, ...: the places of an index's pending arrays. */
 static PyObject *write_kind;         /* `rules.WRITE` */
@@ -422,6 +424,84 @@ fail:
     return NULL;
 }
 
+/* ---- Keeping what a first call found, by the steps of the Python functions that keep it. Each memory has a bound,
+ * read where Python reads it; a memory that is full is Python's to empty, so the Python function is called then. ---- */
+
+/* Whether a memory has room for one more entry under the bound of that name in a module's namespace. */
+static int
+has_room(PyObject *memory, PyObject *names, const char *bound)
+{
+    PyObject *limit = PyDict_GetItemString(names, bound);
+    Py_ssize_t most = limit ? PyLong_AsSsize_t(limit) : 0;
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        return 0;
+    }
+    return PyDict_GET_SIZE(memory) < most;
+}
+
+/* The number that stands for a shape, every length of it known, and an element type: `graph.spec_of(shape, dtype)`.
+ * A new reference. */
+static PyObject *
+spec_number(PyObject *shape, PyObject *dtype)
+{
+    PyObject *identity = PyLong_FromVoidPtr(dtype);
+    PyObject *key = identity ? PyTuple_Pack(2, shape, identity) : NULL;
+    Py_XDECREF(identity);
+    if (key == NULL) {
+        return NULL;
+    }
+    PyObject *number = NULL;
+    PyObject *found = PyDict_GetItemWithError(specs, key); /* (number, dtype), borrowed. */
+    if (found != NULL) {
+        number = Py_NewRef(PyTuple_GET_ITEM(found, 0));
+    } else if (!PyErr_Occurred()) {
+        if (has_room(specs, graph_names, "SPEC_MEMORY_LIMIT")) {
+            number = Py_TYPE(spec_numbers)->tp_iternext(spec_numbers);
+            PyObject *kept = number ? PyTuple_Pack(2, number, dtype) : NULL;
+            if (kept == NULL || PyDict_SetItem(specs, key, kept) < 0) {
+                Py_CLEAR(number);
+            }
+            Py_XDECREF(kept);
+        } else {
+            number = PyObject_CallFunctionObjArgs(python_spec_of, shape, dtype, NULL);
+        }
+    }
+    Py_DECREF(key);
+    return number;
+}
+
+/* `rules.keep(key, shape, dtype, kind, types)`: keep the answer of a ufunc's first call under its key, and under
+ * `types`, if that is given, the element type for the operands' types. A new reference to the signature kept. */
+static PyObject *
+keep_answer(PyObject *key, PyObject *shape, PyObject *dtype, PyObject *kind, PyObject *types_key)
+{
+    if (!has_room(plans, rules_names, "PLAN_MEMORY_LIMIT") || (types_key != NULL && !has_room(types, rules_names, "TYPE_MEMORY_LIMIT"))) {
+        return PyObject_CallFunctionObjArgs(python_keep, key, shape, dtype, kind, types_key ? types_key : Py_None, NULL);
+    }
+    if (types_key != NULL) {
+        PyObject *remembered = PyTuple_Pack(2, dtype, kind);
+        int kept = remembered ? PyDict_SetItem(types, types_key, remembered) : -1;
+        Py_XDECREF(remembered);
+        if (kept < 0) {
+            return NULL;
+        }
+    }
+    /* `rules._remember`: the signature with the number of its shape and element type. */
+    PyObject *number = spec_number(shape, dtype);
+    PyObject *fields = number ? PyTuple_Pack(4, shape, dtype, kind, number) : NULL;
+    /* `tuple.__new__(Signature, fields)`, which is what a named tuple's own `__new__` calls. */
+    PyObject *given = fields ? PyTuple_Pack(1, fields) : NULL;
+    PyObject *signature = given ? PyTuple_Type.tp_new(Signature, given, NULL) : NULL;
+    Py_XDECREF(number);
+    Py_XDECREF(fields);
+    Py_XDECREF(given);
+    if (signature != NULL && PyDict_SetItem(plans, key, signature) < 0) {
+        Py_CLEAR(signature);
+    }
+    return signature;
+}
+
 /* ---- The key of `rules.plan`. Each function returns a new reference, `Miss` (borrowed) for a call whose key
  * this file does not write, or NULL with an error set. The tuples must equal the ones `rules._key` writes, since
  * the answers found by them were stored under those. ---- */
@@ -530,8 +610,7 @@ spec_part(PyObject *node, Marks *marks)
     }
     /* A node that was not asked for its number yet, as a new leaf is: it gets the one its shape and type have,
      * as `graph.spec` would give it, and Python gives them one if they have none. */
-    PyObject *number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0))
-                             : PyObject_CallFunctionObjArgs(python_spec_of, shape, SLOT(node, node_at[N_DTYPE]), NULL);
+    PyObject *number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0)) : spec_number(shape, SLOT(node, node_at[N_DTYPE]));
     if (number == NULL) {
         return NULL;
     }
@@ -551,8 +630,7 @@ ndarray_part(PyObject *array)
     if (key != NULL) {
         PyObject *found = PyDict_GetItemWithError(specs, key); /* (number, dtype), borrowed. */
         /* A shape and type not met before get their number from Python, as `rules._array_part` has it. */
-        number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0))
-                 : PyErr_Occurred() ? NULL : PyObject_CallFunctionObjArgs(python_spec_of, shape, dtype, NULL);
+        number = found ? Py_NewRef(PyTuple_GET_ITEM(found, 0)) : PyErr_Occurred() ? NULL : spec_number(shape, dtype);
         negated = number ? PyNumber_Negative(number) : NULL;
     }
     Py_XDECREF(shape);
@@ -1016,7 +1094,7 @@ first_ufunc(PyObject *ufunc, PyObject *unwrapped, PyObject *key)
         shape = NULL;
         goto done;
     }
-    result = PyObject_CallFunctionObjArgs(python_keep, key, shape, dtype, kind, asked ? written : Py_None, NULL);
+    result = keep_answer(key, shape, dtype, kind, asked ? written : NULL);
 done:
     Py_XDECREF(written);
     Py_XDECREF(shape);
@@ -2627,6 +2705,15 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         return NULL;
     }
     Origin = (PyTypeObject *)Py_NewRef(origin);
+    PyObject *signature = NULL;
+    if (take(given, "spec_numbers", NULL, &spec_numbers) || take(given, "Signature", &PyType_Type, &signature)) {
+        return NULL;
+    }
+    Signature = (PyTypeObject *)signature;
+    if (Py_TYPE(spec_numbers)->tp_iternext == NULL || !PyType_IsSubtype(Signature, &PyTuple_Type)) {
+        PyErr_SetString(PyExc_TypeError, "setup(): 'spec_numbers' must be an iterator and 'Signature' a kind of tuple");
+        return NULL;
+    }
     if (take(given, "dtype", NULL, &numpy_dtype) || take(given, "matmul", NULL, &matmul)
         || take(given, "matrix_product", &PyUnicode_Type, &matrix_kind)) {
         return NULL;
