@@ -31,7 +31,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 17
+#define CORE_VERSION 18
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -97,6 +97,14 @@ static PyObject *numpy_dtype;        /* `np.dtype` */
  * object lives as long as NumPy does, so what is noted of it stays true. */
 static PyObject *own_dtypes;
 static long long small_whole, large_whole; /* `rules.SMALL_WHOLE` and `rules.LARGE_WHOLE` */
+static PyObject *view_functions;     /* `rules.VIEWS` */
+static PyObject *reductions;         /* `rules.REDUCTIONS` */
+static PyObject *positions;          /* `rules.POSITIONS` */
+static PyObject *reduction_kind;     /* `rules.REDUCTION` */
+static PyObject *numpy_ravel;        /* `np.ravel` */
+static PyObject *numpy_empty;        /* `np.empty` */
+static PyObject *no_size;            /* `rules.NO_SIZE` */
+static PyObject *python_element_type; /* `rules._element_type` */
 static PyObject *spec_numbers;       /* `graph._spec_numbers` */
 static PyTypeObject *Signature;      /* `rules.Signature` */
 static Py_ssize_t into_function_at;  /* Its one field, `function`. */
@@ -1141,6 +1149,152 @@ fail:
     goto done;
 }
 
+/* The answer for the first call of a view function or a reduction on one node, as `rules._plan` works it out.
+ * For a view, NumPy is asked for the shape as `rules._view_shape` asks it, on an array of an element type of no
+ * size. For a reduction the shape is the rule of `rules._reduced_shape`, and the element type is asked of
+ * `rules._element_type`, which makes NumPy's call on an array of one element. `Miss` wherever `rules._plan` would
+ * decline or let NumPy raise, and for whatever is written in a way this function does not read: an axis that is
+ * not an `int` or a tuple of them, `keepdims` that is not a `bool`. */
+static PyObject *
+first_function(PyObject *rule, PyObject *unwrapped, PyObject *kwargs, PyObject *key)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(unwrapped), named = kwargs ? PyDict_GET_SIZE(kwargs) : 0;
+    PyObject *node = count ? PyTuple_GET_ITEM(unwrapped, 0) : NULL;
+    if (node == NULL || Py_TYPE(node) != Node) {
+        return Miss;
+    }
+    int is_view = PySet_Contains(view_functions, rule);
+    int reduces = is_view == 0 ? PySet_Contains(reductions, rule) : 0;
+    int position = is_view == 0 && reduces == 0 ? PySet_Contains(positions, rule) : 0;
+    if (is_view < 0 || reduces < 0 || position < 0) {
+        PyErr_Clear(); /* A callable without a hash is in none of the sets. */
+        return Miss;
+    }
+    if (!is_view && !reduces && !position) {
+        return Miss;
+    }
+    /* `rules._admissible`: an element type the layer defers, and no length of zero. */
+    PyObject *held = SLOT(node, node_at[N_SHAPE]), *dtype = SLOT(node, node_at[N_DTYPE]);
+    Py_ssize_t dimensions = PyTuple_GET_SIZE(held);
+    PyObject *letter = PyObject_GetAttr(dtype, s_kind);
+    int deferred_kind = letter && PyUnicode_CheckExact(letter) && PyUnicode_GET_LENGTH(letter) == 1
+                        && strchr("biufc", (int)PyUnicode_READ_CHAR(letter, 0)) != NULL;
+    Py_XDECREF(letter);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    for (Py_ssize_t axis = 0; deferred_kind && axis < dimensions; axis++) {
+        deferred_kind = PyLong_AsSsize_t(PyTuple_GET_ITEM(held, axis)) != 0;
+    }
+    if (!deferred_kind) {
+        return Miss;
+    }
+    PyObject *shape = NULL, *result = Miss, *found = NULL;
+    if (is_view) {
+        /* `rules._kind`: the node first, and no node among the other arguments. */
+        for (Py_ssize_t place = 1; place < count; place++) {
+            if (Py_TYPE(PyTuple_GET_ITEM(unwrapped, place)) == Node) {
+                return Miss;
+            }
+        }
+        Py_ssize_t at = 0;
+        PyObject *value;
+        while (named && PyDict_Next(kwargs, &at, NULL, &value)) {
+            if (Py_TYPE(value) == Node) {
+                return Miss;
+            }
+        }
+        if (rule == numpy_ravel) {
+            return Miss; /* Its shape is arithmetic on the lengths, which Python does. */
+        }
+        PyObject *viewed = PyObject_CallFunctionObjArgs(numpy_empty, held, no_size, NULL);
+        /* The call's arguments with the stand-in where the node is, in a tuple of their own. */
+        PyObject *given = viewed ? PyTuple_New(count) : NULL;
+        if (given != NULL) {
+            PyTuple_SET_ITEM(given, 0, viewed);
+            viewed = NULL;
+            for (Py_ssize_t place = 1; place < count; place++) {
+                PyTuple_SET_ITEM(given, place, Py_NewRef(PyTuple_GET_ITEM(unwrapped, place)));
+            }
+            PyObject *view = PyObject_Call(rule, given, named ? kwargs : NULL);
+            shape = view ? PyObject_GetAttr(view, s_shape) : NULL;
+            Py_XDECREF(view);
+        }
+        Py_XDECREF(viewed);
+        Py_XDECREF(given);
+        if (shape == NULL || !PyTuple_CheckExact(shape)) {
+            PyErr_Clear(); /* NumPy refuses the axes or the shape: its error comes from Python's road. */
+            Py_XDECREF(shape);
+            return Miss;
+        }
+        result = keep_answer(key, shape, dtype, view_kind, NULL);
+        Py_DECREF(shape);
+        return result;
+    }
+    /* `rules._is_plain_reduction`: the node, an axis given at most once, no keyword but `axis` and `keepdims`. */
+    if (count > 2 || (count == 2 && Py_TYPE(PyTuple_GET_ITEM(unwrapped, 1)) == Node)) {
+        return Miss;
+    }
+    PyObject *axis = count == 2 ? PyTuple_GET_ITEM(unwrapped, 1) : NULL, *keepdims = Py_False;
+    Py_ssize_t at = 0;
+    PyObject *name, *value;
+    while (named && PyDict_Next(kwargs, &at, &name, &value)) {
+        if (PyUnicode_CompareWithASCIIString(name, "axis") == 0 && axis == NULL) {
+            axis = value;
+        } else if (PyUnicode_CompareWithASCIIString(name, "keepdims") == 0 && PyBool_Check(value)) {
+            keepdims = value;
+        } else {
+            return Miss;
+        }
+    }
+    /* `rules._reduced_shape`: without the reduced axes, or with them at length one. */
+    char reduced[64] = {0};
+    if (dimensions > 64) {
+        return Miss;
+    }
+    if (axis == NULL || axis == Py_None) {
+        memset(reduced, 1, (size_t)dimensions);
+    } else {
+        PyObject *single[1] = {axis};
+        PyObject **axes = PyTuple_CheckExact(axis) ? &PyTuple_GET_ITEM(axis, 0) : single;
+        Py_ssize_t given = PyTuple_CheckExact(axis) ? PyTuple_GET_SIZE(axis) : 1;
+        if (position && PyTuple_CheckExact(axis)) {
+            return Miss; /* A position takes one axis or none: `rules._names_one_axis`. */
+        }
+        for (Py_ssize_t each = 0; each < given; each++) {
+            if (!PyLong_CheckExact(axes[each])) {
+                return Miss;
+            }
+            Py_ssize_t which = PyLong_AsSsize_t(axes[each]);
+            if (which == -1 && PyErr_Occurred()) {
+                PyErr_Clear();
+                return Miss;
+            }
+            which = which < 0 ? which + dimensions : which;
+            if (which < 0 || which >= dimensions || reduced[which]) {
+                return Miss; /* An axis the array lacks, or one named twice: NumPy's error to raise. */
+            }
+            reduced[which] = 1;
+        }
+    }
+    PyObject *lengths = PyList_New(0);
+    for (Py_ssize_t each = 0; lengths != NULL && each < dimensions; each++) {
+        if (!reduced[each] || keepdims == Py_True) {
+            if (PyList_Append(lengths, reduced[each] ? one : PyTuple_GET_ITEM(held, each)) < 0) {
+                Py_CLEAR(lengths);
+            }
+        }
+    }
+    shape = lengths ? PyList_AsTuple(lengths) : NULL;
+    Py_XDECREF(lengths);
+    /* The element type is NumPy's answer to the call on an array of one element; its error is the caller's. */
+    found = shape ? PyObject_CallFunctionObjArgs(python_element_type, reduction_kind, rule, unwrapped, kwargs, NULL) : NULL;
+    result = found ? keep_answer(key, shape, found, reduction_kind, NULL) : NULL;
+    Py_XDECREF(shape);
+    Py_XDECREF(found);
+    return result;
+}
+
 /* The remembered answer of `rules.plan` for a call: a new tuple (shape, dtype, kind, spec), as `rules.plan`
  * returns a signature. First by the plain key; then, as `rules._plan_marked`, by the key with placeholders, with
  * the call's own stand-ins put back into the shape. `Miss` (borrowed) when nothing is remembered. */
@@ -1154,8 +1308,8 @@ remembered_plan(PyObject *rule, PyObject *unwrapped, PyObject *kwargs, PyObject 
     if (key != Miss) {
         PyObject *kept = PyDict_GetItemWithError(plans, key);
         PyObject *answer = kept ? Py_NewRef(kept) : PyErr_Occurred() ? NULL : Miss;
-        if (answer == Miss && Py_TYPE(rule) == Ufunc) {
-            answer = first_ufunc(rule, unwrapped, key);
+        if (answer == Miss) {
+            answer = Py_TYPE(rule) == Ufunc ? first_ufunc(rule, unwrapped, key) : first_function(rule, unwrapped, kwargs, key);
         }
         if (answer == Miss && missed != NULL) {
             *missed = key; /* The caller asks Python, and hands it the key so that it is not written twice. */
@@ -2743,6 +2897,12 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
     Signature = (PyTypeObject *)signature;
     if (Py_TYPE(spec_numbers)->tp_iternext == NULL || !PyType_IsSubtype(Signature, &PyTuple_Type)) {
         PyErr_SetString(PyExc_TypeError, "setup(): 'spec_numbers' must be an iterator and 'Signature' a kind of tuple");
+        return NULL;
+    }
+    if (take(given, "views", &PyFrozenSet_Type, &view_functions) || take(given, "reductions", &PyFrozenSet_Type, &reductions)
+        || take(given, "positions", &PyFrozenSet_Type, &positions) || take(given, "reduction_kind", &PyUnicode_Type, &reduction_kind)
+        || take(given, "ravel", NULL, &numpy_ravel) || take(given, "empty", NULL, &numpy_empty) || take(given, "no_size", NULL, &no_size)
+        || take(given, "element_type", NULL, &python_element_type)) {
         return NULL;
     }
     PyObject *few = PyDict_GetItemString(given, "small_whole"), *many = PyDict_GetItemString(given, "large_whole");
