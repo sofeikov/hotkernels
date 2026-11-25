@@ -104,6 +104,14 @@ summary = "The 23 kernels written again for x86-64 with AVX2: what carried over 
 layout = "report"
 
 [[page]]
+path = "report/lazy"
+source = "report/lazy.md"
+title = "Writing the program down: a lazy layer"
+label = "A lazy layer"
+summary = "A design and a prototype for NumPy code whose operations become a graph, computed when the program asks, with NumPy's results bit for bit. Nothing is faster yet; the graph is what a kernel for a whole expression would need."
+layout = "report"
+
+[[page]]
 path = "report/history"
 source = "report/history.md"
 title = "Over time"
