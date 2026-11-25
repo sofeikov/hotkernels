@@ -20,7 +20,7 @@ from typing import Any, Callable
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, array, gather, get_lazy, graph, rules
+from prototypes.lazy import LazyArray, NotGathered, array, get_lazy, graph, rules
 from prototypes.lazy.programs import regression
 
 # Seed of every random array and every random program in these tests.
@@ -452,13 +452,13 @@ def test_the_rules_are_asked_once_about_a_call(monkeypatch):
     for _ in range(2):
         chosen = (lazy.asarray(data) + 0)[lazy.asarray(data)[:, 0] > 7]
         stop = lazy.asarray(numpy.int64(2))
-        gather(chosen[:, 0] > 0)  # Nothing below is the first of its kind but the slice.
         graph.COUNTS.reset()
         before = counted.calls
         # Part of a length that is not known: declined, and made at once. To decline it the rules compare the slice
         # with `:`, which compares the lazy `stop` with None, which NumPy answers at once.
         part = chosen[:stop]
-        assert counted.calls == before + 1 and graph.COUNTS.at_once == {"np.equal": 1, "x[index]": 1}
+        # Two questions: the index, and the comparison made while answering it. Each once.
+        assert counted.calls == before + 2 and graph.COUNTS.at_once == {"np.equal": 1, "x[index]": 1}
         assert part.gather().tobytes() == data[data[:, 0] > 7][:2].tobytes()
 
 
