@@ -1574,7 +1574,7 @@ def assign_rows(part: np.ndarray, values: np.ndarray) -> None:
 # How many operations a program has to have for each array the module copies or fills before a kernel reads it,
 # when one of them is a value for each row that it fills in. Timed on the kinetic energy routine, whose arrays step
 # over a time level: five operations on two such arrays and a value for each row took 3.99 ms for NumPy's 2.43 ms,
-# and seventeen on three and one took 3.94 ms for 7.2 ms.
+# and seventeen on three and one took 3.94 ms and 5.36 ms in the flux's two directions for 6.9 ms in each.
 OPERATIONS_A_COPY = 3
 
 

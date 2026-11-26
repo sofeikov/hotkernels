@@ -226,7 +226,7 @@ For more than a dozen operations there is a recording mode and a page. `hotkerne
 
 ## What the graph is for
 
-None of this is part of the first build, and no gain is claimed here. It is why the first build is shaped the way it is. The third way of the second point is built in the prototype, with seventy-eight kernels and its gain measured on twenty-six programs: [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md).
+None of this is part of the first build, and no gain is claimed here. It is why the first build is shaped the way it is. The third way of the second point is built in the prototype, with eighty kernels and its gain measured on twenty-six programs: [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md).
 
 - **A fusible group can be read off the graph:** connected element-by-element nodes of one output shape, perhaps ending in a reduction. The eight operations of GELU are one; in the regression, `(X @ w - y) ** 2` and its `mean` are one after the matrix product. [Figure 1](#one-call-at-a-time) counts what computing such a group in one pass would save.
 - **A group can be computed three ways, and the graph does not care which:** node by node with NumPy, as now; with NumPy's own calls a cache-sized block at a time, which removes the passes over main memory and keeps NumPy's bits; or with one kernel for the whole expression.
