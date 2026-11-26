@@ -441,6 +441,44 @@ def test_a_product_method_takes_another_small_array(at_once: None):
     assert same(data.dot(data.T), x.dot(data.T).gather())  # An array from outside: the ordinary road.
 
 
+def test_a_value_leaves_an_array_that_has_it_without_a_word(at_once: None):
+    """A number, a truth value and the array itself, asked of an array that holds its value while nothing waits."""
+    data = numpy.arange(6.0).reshape(2, 3)
+    x = lazy.asarray(data) + 1.0
+    total = x.sum()
+    needed = dict(graph.COUNTS.needed)
+    assert float(total) == 21.0 and int(total) == 21 and complex(total) == 21 + 0j and bool(total)
+    assert 3.0 in x and 99.0 not in x and range(10)[x.argmax()] == 5
+    given = numpy.asarray(x)
+    assert type(x._held) is array._Cell and x._node.exposed and given is x._node.value
+    assert same(data + 1.0, given) and same((data + 1.0).astype(numpy.float32), numpy.asarray(x, dtype=numpy.float32))
+    assert numpy.array(x, copy=True) is not given
+    assert graph.COUNTS.needed == needed
+    with pytest.raises(graph.NotGathered):
+        float(get_lazy(strict=True).asarray(data).sum())
+    with pytest.raises((TypeError, ValueError)):
+        float(x)  # NumPy's own refusal for an array of six.
+
+
+def test_a_whole_number_of_numpys_is_an_index_like_pythons(at_once: None):
+    """`x[k]` and `x[k] = v` with what `np.argmax` or a random choice gives, made at once like any other."""
+    def program(np: Any) -> Any:
+        """Read and write through indices that are NumPy's integers."""
+        x = np.zeros((5, 2)) + 1.0
+        k, j = numpy.int64(3), numpy.intp(1)
+        x[k] = 4.0
+        x[k, j] += 2.5
+        x[numpy.int32(0)] = x[k] * 2.0
+        return x, x[k], x[k, j], x[numpy.uint8(4)]
+
+    expected = program(numpy)
+    deferred = graph.COUNTS.deferred
+    got = program(lazy)
+    assert graph.COUNTS.deferred == deferred
+    for theirs, ours in zip(expected, got):
+        assert same(theirs, ours.gather())
+
+
 def test_the_objects_the_core_makes_are_freed_and_made_again():
     """Weak references are told, pending work that is dropped is forgotten, and a long chain is dropped whole."""
     a = lazy.asarray(numpy.arange(4.0))

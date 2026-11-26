@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 27
+CORE_VERSION = 28
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -807,6 +807,7 @@ def _leaving(what: str, convert: Callable[..., Any], everything: bool = False) -
         if everything:
             self._expose()
         return convert(self._node.value, *args, **kwargs)
+    leave.road = ("leave", convert, what, everything)
     return leave
 
 

@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 27
+#define CORE_VERSION 28
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -3264,7 +3264,8 @@ index_item_now(PyObject *item, int *basic, int *plain, int *strict)
         return Py_NewRef(item);
     }
     *plain = 0;
-    if (PySlice_Check(item) || item == Py_None || item == Py_Ellipsis) {
+    if (PySlice_Check(item) || item == Py_None || item == Py_Ellipsis || PyArray_IsScalar(item, Integer)) {
+        /* A whole number of NumPy's, as `np.argmax` and `np.random.choice` give, indexes as Python's does. */
         return Py_NewRef(item);
     }
     if (Py_TYPE(item) == Ndarray) {
@@ -3728,10 +3729,12 @@ done:
 
 /* The kinds of road, by the method each stands for. */
 enum { BINARY, UNARY, ARRAY_UFUNC, ARRAY_FUNCTION, REDUCTION, GETITEM, ATTRIBUTE, INPLACE, SETITEM, STANDIN_CALL,
-       STANDIN_NAME, RESHAPE, TRANSPOSE, SWAPAXES, RAVEL, ROAD_KINDS };
+       STANDIN_NAME, RESHAPE, TRANSPOSE, SWAPAXES, RAVEL, LEAVE, ROAD_KINDS };
 static const char *const ROAD_NAMES[ROAD_KINDS] = {"binary", "unary", "array_ufunc", "array_function", "reduction", "getitem",
                                                    "attribute", "inplace", "setitem", "standin_call", "standin_name",
-                                                   "reshape", "transpose", "swapaxes", "ravel"};
+                                                   "reshape", "transpose", "swapaxes", "ravel", "leave"};
+/* The most arguments, the array among them, a value is handed out with by the road of `array._leaving`. */
+#define MOST_LEAVING 6
 
 typedef struct {
     PyObject_HEAD
@@ -4223,6 +4226,44 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         result = in_place(args[0], args[1], road->operation, road->name, road->ruled_as, frame);
         break;
+    case LEAVE: {
+        /* `float(x)`, `if x:`, `np.asarray(x)` and the other ways a value leaves without `gather()`, for an
+         * array that has its value while nothing is pending: what `array._hand_out` lets through without a
+         * word, where the method `array._leaving` built then only converts. `operation` is what converts, and
+         * `ruled_as` is True when the array itself is handed out, whose memory is known outside from then on.
+         * A strict array, a pending one and a failed one are Python's to answer. */
+        if (small_limit == 0 || PySet_GET_SIZE(pending) != 0 || count + named > MOST_LEAVING) {
+            goto python;
+        }
+        int strict = 0;
+        PyObject *value = value_of(args[0], &strict);
+        if (value == NULL) {
+            return NULL;
+        }
+        if (value == Miss) {
+            goto python;
+        }
+        if (strict) {
+            Py_DECREF(value);
+            goto python;
+        }
+        if (road->ruled_as == Py_True) {
+            PyObject *cell = cell_of(args[0]); /* `LazyArray._expose`. */
+            if (cell == NULL) {
+                Py_DECREF(value);
+                return NULL;
+            }
+            Py_SETREF(SLOT(SLOT(cell, cell_at[C_NODE]), node_at[N_EXPOSED]), Py_NewRef(Py_True));
+        }
+        PyObject *stack[MOST_LEAVING];
+        stack[0] = value;
+        for (Py_ssize_t place = 1; place < count + named; place++) {
+            stack[place] = args[place];
+        }
+        result = PyObject_Vectorcall(road->operation, stack, (size_t)count, kwnames);
+        Py_DECREF(value);
+        return result;
+    }
     case SETITEM:
         if (named || count != 3) {
             goto python;
