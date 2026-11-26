@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 34
+#define CORE_VERSION 36
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -154,6 +154,7 @@ static long long made_at_once = 0, written_at_once = 0;
  * values: nothing above it could be computed together with it, so its node would only cost. NULL for none given,
  * where only small calls and views are made at once. */
 static PyObject *fusible_calls = NULL, *fusible_dtype = NULL;
+static PyObject *compute_small = NULL; /* `array._compute_for_small`: computes the node of a lazy array. */
 static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
 static PyObject *handled_apart;      /* `array.HANDLED_APART`: the functions `__array_function__` has a way of its own for */
 static PyObject *shaped_like;        /* `array.SHAPED_LIKE`: `np.zeros_like` and its kind */
@@ -2540,7 +2541,12 @@ static int views_alone = 0;
  * held. So while such views may exist, a write is not made to wait when the array's memory is another array's (it
  * is such a view itself), or when anything but the node refers to the array: NumPy's view refers to the array it
  * is a view of. The write is then made at once, in the memory, after everything pending, where every view sees it.
- * Without `waits` the question is only whether NumPy's write into the memory now is what the layer may make. */
+ * Without `waits` the question is only whether NumPy's write into the memory now is what the layer may make. It
+ * is for an array the program was handed (`exposed`) and for one whose memory may be shared with another (the
+ * cell's doubts) as for any other: with nothing pending, a write into the memory is what the eager program does,
+ * and whoever else knows the memory sees it, as there. Those two matter to a write that waits, which may be
+ * computed into a copy. Left to Python, as it was, such a write took 3.9 µs for NumPy's 0.2 µs, and a program that
+ * updates the array it was given a row or an element at a time ran 4 to 25 times slower than eagerly. */
 static int is_admissible(PyObject *node);
 
 static PyObject *
@@ -2553,9 +2559,11 @@ writable_as(PyObject *target, int waits)
     }
     PyObject *held = SLOT(cell, cell_at[C_NODE]);
     PyObject *doubtful = SLOT(cell, cell_at[C_DOUBTFUL]);
-    if (Py_TYPE(held) != Node || SLOT(held, node_at[N_EXPOSED]) != Py_False || SLOT(held, node_at[N_FAILURE]) != Py_None
-        || SLOT(cell, cell_at[C_DOUBTED]) != Py_False || doubtful != Py_None
+    if (Py_TYPE(held) != Node || SLOT(held, node_at[N_FAILURE]) != Py_None
         || PyTuple_GET_SIZE(SLOT(held, node_at[N_SHAPE])) == 0) {
+        return NULL;
+    }
+    if (waits && (SLOT(held, node_at[N_EXPOSED]) != Py_False || SLOT(cell, cell_at[C_DOUBTED]) != Py_False || doubtful != Py_None)) {
         return NULL;
     }
     /* No length of zero and an element type the layer defers: what `rules._admissible` says, remembered. A node
@@ -2704,6 +2712,7 @@ defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads
  * `apply` is the function of the `operator` module, `perform` what makes the write. Returns `target` (new
  * reference), `Miss`, or NULL. */
 static PyObject *ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator);
+static PyObject *number_in_place(PyObject *ufunc, PyObject *target, PyObject *other);
 
 /* The array a write made at once goes into: the memory of `target`'s cell with the target's steps taken of it.
  * `*held` is the cell's node, or NULL for an array that holds its value alone, which is nobody's but the layer's,
@@ -2782,6 +2791,12 @@ in_place_now(PyObject *target, PyObject *other, PyObject *apply)
         PyObject *ufunc = PyDict_GetItemWithError(in_place_ufuncs, apply);
         if (ufunc == NULL) {
             return PyErr_Occurred() ? NULL : Miss;
+        }
+        /* `s += v` on a NumPy scalar is `s = s + v`, the scalar's own operator: 35 ns in the eager program. The
+         * ufunc on two numbers, which this was, is a call of 600 ns. */
+        PyObject *made = number_in_place(ufunc, target, other);
+        if (made != Miss) {
+            return made;
         }
         PyObject *pair[2] = {target, other};
         return ufunc_now(ufunc, pair, 2, 0);
@@ -3602,9 +3617,42 @@ lazy_for(PyObject *node)
     return new_lazy(node);
 }
 
+/* The value of a pending operand of a small call, computed now. `y[i, :] = a * out[i, :] + b * y[i - 1, :]` in a
+ * loop, with `out` a large array still pending, is thousands of operations on rows of a thousand elements, and
+ * every one of them waited as a node because the row of `out` it reads had no value: 36,000 nodes, a plan and a
+ * program of kernels for each row, 170 ms where NumPy takes 37 ms. A call on small operands is never worth a node,
+ * whatever its operands wait for. So a pending operand with fewer than `small_limit` elements is computed, with
+ * what it reads, by the function the layer set (`small_reads`), and the call is made at once as on any value.
+ * Returns the value (a new reference), `Miss` for an operand that is large, of a length not known, failed or
+ * taken by a write, or NULL with the error computing raised, which is the program's at that line. */
+static PyObject *
+small_pending(PyObject *operand, int *strict)
+{
+    if (compute_small == NULL) {
+        return Miss;
+    }
+    PyObject *node = node_of(operand);
+    if (node == NULL) {
+        return NULL;
+    }
+    int waits = Py_TYPE(node) == Node && SLOT(node, node_at[N_OPERATION]) != Py_None
+        && SLOT(node, node_at[N_FAILURE]) == Py_None && PyTuple_CheckExact(SLOT(node, node_at[N_SHAPE]));
+    Py_ssize_t size = waits ? size_of(SLOT(node, node_at[N_SHAPE])) : -1;
+    Py_DECREF(node);
+    if (size < 0 || size >= small_limit) {
+        return Miss;
+    }
+    PyObject *done = PyObject_CallOneArg(compute_small, operand);
+    if (done == NULL) {
+        return NULL;
+    }
+    Py_DECREF(done);
+    return value_of(operand, strict);
+}
+
 /* A ufunc called now on operands that have their values (`small_limit`): NumPy's own call, with no rule asked
- * and nothing made but the lazy array that holds the result. Taken when every operand is a lazy array with a value
- * or a Python number, one at least is an array, and either all have fewer than `small_limit` elements or the call is
+ * and nothing made but the lazy array that holds the result. Taken when every operand is a lazy array with a value,
+ * or a small one still pending, which is computed first (`small_pending`), or a Python number, one at least is an array, and either all have fewer than `small_limit` elements or the call is
  * one no kernel could make. `operator` says that the
  * callable is what an operator's road calls, which is a ufunc or `operator.pow`. Returns a new lazy array,
  * `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's at that line. */
@@ -3622,6 +3670,9 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
         PyObject *operand = operands[place];
         if (Py_TYPE(operand) == Lazy) {
             PyObject *value = value_of(operand, &strict);
+            if (value == Miss) {
+                value = small_pending(operand, &strict);
+            }
             if (value == NULL) {
                 result = NULL;
                 goto done;
@@ -3640,6 +3691,10 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
             arrays++;
         } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
                    || PyComplex_CheckExact(operand)) {
+            values[place] = operand;
+        } else if (PyObject_TypeCheck(operand, Generic)) {
+            /* A NumPy scalar of the program's own, `np.exp(-alpha)` of a number: NumPy's call takes it as it is.
+             * Left to the ordinary road, `k * row` with such a `k` took 650 to 900 ns where `0.5 * row` took 360. */
             values[place] = operand;
         } else {
             goto done;
@@ -4062,6 +4117,15 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         if (named) {
             goto python;
+        }
+        if (count == 5 && small_limit != 0) {
+            /* `alpha * a[i, k]` with `alpha` a NumPy scalar of the program's own: the scalar's operator does not
+             * know a lazy array and hands the call to its ufunc, which comes here. Both operands are numbers, so
+             * the scalar's own operator on the two values is what the eager program calls at that line. */
+            result = number_in_place(args[1], args[3], args[4]);
+            if (result != Miss) {
+                break;
+            }
         }
         result = ufunc_now(args[1], args + 3, count - 3, 0);
         if (result != Miss) {
@@ -4492,8 +4556,8 @@ numbers_of(PyObject *const *operands, Py_ssize_t count, PyObject **values, PyObj
             values[place] = value;
             lazies++;
         } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
-                   || PyComplex_CheckExact(operand)) {
-            values[place] = operand;
+                   || PyComplex_CheckExact(operand) || PyObject_TypeCheck(operand, Generic)) {
+            values[place] = operand; /* A NumPy scalar of the program's own is a number like any written in it. */
         } else {
             goto other;
         }
@@ -4518,6 +4582,34 @@ number_made(PyObject *value, int strict)
     }
     made_at_once++;
     return lazy_of_value(value, s_array, at_once_kind, strict ? Py_True : Py_False);
+}
+
+/* An in-place operator on a number, for `in_place_now`, and an operator that reached the layer as a call of its
+ * ufunc on two numbers, for the road of `__array_ufunc__`: the scalar's own operator on the two values, when the
+ * operator is one of `QUICK_BINARY` and both operands are numbers. `ufunc` is the ufunc the operator stands for.
+ * Returns the new number as a lazy array, `Miss` when the operands are anything else, or NULL. */
+static PyObject *
+number_in_place(PyObject *ufunc, PyObject *target, PyObject *other)
+{
+    for (int which = 0; which < Q_BINARY; which++) {
+        if (binary_calls[which] != ufunc) {
+            continue;
+        }
+        PyObject *pair[2] = {target, other}, *values[2], *held[2];
+        int strict = 0;
+        int numbers = numbers_of(pair, 2, values, held, &strict);
+        if (numbers < 0) {
+            return NULL;
+        }
+        if (!numbers) {
+            return Miss;
+        }
+        PyObject *value = NUMBER_BINARY[which](values[0], values[1]);
+        Py_XDECREF(held[0]);
+        Py_XDECREF(held[1]);
+        return number_made(value, strict);
+    }
+    return Miss;
 }
 
 static PyObject *
@@ -6365,6 +6457,32 @@ module_at_once_counts(PyObject *module, PyObject *ignored)
     return Py_BuildValue("(LL)", made_at_once, written_at_once);
 }
 
+/* `small_reads(function)`: the function that computes the node of a lazy array, which `small_pending` calls; None
+ * to have a small call wait for a pending operand as any other does. */
+static PyObject *
+module_small_reads(PyObject *module, PyObject *function)
+{
+    Py_XSETREF(compute_small, function == Py_None ? NULL : Py_NewRef(function));
+    Py_RETURN_NONE;
+}
+
+/* `release_pending()`: give back the table of the pending set when nothing is pending. A set keeps the table of its
+ * largest moment, and reading it walks the whole table (`graph.release_pending`). Finding the set empty and
+ * clearing it are one step here, with no other thread of the interpreter between them: in Python they are two, and
+ * a node written between them would be taken out of the set and never computed before a write. True when the set
+ * was empty. */
+static PyObject *
+module_release_pending(PyObject *module, PyObject *ignored)
+{
+    if (PySet_GET_SIZE(pending) != 0) {
+        Py_RETURN_FALSE;
+    }
+    if (PySet_Clear(pending) < 0) {
+        return NULL;
+    }
+    Py_RETURN_TRUE;
+}
+
 /* The most operands a node is computed with on the C stack; one of more is left to Python. */
 #define MOST_COMPUTED 8
 
@@ -6731,6 +6849,10 @@ static PyMethodDef methods[] = {
     {"fusible", (PyCFunction)(void (*)(void))module_fusible, METH_FASTCALL,
      "Name the callables a kernel can make and their element type: a large call that is none of them is made at once."},
     {"at_once_counts", module_at_once_counts, METH_NOARGS, "(calls, writes) made at once since the module was loaded."},
+    {"small_reads", module_small_reads, METH_O,
+     "Be told the function that computes a lazy array's node, for a small call that reads a pending one; None for none."},
+    {"release_pending", module_release_pending, METH_NOARGS,
+     "Give back the table of the pending set when nothing is pending. True when the set was empty."},
     {"setup", (PyCFunction)(void (*)(void))module_setup, METH_VARARGS | METH_KEYWORDS,
      "Be told the layer's classes, memories and constants."},
     {"enable", module_enable, METH_O, "Take the quick roads (True) or hand every call to Python (False). Returns what it was."},

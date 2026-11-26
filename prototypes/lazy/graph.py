@@ -285,6 +285,8 @@ _pending: set[weakref.ref] = set()
 NOT_COMPUTED = _pending
 # Called with the reference of a node that has died.
 _forget = _pending.discard
+# The C core's `release_pending`, while the core is in use: see `release_pending` below.
+release: Callable[[], bool] | None = None
 
 # Whether each file seen on the stack is the layer's own code or NumPy's, by
 # the name its code objects carry. A name that is not a path (`<stdin>`) is
@@ -623,10 +625,35 @@ def pending_nodes() -> list[Node]:
         A list in descending number, so that `pop()` yields them in the order
         they were written.
     """
+    if not _pending:
+        # Nothing to copy, and the table of a set that was large goes back.
+        release_pending()
+        return []
     # `list()` copies the set in one step, so a node that dies or is made
     # while the copy is read changes nothing here.
     alive = (reference() for reference in list(_pending))
     return sorted((node for node in alive if node is not None and node.pending), key=lambda node: node.number, reverse=True)
+
+
+def release_pending() -> None:
+    """Give back the memory of the pending set once nothing is pending.
+
+    A set keeps the table of its largest moment: taking references out
+    never shrinks it, and reading the set walks the whole table. After one
+    graph of 44,000 nodes, each later look at what is pending, which every
+    write made at once begins with, walked a table of 131,072 places to
+    find nothing: 28 µs a write, and a program of small arrays that took
+    3.1 ms took 8.8 ms. `clear()` on the empty set lets the table go, and
+    the set stays the same object, which the C core holds.
+
+    Only the C core does it (`release`). Finding the set empty and clearing
+    it have to be one step: a node another thread writes between the two
+    would be taken out of the set, and a write made after it would not
+    compute it first. In Python they are two steps, so without the core the
+    table is kept, and an empty set is still answered without a walk.
+    """
+    if release is not None:
+        release()
 
 
 def settle(node: Node) -> None:

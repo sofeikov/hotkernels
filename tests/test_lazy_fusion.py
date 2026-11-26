@@ -637,6 +637,58 @@ def test_arrays_that_step_through_several_dimensions_are_gathered_once(shape: tu
     assert (fuse.STATS.declined == 0) == (rows * shape[2] >= 32)
 
 
+@pytest.mark.parametrize("width", (2, 7, 16, 25, 31, 32, 40))
+@pytest.mark.parametrize("special", (False, True))
+def test_a_product_of_three_is_stored_into_short_rows_of_a_result_that_steps(width: int, special: bool):
+    """`Ai[..., ip, kr] = taper * sx * mask[...]`: the result is every fourth element of an array with two more axes
+    after its grid, in rows that end short of the next. Below 32 elements to a row the module makes the product by a
+    loop of its own and stores each row at the result's step; the elements between are left as they were."""
+    grid = (12, 9, width + 1)
+    mask, deep = arrays(2, grid, special)
+    taper, sx = arrays(2, (8, 5, width), special)
+
+    def program(np: Any) -> Any:
+        """Two such stores, and one of another expression, which no loop of the module's is written for."""
+        Ai, Bi = np.ones(grid + (2, 2)), np.ones(grid + (2, 2))
+        Ai[2:-2, 2:-2, :-1, 1, 0] = np.asarray(taper) * np.asarray(sx) * np.asarray(mask)[2:-2, 2:-2, :-1]
+        Ai[2:-2, 2:-2, 1:, 0, 1] = np.asarray(deep)[1:-3, 3:-1, 1:] * np.asarray(sx) * np.asarray(mask)[2:-2, 2:-2, 1:]
+        Bi[2:-2, 2:-2, :-1, 1, 1] = (np.asarray(taper) - np.asarray(deep)[1:-3, 3:-1, 1:]) / np.asarray(sx)
+        return Ai, Bi
+
+    with numpy.errstate(all="ignore"):
+        expected = program(numpy)
+        got = program(lazy)
+        for theirs, ours in zip(expected, got):
+            assert same(theirs, ours.gather())
+    if not special and width < 32:
+        assert fuse.STATS.calls.get("fuse_product3_f64") == 2
+
+
+def test_a_recurrence_over_rows_is_written_into_the_array_a_row_at_a_time():
+    """`y[i, :] = a * out[i, :] + b * y[i - 1, :] + c * y[i - 2, :]`: the program reads rows of the array it writes
+    another row of. The rows read share no byte with the row written, so the write is made where the array is; a
+    whole array copied for each row took 11.6 s on a filter of 1,500 rows where NumPy takes 37 ms. The two
+    statements after the loop read bytes of the part they write, and those are made by way of a copy, as before."""
+    image = arrays(1, (40, 64))[0]
+
+    def program(np: Any) -> Any:
+        """A large array made first, then each row of another from the two rows before it, and one from itself."""
+        y = np.zeros_like(np.asarray(image)) + 1.0
+        out = 0.5 * (y + np.asarray(image))
+        y[0, :] = 0.25 * out[0, :]
+        y[1, :] = 0.25 * out[1, :] + 0.5 * out[0, :] + 0.125 * y[0, :]
+        for i in range(2, 40):
+            y[i, :] = 0.25 * out[i, :] + 0.5 * out[i - 1, :] + 0.125 * y[i - 1, :] + 0.0625 * y[i - 2, :]
+        y[5, :] = 2.0 * y[5, :] + y[4, :]
+        y[7, 1:] = y[7, :-1] * 3.0 + out[7, 1:]
+        return y
+
+    expected = program(numpy)
+    evaluate.WRITES.update(in_place=0, copied=0)
+    assert same(expected, program(lazy).gather())
+    assert evaluate.WRITES["copied"] == 2 and evaluate.WRITES["in_place"] >= 40
+
+
 def test_the_driver_refuses_a_program_that_is_not_one():
     """`_fused.program` checks every step against its kernel and the places it names before it computes anything."""
     module = fuse._fused

@@ -44,7 +44,7 @@ Try it from the repository's root with `uv run python`.
 | [_fused.c](_fused.c), [build_fused.py](build_fused.py) | The run of an expression's kernel calls, block by block, on arrays of any shape, in C, and the command that builds it with the kernels |
 | [kernels/](kernels) | The fused kernels, one directory each, checked by the judge as the kernels of `kernels/` are |
 | [make_kernel.py](make_kernel.py) | Writes a kernel from the name of its shape: the spec, the C reference and the NEON assembly |
-| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write. For fusion: `corpus.py`, twenty-six programs that run with NumPy or with the stand-in, three of them copied into `vendor/` and the rest the applications and workloads of `delivery/`; `mine.py`, which ranks the shapes of expression in them; `fusion_time.py`, which times each four ways; and `limit.py`, which measures what part of each program's time no fusion could remove, and what the fused run leaves above it, by kind of operation |
+| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write. For fusion: `corpus.py`, twenty-six programs that run with NumPy or with the stand-in, three of them copied into `vendor/` and the rest the applications and workloads of `delivery/`; `mine.py`, which ranks the shapes of expression in them; `fusion_time.py`, which times each four ways; and `limit.py`, which measures what part of each program's time no fusion could remove, what the fused run leaves above it by kind of operation, and what the calls NumPy still makes in the fused run could at most lose |
 
 ## Looking at its graphs
 
@@ -107,7 +107,7 @@ fuse.disable()
 
 - **What is fused** is an expression of additions, subtractions, multiplications, divisions, maxima, minima, square roots, comparisons under `np.where` and a few more on float64 arrays, whose intermediates nothing else reads. Everything else is computed by NumPy's own calls, as before.
 - **An expression is a program of kernel calls,** run a block of 4,096 elements at a time, so that what one kernel gives the next stays in the cache and only the result is written to memory.
-- **Rows of a few elements are walked as one run,** where NumPy's loop is called for each row: `table - row` on rows of 2 to 15 elements is one kernel call, 1.8 to 9 times as fast as NumPy's; a slice with elements between its rows is walked straight through them; and one operation of arithmetic on such rows, at any pitch or with a value for each row, is a loop of the module's own, 1.1 to 5.4 times NumPy's call.
+- **Rows of a few elements are walked as one run,** where NumPy's loop is called for each row: `table - row` on rows of 2 to 15 elements is one kernel call, 1.8 to 9 times as fast as NumPy's; a slice with elements between its rows is walked straight through them; and one operation of arithmetic on such rows, at any pitch or with a value for each row, is a loop of the module's own, 1.1 to 5.4 times NumPy's call. A product of three arrays stored into short rows of a result that steps over elements, `Ai[..., ip, kr] = a * b * mask[...]`, is such a loop too, 1.5 times NumPy's.
 - **`hotkernels.install()` is in effect with it.** `fuse.enable()` installs the package's single-operation kernels unless told not to (`install=False`), so a program gains from both, and `fuse.disable()` takes them out again if it was what installed them.
 - **Eighty kernels**, NEON for ARM64, in [kernels/](kernels/README.md): fourteen written by hand, and sixty-six that `make_kernel.py` wrote from the names of their shapes, the single operations among them. On another architecture each is built from its C reference.
 - **A write is part of its expression:** `u[1:-1, 1:-1] = e` is computed straight into that part of `u`.
@@ -119,7 +119,7 @@ Four tools, needing `--group apps --group workloads` for the programs that call 
 uv run --group apps --group workloads python -m prototypes.lazy.programs.mine --size large          # which shapes occur, and what they cost
 uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --size large   # each program: NumPy, and with hotkernels installed eagerly, lazily and fused
 uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --plain        # the lazy runs with nothing installed as well
-uv run --group apps --group workloads python -m prototypes.lazy.programs.limit --size large         # each program: what no fusion could remove, and what is left
+uv run --group apps --group workloads python -m prototypes.lazy.programs.limit --size large         # each program: what no fusion could remove, what is left, and what of the fused run could still go
 uv run python -m prototypes.lazy.make_kernel "sub(V0,mul(S0,V1))"                                   # write the kernel of a shape
 ```
 

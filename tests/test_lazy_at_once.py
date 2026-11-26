@@ -185,7 +185,8 @@ def test_a_shape_that_does_not_hold_the_elements_is_refused_in_numpys_words():
 # ---- Small calls made at once.
 
 def test_a_small_call_is_made_at_once_and_a_large_one_is_deferred(at_once: None):
-    """Under a limit a call on arrays that have their values leaves nothing pending; at the limit it is a node."""
+    """Under a limit a call on arrays that have their values leaves nothing pending; at the limit it is a node. A
+    small call on an operand that waits has the operand computed, and what else waits goes on waiting."""
     array.at_once_below(100)
     small, large = lazy.asarray(numpy.arange(99.0)), lazy.asarray(numpy.arange(100.0))
     before = graph.COUNTS.deferred
@@ -194,9 +195,13 @@ def test_a_small_call_is_made_at_once_and_a_large_one_is_deferred(at_once: None)
     assert same(numpy.arange(99.0) * 2.0 + 1.0, result.gather())
     pending = large * 2.0
     assert pending._node.pending
-    on_pending = pending[:5] + 1.0  # Small, but its operand has no values yet.
-    assert on_pending._node.pending
+    wider = pending + 1.0  # Large, on an operand that waits: it waits as well.
+    assert wider._node.pending and pending._node.pending
+    on_pending = pending[:5] + 1.0  # Small: what it reads is computed, and the call is made at once.
+    assert not on_pending._node.pending and not pending._node.pending and wider._node.pending
+    assert graph.pending_count() == 1
     assert same((numpy.arange(100.0) * 2.0)[:5] + 1.0, on_pending.gather())
+    assert same(numpy.arange(100.0) * 2.0 + 1.0, wider.gather())
     total = large.sum()  # A small result of a large array that has its values.
     assert not total._node.pending and same(numpy.arange(100.0).sum(), total.gather())
 
@@ -280,12 +285,12 @@ def test_a_write_at_once_is_seen_through_every_view(at_once: None):
 def test_a_write_is_deferred_while_something_is_pending(at_once: None):
     """A pending operation may read what the array holds, so the write waits its turn and the reader has the old contents."""
     array.at_once_below(100)
-    large = lazy.asarray(numpy.arange(200.0)) * 1.0
+    large = lazy.asarray(numpy.arange(200.0).reshape(20, 10))
     x = lazy.zeros(10)
-    reader = large[:10] + x  # Pending: `large * 1.0` is.
+    reader = large + x  # Pending: a large call waits.
     x[0] = 5.0
     assert x._node.pending
-    assert same(numpy.arange(10.0), reader.gather())
+    assert same(numpy.arange(200.0).reshape(20, 10), reader.gather())
     assert x.gather()[0] == 5.0
 
 
@@ -332,12 +337,12 @@ def test_a_deferred_operation_on_an_array_that_holds_its_value_gives_it_a_node(a
     """A large call waits, and what it reads becomes a node of the graph like any other."""
     array.at_once_below(100)
     small = lazy.zeros(50) + 3.0
-    large = lazy.asarray(numpy.arange(200.0)) * 2.0
+    large = lazy.asarray(numpy.arange(200.0).reshape(4, 50))
     assert type(small._held) is numpy.ndarray
-    pending = large[:50] + small
+    pending = large + small
     assert pending._node.pending and type(small._held) is array._Cell
     assert small._node in pending._node.args
-    assert same((numpy.arange(200.0) * 2.0)[:50] + 3.0, pending.gather())
+    assert same(numpy.arange(200.0).reshape(4, 50) + 3.0, pending.gather())
 
 
 def test_a_view_taken_at_once_holds_numpys_view(at_once: None):
@@ -535,6 +540,83 @@ def test_a_large_call_no_kernel_could_make_is_made_at_once_by_the_core():
         assert graph.COUNTS.deferred == deferred + 2 and same(data * 2.0 + 1.0, waits.gather())
     finally:
         fuse.disable()
+
+
+def test_an_operator_in_place_on_a_number_is_the_numpy_scalars_own(at_once: None):
+    """`trace += np.tanh(a[i, i])`: a NumPy scalar cannot be written, so the operator gives a new number by the
+    scalar's own arithmetic, with its type and bits, and another name for the old number keeps the old one."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 6))
+    whole = numpy.arange(1, 9)
+
+    def program(np: Any) -> list:
+        """In-place operators of every kind on numbers taken out of arrays, each with a second name for the old one."""
+        a, k = np.asarray(data), np.asarray(whole)
+        results = []
+        trace = 0.0
+        for i in range(6):
+            trace += np.tanh(a[i, i])
+        results.append(trace)
+        for start, steps in ((a[1, 2], ("+= 1.5", "-= a[0, 0]", "*= 3", "/= a[2, 2]", "//= 0.25", "%= 0.5")),
+                             (k.sum(), ("+= 1", "*= k[2]", "//= 3", "%= 5", "&= 6", "|= 1", "^= 3"))):
+            for step in steps:
+                names = {"x": start, "a": a, "k": k}
+                exec(f"old = x\nx {step}", names)
+                results.extend((names["x"], names["old"]))
+        return results
+
+    expected = program(numpy)
+    deferred = graph.COUNTS.deferred
+    got = program(lazy)
+    assert graph.COUNTS.deferred == deferred
+    for theirs, ours in zip(expected, got):
+        value = ours.gather() if type(ours) is LazyArray else ours
+        assert type(value) is type(theirs) and same(theirs, value)
+
+
+def test_a_numpy_scalar_of_the_programs_own_is_a_number_to_the_layer(at_once: None):
+    """`alpha * a[i, k]` and `k * row` with `alpha` and `k` NumPy scalars the program made itself: NumPy's values and
+    types either way round, on a number and on an array, and no node."""
+    data = numpy.random.default_rng(SEED).standard_normal((6, 6))
+
+    def program(np: Any) -> list:
+        """Operators between NumPy scalars of several types and numbers and rows taken out of an array."""
+        a = np.asarray(data)
+        k, single, whole = numpy.float64(1.5), numpy.float32(0.25), numpy.int64(3)
+        return [k * a[1, 2], a[1, 2] * k, k - a[0, 0], a[0, 0] / k, single + a[2, 2], a[2, 2] - single, whole * a[3, 3],
+                a[3, 3] ** whole, k * a[1, :], a[1, :] * k, single * a[:, 2], a[:, 2] / single, whole - a[4, :], a[4, :] // whole,
+                k < a[1, 2], a[1, :] >= k]
+
+    expected = program(numpy)
+    deferred = graph.COUNTS.deferred
+    got = program(lazy)
+    assert graph.COUNTS.deferred == deferred
+    for theirs, ours in zip(expected, got):
+        value = ours.gather() if type(ours) is LazyArray else ours
+        assert type(value) is type(theirs) and same(theirs, value)
+
+
+def test_a_write_at_once_goes_into_an_array_the_program_was_handed(at_once: None):
+    """An array that came in through `np.asarray` is written where it is when nothing is pending, a row or an element
+    at a time, by an assignment and by an operator; the array handed in sees every write, as with NumPy."""
+    def program(np: Any, mine: numpy.ndarray) -> Any:
+        """A rank update a row at a time, and a stencil an element at a time, both into the array given."""
+        c = np.asarray(mine)
+        for i in range(1, 5):
+            c[i, :i + 1] *= 0.5
+            c[i, :i + 1] += 1.5 * c[i, 0] * c[:i + 1, 1]
+            for j in range(1, 5):
+                c[i, j] += c[i, j - 1]
+                c[i, j] /= 9.0
+        c[0, :] = c[1, :] - c[2, :]
+        return c
+
+    theirs, ours = numpy.arange(36.0).reshape(6, 6), numpy.arange(36.0).reshape(6, 6)
+    expected = program(numpy, theirs)
+    deferred, written = graph.COUNTS.deferred, array.at_once_counts()[1]
+    got = program(lazy, ours)
+    # Every statement is a write made at once: the two on a row, the two on each element, and the last.
+    assert graph.COUNTS.deferred == deferred and array.at_once_counts()[1] - written >= 4 * 2 + 4 * 4 * 2 + 1
+    assert same(expected, got.gather()) and same(theirs, ours)
 
 
 def test_a_whole_number_of_numpys_is_an_index_like_pythons(at_once: None):

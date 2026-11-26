@@ -479,6 +479,7 @@ def _end(progress: _Progress, roots: list[Node], trigger: Trigger) -> None:
     """
     if graph.observer is not None and progress.numbers:
         graph.observer.computed(progress.numbers, progress.failed, [root.number for root in roots], trigger)
+    graph.release_pending()
 
 
 def _needed(roots: Iterable[Node]) -> list[Node]:
@@ -590,7 +591,7 @@ _ALONE, _VIEW_ALONE = _calibrated()
 WRITES = {"in_place": 0, "copied": 0}
 
 
-def reusable(write: Node, held: int = 0) -> bool:
+def reusable(write: Node, held: int = 0, apart: int = 0) -> bool:
     """Say whether a write may be made into the memory its array already has, instead of into a copy.
 
     A write is defined as a copy of what the array held with the write
@@ -616,6 +617,9 @@ def reusable(write: Node, held: int = 0) -> bool:
         write: A pending node of kind WRITE.
         held: References to the old contents' node that the caller knows of and that read nothing after the
             write: a plan's own record of what it computes together with the write.
+        apart: Computed views of the old contents that the caller knows to lie wholly outside the part the
+            write changes. Such a view shows the same elements before the write and after it, whoever reads it
+            and whenever, so its reference to the array is no reader's.
 
     Returns:
         True when the write's first operand may be overwritten.
@@ -633,7 +637,7 @@ def reusable(write: Node, held: int = 0) -> bool:
     spare = arrays - 1 - _ALONE[1]
     if nodes - held > _ALONE[0] or spare < 0:
         return False
-    return spare == 0 or spare == _view_operands(write, memory)
+    return spare == 0 or spare == _view_operands(write, memory) + apart
 
 
 def _compute_one(node: Node, quiet: _Quiet) -> None:

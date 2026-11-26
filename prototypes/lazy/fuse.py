@@ -1613,6 +1613,22 @@ def _copies(operands: tuple) -> tuple[int, int]:
     return (len(seen), len(filled)) if seen else (0, 0)
 
 
+def _bytes_of(array: np.ndarray) -> tuple[int, int] | None:
+    """Work out the stretch of memory an array's elements lie in.
+
+    Args:
+        array: Any array.
+
+    Returns:
+        (the address of its first byte, the address after its last), for an array with elements and no stride
+        below zero; None for any other, which a caller takes to lie anywhere.
+    """
+    if not array.size or any(stride < 0 for stride in array.strides):
+        return None
+    first = array.__array_interface__["data"][0]
+    return first, first + sum((length - 1) * stride for length, stride in zip(array.shape, array.strides)) + array.itemsize
+
+
 class _Group:
     """The nodes computed together under one node: the tiles of an expression that feed one another, with what they read.
 
@@ -1716,6 +1732,41 @@ class _Group:
             parts.add(id(self.target))
         return held + len(parts)
 
+    def _apart(self, write: Node) -> int:
+        """Count the views of the written array that the program reads and that lie outside the part it writes.
+
+        `y[i, :] = a * x[i, :] + b * y[i - 1, :] + c * y[i - 2, :]`, a recurrence over the rows of an array,
+        reads two rows of the array it writes a third of. The rows read are views computed before the program
+        runs, and each view's array refers to the array it is a view of, which `evaluate.reusable` takes for a
+        reader of what the array held: the write then went to a copy of the whole array, once for every row,
+        and a filter of 1,500 rows on 1.5 million elements took 11.6 s where NumPy takes 37 ms. A view that
+        shares no byte with the part written shows the same elements before and after the write, so it is no
+        reader of anything the write changes.
+
+        Args:
+            write: The write whose array the group's result belongs in, from `_written`.
+
+        Returns:
+            How many different operands of the program are computed views made directly of the array the write's
+            first operand holds, with no byte in common with the part written. None for a write of the whole
+            array, and none when a layout is one whose bytes `_bytes_of` does not work out.
+        """
+        old = write.args[0]
+        if self.result != STORE or self.target is None or type(old) is not Node or type(old.value) is not np.ndarray:
+            return 0
+        memory = old.value
+        written = _bytes_of(self.target.of(memory))
+        if written is None:
+            return 0
+        views: dict[int, bool] = {}
+        for source in self.sources:
+            if type(source) is Node and source.operation is None and source.number not in views:
+                value = source.value
+                if type(value) is np.ndarray and value.base is memory:
+                    read = _bytes_of(value)
+                    views[source.number] = read is not None and (read[1] <= written[0] or written[1] <= read[0])
+        return sum(views.values())
+
     def _may_overwrite(self, write: Node) -> str:
         """Say whether the kernel may write its result into the memory the written array has.
 
@@ -1743,7 +1794,7 @@ class _Group:
         # refer to that node while its references are counted.
         reading = held - (1 if self.target is not None and self.target.old is write.args[0]
                           and not any(source is self.target for source in self.sources) else 0)
-        if not evaluate.reusable(write, held):
+        if not evaluate.reusable(write, held, self._apart(write)):
             return COPIED
         return THROUGH if reading and self.watched else INTO_ARRAY
 

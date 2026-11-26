@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 34
+CORE_VERSION = 36
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -765,6 +765,24 @@ def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, 
         _hand_out(name, _strict(args, kwargs), True, [lazy._node for lazy in _lazies_in((args, kwargs))],
                   f"{name} would write the values of a lazy array into an ndarray: call .gather() on the lazy array first")
     operation(*_valued(args), **_valued(kwargs))
+
+
+def _compute_for_small(lazy: "LazyArray") -> None:
+    """Compute a pending array that a call on small operands reads, so that the call need not wait as a node.
+
+    The C core calls this (`small_reads`) when small calls are made at
+    once and an operand of one, itself small, has no value yet: a row of a
+    large array that is still pending. The array is computed with what it
+    reads, as `float(x)` computes one, and the call is then NumPy's at that
+    line.
+
+    Args:
+        lazy: A lazy array whose node is pending.
+
+    Raises:
+        Exception: What computing the node raised.
+    """
+    evaluate.compute([lazy._node], Trigger(graph.NEEDED, "a call on small arrays"))
 
 
 def _method(name: str) -> Callable[..., Any]:
@@ -2242,6 +2260,7 @@ def use_core(core: Any) -> None:
     _stood_in_for_elsewhere.clear()
     graph.deferred = _python_deferred
     evaluate.compute_plain = evaluate.run_nodes = evaluate.needed = None
+    graph.release = None
     if _core is not None:
         at_once_below(0)
         _core.enable(False)
@@ -2271,6 +2290,8 @@ def use_core(core: Any) -> None:
     core.quick_slots()
     graph.deferred = core.deferred
     evaluate.compute_plain, evaluate.run_nodes, evaluate.needed = core.compute_plain, core.run_nodes, core.needed
+    graph.release = core.release_pending
+    core.small_reads(_compute_for_small)
     _core = core
 
 

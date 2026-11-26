@@ -40,3 +40,17 @@ What the kernels took for the nodes they computed
 
 `NumPy ms` is what NumPy took for every operation of the class a kernel can make, and `in cache ms` what its loops
 take for as many elements in the cache.
+
+What NumPy still makes in the fused run, and how much of that could be removed
+
+{{ "%-18s %9s %10s  %9s %10s  %9s %10s  %9s %10s  %9s %10s  %12s %10s"|format("program", "kernels", "", "arithmetic", "", "masks", "", "library", "", "other types", "", "the rest of", "could") }}
+{{ "%-18s %9s %10s  %9s %10s  %9s %10s  %9s %10s  %9s %10s  %12s %10s"|format("", "ms", "", "ms", "removable", "ms", "removable", "ms", "removable", "ms", "removable", "the run ms", "still go") }}
+{% for limit in limits %}
+{{ "%-18s %9.2f %10s  %9.2f %10.2f  %9.2f %10.2f  %9.2f %10.2f  %9.2f %10.2f  %12.2f %10.2f"|format(limit.name, limit.kernel_ns / ns_per_ms, "", limit.still_ns.get("arithmetic", 0) / ns_per_ms, limit.still_removable("arithmetic") / ns_per_ms, limit.still_ns.get("masks", 0) / ns_per_ms, limit.still_removable("masks") / ns_per_ms, limit.still_ns.get("library", 0) / ns_per_ms, limit.still_removable("library") / ns_per_ms, limit.still_ns.get("other types", 0) / ns_per_ms, limit.still_removable("other types") / ns_per_ms, limit.unreachable_ns / ns_per_ms, limit.still_reachable_ns / ns_per_ms) }}
+{% endfor %}
+
+The fused run in three parts. `kernels` is the time inside its programs. The classes are the calls NumPy still
+makes for nodes no program computed, with what of each would go if it cost what its loop costs in the cache.
+`the rest of the run` is everything else: the program's own code, a library's, matrix products, moving elements,
+and the layer. `could still go` is the sum of the removable parts: what a fusion of all that is left, at no cost,
+would take off the fused run.

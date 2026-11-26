@@ -20,7 +20,9 @@ For each program of `corpus.py` this tool:
 - measures, for each different operation, what an element costs in the
   cache, on the first elements of the operands the program gave it, and
   takes that times the elements as the part that has to stay;
-- times the fused run.
+- times the fused run;
+- runs it fused once more with every call NumPy still makes timed, and holds
+  each against what its loop costs in the cache.
 
 The values matter: what `erf` or `exp` costs depends on its argument, so an
 operation is timed on the program's own numbers, not on made-up ones, and
@@ -33,6 +35,15 @@ removed from its element-by-element operations and its reductions over
 every element: what a fusion of all of them, of any kind, with no cost of
 its own, would leave. What lies between the fused run and the floor is what
 is left to gain; the classes say which operations it is in.
+
+The floor is of the eager program, and a kernel may run below it, since it
+makes several operations for each load and store. So the last table is of
+the fused run itself, in three parts: the time inside the kernels'
+programs; the calls NumPy still makes for operations a kernel could make,
+with what of each would go if it cost what its loop costs in the cache; and
+the rest of the run, which is the program's own code, a library's, matrix
+products, moves and the layer. The sum of what would go is the most a
+further fusion of anything not yet fused could take off that run.
 
 Timings are only meaningful on a machine that is doing nothing else.
 """
@@ -135,6 +146,24 @@ class Limit:
     # Nanoseconds the fused run spent inside kernels' programs, and how many nodes they computed.
     kernel_ns: int = 0
     fused_nodes: int = 0
+    # Nanoseconds NumPy's own calls took in the fused run for the nodes of each class that no program computed,
+    # and of that, what the same loops take in the cache: the part that would stay whatever computed them.
+    still_ns: dict[str, int] = field(default_factory=dict)
+    still_kept: dict[str, int] = field(default_factory=dict)
+
+    def still_removable(self, label: str) -> int:
+        """Return what could at most be taken off the calls NumPy still makes for a class in the fused run."""
+        return max(0, self.still_ns.get(label, 0) - self.still_kept.get(label, 0))
+
+    @property
+    def still_reachable_ns(self) -> int:
+        """Nanoseconds that could still be removed from the fused run, over the classes fusion could reach."""
+        return sum(self.still_removable(label) for label in REACHABLE)
+
+    @property
+    def unreachable_ns(self) -> int:
+        """Nanoseconds of the fused run that are not in its kernels and not in a call fusion could reach."""
+        return self.fused_ns - self.kernel_ns - sum(self.still_ns.get(label, 0) for label in REACHABLE)
 
     def removable(self, label: str) -> int:
         """Return what fusion could take off a class at most: its time less what its arithmetic costs in the cache."""
@@ -459,8 +488,106 @@ def _installed(program: corpus.Program, inputs: tuple, runs: int, limit: Limit) 
         try:
             limit.fused_ns = _timed(program, inputs, lazy, runs)
             limit.kernel_ns, limit.fused_nodes = _in_kernels(program, inputs, lazy)
+            limit.still_ns, limit.still_kept = _still_numpys(program, inputs, lazy, watcher)
         finally:
             fuse.disable()
+
+
+class _Remaining:
+    """Notes, in a fused run, what the calls NumPy still makes take, by the class of their node.
+
+    It stands between `evaluate` and the planner: the plan is fusion's own,
+    and each node of it is written down while it still has its operands,
+    as `_Watcher` writes one down, so that a call the meter reports can be
+    put in its class and held against what its like costs in the cache.
+    """
+
+    def __init__(self, planner: Callable[[list[Node]], Any], slopes: dict[Signature, float | None]) -> None:
+        """Start with nothing seen.
+
+        Args:
+            planner: Fusion's planner.
+            slopes: What one element of each operation costs in the cache, from the node-by-node run.
+        """
+        self.planner, self.slopes = planner, slopes
+        # The nodes of the computation at hand: their signature and largest operand, and those a program computes.
+        self.known: dict[int, tuple[Signature, int]] = {}
+        self.grouped: set[int] = set()
+        # By class: nanoseconds NumPy's calls took, and what the same loops take in the cache.
+        self.ns: dict[str, int] = {}
+        self.kept: dict[str, int] = {}
+
+    def plan(self, todo: list[Node]) -> Any:
+        """Write the nodes down, and plan as fusion does.
+
+        Args:
+            todo: The pending nodes about to be computed.
+
+        Returns:
+            Fusion's plan.
+        """
+        self._note(todo)
+        plan = self.planner(todo)
+        self.grouped = set(plan.groups) if plan is not None else set()
+        return plan
+
+    def _note(self, todo: list[Node]) -> None:
+        """Write down the signature and the largest operand of each node.
+
+        A function of its own, so that no name of it still refers to a node
+        when fusion plans: the planner fuses an operation only when nothing
+        but the operation that reads it refers to its node, and a loop
+        variable left on the oldest node of each computation kept that
+        node's expression from being fused, in this run alone.
+
+        Args:
+            todo: The pending nodes about to be computed.
+        """
+        self.known = {}
+        for node in todo:
+            largest = max([_elements(node.shape)] + [_elements(arg.shape) for arg in node.args
+                                                      if isinstance(arg, (Node, numpy.ndarray))])
+            signature = Signature(classify(node), node.operation, node.name, node.kind, str(node.dtype),
+                                  tuple(_operand(arg, largest) for arg in node.args))
+            self.known[node.number] = (signature, largest)
+
+    def measure(self, node: Node, ns: int) -> None:
+        """Count a call that was not a program's under its node's class.
+
+        Args:
+            node: The node, computed.
+            ns: Nanoseconds its computing took.
+        """
+        found = self.known.get(node.number)
+        if found is None or node.number in self.grouped:
+            return
+        signature, largest = found
+        self.ns[signature.label] = self.ns.get(signature.label, 0) + ns
+        slope = self.slopes.get(signature)
+        stays = ns if slope is None else min(ns, int(slope * largest))
+        self.kept[signature.label] = self.kept.get(signature.label, 0) + stays
+
+
+def _still_numpys(program: corpus.Program, inputs: tuple, lazy: Any, watcher: _Watcher) -> tuple[dict[str, int], dict[str, int]]:
+    """Run a program fused once more and add up what NumPy's own calls still take in it.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        lazy: The stand-in for `numpy`.
+        watcher: The node-by-node run's watcher, for what each operation costs in the cache.
+
+    Returns:
+        (nanoseconds of NumPy's calls by class, what of that stays in the cache by class).
+    """
+    remaining = _Remaining(evaluate.planner, watcher.slopes)
+    planner, meter = evaluate.planner, evaluate.meter
+    evaluate.planner, evaluate.meter = remaining.plan, remaining.measure
+    try:
+        _run(program, inputs, lazy)
+    finally:
+        evaluate.planner, evaluate.meter = planner, meter
+    return remaining.ns, remaining.kept
 
 
 def _in_kernels(program: corpus.Program, inputs: tuple, lazy: Any) -> tuple[int, int]:

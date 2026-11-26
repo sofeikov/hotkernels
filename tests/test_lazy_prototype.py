@@ -1304,3 +1304,23 @@ def test_a_gather_reaches_the_kernels_of_hotkernels():
     # often, not equally often: the layer's dry run for an element type is a real call, and a kernel
     # that takes arrays of any size takes it too.
     assert all(after.get(name, 0) - eager[name] >= count for name, count in taken_eagerly.items())
+
+
+def test_the_pending_set_gives_its_memory_back_after_a_large_graph():
+    """A set keeps the table of its largest moment, and every look at what is pending walks it: after a graph of
+    thousands of nodes the C core gives the table back, so that a later write does not pay for the graph before it.
+    Without the core the table stays, since Python cannot find the set empty and clear it in one step."""
+    small = sys.getsizeof(set())
+    total = lazy.zeros(8)
+    for step in range(5000):
+        total = total + float(step)
+    assert sys.getsizeof(graph._pending) > 16 * small
+    expected = numpy.zeros(8)
+    for step in range(5000):
+        expected = expected + float(step)
+    assert same(expected, total.gather())
+    del total
+    gc.collect()
+    assert graph.pending_nodes() == []
+    if graph.release is not None:
+        assert sys.getsizeof(graph._pending) <= 4 * small

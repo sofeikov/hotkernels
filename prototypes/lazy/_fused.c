@@ -1053,6 +1053,68 @@ program_rows(const row_kernel *made, const program_step *step, operand *reads, i
     return 0;
 }
 
+/* The kernel `program_stored` makes by a loop of its own: a product of three arrays. */
+#define STORED_KERNEL "fuse_product3_f64"
+
+/* A program that is one product of three arrays, stored into a result that steps over elements, in rows shorter
+ * than `SHORTEST_RUN` that the arrays read hold as runs: isoneutral mixing's `Ai_bx[2:-2, 2:-2, :-1, ip, kr] =
+ * taper * sxb * maskW[2:-2, 2:-2, :-1]`, sixteen such lines on a result with two more axes after its grid.
+ *
+ * NumPy makes the two products a row at a time and stores the rows at the step: 1,537 µs for a million elements in
+ * rows of 25, of which 731 µs the products. Rows that short are not worth gathering (`program_flat`), and a call
+ * of the kernel for each row with the row stored afterwards was built and took 1,632 µs: the call costs what the
+ * second pass did. Here each row is made into a buffer on the stack by a loop with nothing in it but the two
+ * multiplications, in the kernel's order, `a * (b * c)`, and stored from there: 985 µs for that statement written
+ * out by itself.
+ *
+ * `step` is the program's one step. The dimension outside the rows is walked here with the rows, and the ones
+ * outside that are stepped. Returns 0. */
+static int
+program_stored(const program_step *step, operand *reads, int arrays, int numbers_given, int dimensions, const npy_intp *shape)
+{
+    operand *target = &reads[arrays];
+    const operand *first = &reads[step->reads[0]], *second = &reads[step->reads[1]], *third = &reads[step->reads[2]];
+    int last = dimensions - 1, along = dimensions - 2;
+    npy_intp rows = shape[along], width = shape[last], spread = target->strides[last];
+    npy_intp position[MOST_DIMENSIONS] = {0};
+    double made[SHORTEST_RUN];
+    for (;;) {
+        for (npy_intp row = 0; row < rows; row++) {
+            const double *a = (const double *)(first->data + row * first->strides[along]);
+            const double *b = (const double *)(second->data + row * second->strides[along]);
+            const double *c = (const double *)(third->data + row * third->strides[along]);
+            char *out = target->data + row * target->strides[along];
+            for (npy_intp each = 0; each < width; each++) {
+                made[each] = a[each] * (b[each] * c[each]); /* The kernel's order, which is the expression's. */
+            }
+            for (npy_intp each = 0; each < width; each++) {
+                *(double *)(out + each * spread) = made[each];
+            }
+        }
+        int axis = along - 1;
+        for (; axis >= 0; axis--) {
+            if (++position[axis] < shape[axis]) {
+                for (int place = 0; place <= arrays + numbers_given; place++) {
+                    if (reads[place].is_array) {
+                        reads[place].data += reads[place].strides[axis];
+                    }
+                }
+                break;
+            }
+            for (int place = 0; place <= arrays + numbers_given; place++) {
+                if (reads[place].is_array) {
+                    reads[place].data -= reads[place].strides[axis] * (shape[axis] - 1);
+                }
+            }
+            position[axis] = 0;
+        }
+        if (axis < 0) {
+            break;
+        }
+    }
+    return 0;
+}
+
 /* One step of a program with everything about it that does not change from run to run worked out: the kernel, and
  * for each array it reads and for its result the address of the pointer that says where that is now. An operand's
  * pointer moves as the walk steps; a buffer's stays. */
@@ -1383,6 +1445,22 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
         /* One operation of arithmetic on rows of a few elements: the module's own loop; see `program_rows`. */
         feclearexcept(FE_ALL_EXCEPT);
         program_rows(row_kernel_of(steps[0].kernel), &steps[0], reads, (int)arrays, numbers_given, dimensions, shape);
+        int flags = fetestexcept(REPORTED);
+        if (flags) {
+            feclearexcept(FE_ALL_EXCEPT);
+        }
+        return PyLong_FromLong(flags);
+    }
+    int by_stored = step_count == 1 && target->stepped && !in_place && dimensions > 1 && outer == dimensions - 1
+                    && run < SHORTEST_RUN && strcmp(steps[0].kernel->name, STORED_KERNEL) == 0;
+    for (int place = 0; by_stored && place < steps[0].kernel->vectors; place++) {
+        by_stored = reads[steps[0].reads[place]].strides[dimensions - 1] == ELEMENT;
+    }
+    if (by_stored) {
+        /* A product of three arrays into short rows of a result that steps: the module's own loop; see
+         * `program_stored`. */
+        feclearexcept(FE_ALL_EXCEPT);
+        program_stored(&steps[0], reads, (int)arrays, numbers_given, dimensions, shape);
         int flags = fetestexcept(REPORTED);
         if (flags) {
             feclearexcept(FE_ALL_EXCEPT);
