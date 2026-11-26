@@ -199,6 +199,50 @@ def test_a_small_call_is_made_at_once_and_a_large_one_is_deferred(at_once: None)
     assert not total._node.pending and same(numpy.arange(100.0).sum(), total.gather())
 
 
+def test_a_large_call_no_kernel_could_make_is_made_at_once(at_once: None):
+    """Told what a kernel can make, the core makes every other call at once whatever its size, and lets those wait."""
+    array.at_once_below(100, frozenset({numpy.add, numpy.multiply, numpy.absolute}), numpy.dtype(numpy.float64))
+    values = numpy.arange(500.0)
+    x = lazy.asarray(values)
+    mask = x > 100.0  # A comparison gives a mask.
+    assert not mask._node.pending and same(values > 100.0, mask.gather())
+    picked = x[mask]  # How many it selects is known once it is made.
+    assert not picked._node.pending and picked.shape == (399,) and same(values[values > 100.0], picked.gather())
+    product = x @ x  # A matrix product.
+    assert not product._node.pending and same(values @ values, product.gather())
+    exponent = lazy.exp(x * 0.0)  # Its operand waits, so it does too.
+    assert exponent._node.pending and same(numpy.exp(values * 0.0), exponent.gather())
+    waits = x * 2.0 + 1.0  # Arithmetic on float64: a kernel's.
+    assert waits._node.pending and same(values * 2.0 + 1.0, waits.gather())
+    turned = numpy.arange(500.0) + 1j
+    size = abs(lazy.asarray(turned))  # float64 from a complex array: no kernel reads that.
+    assert not size._node.pending and same(abs(turned), size.gather())
+    single = numpy.arange(500.0, dtype=numpy.float32)
+    doubled = lazy.asarray(single) * 2.0  # float32.
+    assert not doubled._node.pending and same(single * 2.0, doubled.gather())
+
+
+def test_a_function_that_gives_a_new_array_is_called_at_once_on_small_arrays(at_once: None):
+    """`np.dot`, `np.sum`, `np.copy` and their like on small arrays that have their values are NumPy's own calls."""
+    rng = numpy.random.default_rng(SEED)
+    a, b = rng.standard_normal((6, 4)), rng.standard_normal((4, 3))
+    la, lb = lazy.asarray(a), lazy.asarray(b)
+    cases = [
+        (numpy.dot(a, b), lazy.dot(la, lb)), (numpy.sum(a, axis=0), lazy.sum(la, axis=0)),
+        (numpy.sum(a), lazy.sum(la)), (numpy.max(a, axis=1, keepdims=True), lazy.max(la, axis=1, keepdims=True)),
+        (numpy.argmax(b), lazy.argmax(lb)), (numpy.copy(a), lazy.copy(la)), (numpy.outer(a[0], b[0]), lazy.outer(la[0], lb[0])),
+    ]
+    before = graph.COUNTS.deferred
+    for expected, got in cases:
+        assert isinstance(got, LazyArray) and not got._node.pending and same(expected, got.gather())
+    assert graph.COUNTS.deferred == before
+    copied = lazy.copy(la)
+    copied[0, 0] = 99.0  # A copy is an array of its own: the write does not reach `a`.
+    assert a[0, 0] != 99.0 and copied.gather()[0, 0] == 99.0
+    with pytest.raises(ValueError):
+        lazy.dot(la, la)
+
+
 def test_a_call_made_at_once_raises_and_warns_where_it_is_written(at_once: None):
     """NumPy's error is the program's at that line, as without the layer, and so is its warning."""
     a, b = lazy.asarray(numpy.ones(3)), lazy.asarray(numpy.ones(4))

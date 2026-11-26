@@ -109,7 +109,7 @@ fuse.disable()
 - **An expression is a program of kernel calls,** run a block of 4,096 elements at a time, so that what one kernel gives the next stays in the cache and only the result is written to memory.
 - **Seventy-eight kernels**, NEON for ARM64, in [kernels/](kernels/README.md): fourteen written by hand, and sixty-four that `make_kernel.py` wrote from the names of their shapes, the single operations among them. On another architecture each is built from its C reference.
 - **A write is part of its expression:** `u[1:-1, 1:-1] = e` is computed straight into that part of `u`.
-- **Small arrays are not planned for, and not written down either.** With fusion on, a call that gives fewer than 32,768 elements on arrays that have their values is made at once, and so is a write when nothing is pending. `fuse.MIN_ELEMENTS` and `fuse.AT_ONCE_BELOW` are the two limits; `array.at_once_below(n)` is the second by itself.
+- **Small arrays are not planned for, and not written down either.** With fusion on, a call that gives fewer than 32,768 elements on arrays that have their values is made at once, and so is a call of any size that no kernel could make (a comparison, a matrix product, `np.exp`, anything complex or float32), and a write when nothing is pending. `fuse.MIN_ELEMENTS` and `fuse.AT_ONCE_BELOW` are the two limits; `array.at_once_below(n)` is the second by itself.
 
 Three tools, needing `--group apps --group workloads` for the programs that call a library:
 

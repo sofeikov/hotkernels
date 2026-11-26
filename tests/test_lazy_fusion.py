@@ -575,6 +575,22 @@ def test_an_expression_assigned_to_part_of_an_array_is_computed_into_it():
     assert fuse.STATS.calls == {"fuse_add_scaled_f64": 1, "fuse_sub_v_v_f64": 1, "fuse_mul_difference_f64": 1}
 
 
+def test_a_loop_of_fused_writes_into_parts_of_an_array_copies_nothing():
+    """Each expression is computed straight into its part of the array: no copy of the array, turn after turn."""
+    grid, other = arrays(2, (30, 40))
+    u, expected = lazy.array(grid), grid.copy()
+    evaluate.WRITES.update(in_place=0, copied=0)
+    for _ in range(4):
+        u[1:-1, 1:-1] = lazy.asarray(other)[1:-1, 1:-1] * 0.5 + lazy.asarray(other)[2:, 1:-1]
+        u[0, :] = u[1, :]
+        u[2:, 3:] = (lazy.asarray(other)[2:, 3:] - 1.5) * lazy.asarray(other)[:-2, :-3]
+        expected[1:-1, 1:-1] = other[1:-1, 1:-1] * 0.5 + other[2:, 1:-1]
+        expected[0, :] = expected[1, :]
+        expected[2:, 3:] = (other[2:, 3:] - 1.5) * other[:-2, :-3]
+    assert same(expected, u.gather())
+    assert evaluate.WRITES == {"in_place": 12, "copied": 0} and fuse.STATS.declined == 0
+
+
 def test_an_in_place_operator_on_part_of_an_array_reads_what_the_part_held():
     """`u[1:-1] += s * v` is one kernel call that reads the part of the old array and writes the part of the new."""
     grid, other = arrays(2, (30, 40))

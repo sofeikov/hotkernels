@@ -1285,6 +1285,9 @@ MIN_ELEMENTS = 32_768
 BLOCK_ELEMENTS = 4096
 # What `_fused.program` takes at most: steps, arrays or numbers read, and buffers. As `_fused.c` has them.
 MOST_STEPS, MOST_OPERANDS, MOST_BUFFERS = 512, 128, 64
+# How a program's result gets into an array that a write is made into: written where the array is; computed into
+# a temporary of the part and assigned from there; or written into a copy of the array.
+INTO_ARRAY, THROUGH, COPIED = "into the array", "through a temporary", "copied"
 # Where a program's last step writes: the program's result. And the place of a program's first buffer while its
 # steps are written, counted down from here, before the count of its operands is known.
 RESULT, BUFFERS = -1, -2
@@ -1337,10 +1340,24 @@ class Stats:
 
 # The one set of counters of the process.
 STATS = Stats()
-# The lines of the program whose kernel call raised a floating-point exception that NumPy reports. Such a call's
-# result is dropped and NumPy's calls are made, so the expression is computed twice; a line that did it once is
-# left to NumPy from then on, which is what a loop over data with an infinity or a division by zero needs.
+# The lines of the program whose expressions are left to NumPy: a kernel call of theirs raised a floating-point
+# exception that NumPy reports, or was declined for the layout of its arrays. A flagged call's result is dropped and
+# NumPy's calls are made, so the expression is computed twice; a declined one may have copied an array for nothing.
+# A line that did either once is not planned for again, which is what a loop needs: over data with an infinity
+# or a division by zero, or over slices the module does not walk.
 _flagged: set[graph.Origin] = set()
+
+
+def _leave_to_numpy(origin: graph.Origin | None) -> None:
+    """Remember a line of the program as one whose expressions are NumPy's calls from now on.
+
+    Args:
+        origin: The line that wrote the node a group was to give the value of; None for a node without one.
+    """
+    if len(_flagged) >= FLAGGED_LIMIT:
+        _flagged.clear()
+    if origin is not None:
+        _flagged.add(origin)
 
 
 class _StoreCall:
@@ -1508,7 +1525,7 @@ class _Group:
             parts.add(id(self.target))
         return held + len(parts)
 
-    def _may_overwrite(self, write: Node) -> bool:
+    def _may_overwrite(self, write: Node) -> str:
         """Say whether the kernel may write its result into the memory the written array has.
 
         A kernel's result is dropped when it raised a floating-point
@@ -1524,25 +1541,29 @@ class _Group:
             write: The write whose array the result belongs in, from `_written`.
 
         Returns:
-            True when both that holds and nothing else reads what the array held (`evaluate.reusable`).
+            INTO_ARRAY when it may. THROUGH when the array itself may be
+            written, since nothing else reads what it held, but the kernel
+            reads it and its result may have to be dropped: the result
+            then goes to a temporary and is assigned from there. COPIED
+            when something else still reads what the array held.
         """
         held = self._held(write)
         # The record of the part written into refers to the old node and reads nothing of it. No name here may
         # refer to that node while its references are counted.
         reading = held - (1 if self.target is not None and self.target.old is write.args[0]
                           and not any(source is self.target for source in self.sources) else 0)
-        if reading and self.watched:
-            return False
-        return evaluate.reusable(write, held)
+        if not evaluate.reusable(write, held):
+            return COPIED
+        return THROUGH if reading and self.watched else INTO_ARRAY
 
-    def _elementwise(self, write: Node | None, operands: tuple, reuse: bool) -> tuple[int, Any]:
+    def _elementwise(self, write: Node | None, operands: tuple, how: str) -> tuple[int, Any]:
         """Make the group's kernel call into the memory its result belongs in.
 
         Args:
             write: The write whose array the result belongs in, from `_written`; None when the group's node is
                 no write.
             operands: What the kernel reads.
-            reuse: Whether that array may be written where it is.
+            how: INTO_ARRAY, THROUGH or COPIED, from `_may_overwrite`.
 
         Returns:
             (what `_fused.elementwise` returned, the node's value). For a
@@ -1558,12 +1579,26 @@ class _Group:
         if type(old) is not Node or old.operation is not None or old.failure is not None:
             return _fused.DECLINED, None
         memory = old.value
-        if self.result == STORE:
-            value, out = (memory, self.target.of(memory)) if reuse else _copy_for(self.target, memory)
+        part = None
+        if self.result != STORE:
+            # The whole array is written: where it is, or into new memory laid out as it is. Never a copy.
+            value = out = memory if how == INTO_ARRAY else np.empty_like(memory)
+        elif how == INTO_ARRAY:
+            value, out = memory, self.target.of(memory)
+        elif how == THROUGH:
+            # `x[i] += e` where an exception may be reported: computed into a temporary of the part, and
+            # assigned from it once the result is known to be kept. A pass more, and no copy of the array.
+            value, part = memory, self.target.of(memory)
+            out = np.empty(part.shape)
         else:
-            value = out = memory if reuse else np.empty_like(memory)
+            value, out = _copy_for(self.target, memory)
+            if out.size != value.size:
+                evaluate.WRITES["copied"] += 1  # The array was copied for the part to be written into the copy.
         raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
-        if reuse and raised != _fused.DECLINED and not raised & self.watched:
+        kept = raised != _fused.DECLINED and not raised & self.watched
+        if kept and part is not None:
+            part[...] = out
+        if kept and value is memory:
             # The old node's memory is this node's now.
             old.value = None
             evaluate.WRITES["in_place"] += 1
@@ -1582,9 +1617,12 @@ class _Group:
             kernel raised an exception NumPy would have reported, in which
             case NumPy's own calls are what report it.
         """
+        if node.origin in _flagged:
+            # The line was given up after this plan was made: an earlier group of it, in this same computation.
+            return False
         # Asked before the operands are collected: a view of the array among them would count as a reader of it.
         write = self._written(node) if node.kind == rules.WRITE else None
-        reuse = write is not None and self._may_overwrite(write)
+        how = self._may_overwrite(write) if write is not None else COPIED
         operands = self.operands()
         if operands is None:
             return False
@@ -1600,16 +1638,16 @@ class _Group:
                 count *= length
             value: Any = np.float64(total / count) if kernel.mean else np.float64(total)
         else:
-            raised, value = self._elementwise(write, operands, reuse)
+            raised, value = self._elementwise(write, operands, how)
             if raised == _fused.DECLINED:
                 STATS.declined += 1
+                # Arrays laid out in a way the module does not walk. The line will hand it the same arrays at
+                # its next turn, and a write into part of an array may have copied the array for nothing.
+                _leave_to_numpy(node.origin)
                 return False
         if raised & self.watched:
             STATS.flagged += 1
-            if len(_flagged) >= FLAGGED_LIMIT:
-                _flagged.clear()
-            if node.origin is not None:
-                _flagged.add(node.origin)
+            _leave_to_numpy(node.origin)
             return False
         node.value = value
         graph.settle(node)
