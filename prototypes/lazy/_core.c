@@ -34,7 +34,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 19
+#define CORE_VERSION 20
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -141,7 +141,11 @@ static Py_ssize_t small_limit = 0;
 /* How many calls and writes were made at once that way, for the tools that measure a program. */
 static long long made_at_once = 0, written_at_once = 0;
 static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
+static PyObject *handled_apart;      /* `array.HANDLED_APART`: the functions `__array_function__` has a way of its own for */
+static PyObject *shaped_like;        /* `array.SHAPED_LIKE`: `np.zeros_like` and its kind */
+static PyObject *empty_string;       /* "", the kind of a node for an array that came from outside or was just made */
 static PyObject *s_array;            /* "array", what a node with a value is called */
+static PyObject *s_transpose;        /* "transpose", the method behind `x.T` */
 /* Returned by a quick road that does not apply: the caller then takes the Python road. Never seen from Python
  * except as the result of `try_defer`. */
 static PyObject *Miss;
@@ -443,7 +447,7 @@ ready_now(PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *kind)
  * wrote it. NumPy's exception or warning, if any, is the program's there and then, as without the layer. Returns a
  * node that has the value (new reference), `Miss` when NumPy answered with something that is no array, or NULL. */
 static PyObject *value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, PyObject *strict,
-                            PyObject *spec, PyObject *origin);
+                            PyObject *spec, PyObject *origin, PyObject *kind);
 
 static PyObject *
 made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *dtype,
@@ -467,7 +471,8 @@ made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, 
         Py_DECREF(value);
         return Miss;
     }
-    return value_node(value, name, shape, dtype, strict, spec, origin);
+    made_at_once++;
+    return value_node(value, name, shape, dtype, strict, spec, origin, at_once_kind);
 }
 
 /* A node that has its value: as `graph.leaf`, with the shape and the element type given, which are the value's.
@@ -475,7 +480,7 @@ made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, 
  * NULL otherwise. Returns a new reference. */
 static PyObject *
 value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, PyObject *strict, PyObject *spec,
-           PyObject *origin)
+           PyObject *origin, PyObject *kind)
 {
     PyObject *number = Py_TYPE(numbers)->tp_iternext(numbers);
     PyObject *none = PyDict_New();
@@ -497,11 +502,10 @@ value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, Py
     SLOT(node, node_at[N_ERRSTATE]) = Py_NewRef(Py_None);
     SLOT(node, node_at[N_VALUE]) = value;
     SLOT(node, node_at[N_FAILURE]) = Py_NewRef(Py_None);
-    SLOT(node, node_at[N_KIND]) = Py_NewRef(at_once_kind);
+    SLOT(node, node_at[N_KIND]) = Py_NewRef(kind);
     SLOT(node, node_at[N_STRICT]) = Py_NewRef(strict);
     SLOT(node, node_at[N_EXPOSED]) = Py_NewRef(Py_False);
     SLOT(node, node_at[N_SPEC]) = Py_NewRef(spec);
-    made_at_once++;
     PyObject *observer = PyDict_GetItemWithError(graph_names, s_observer);
     if (observer != NULL && observer != Py_None) {
         PyObject *heard = PyObject_CallMethodObjArgs(observer, s_made, node, name, NULL);
@@ -2071,6 +2075,8 @@ fail:
 
 /* Whether a write into a lazy array can be a node, as far as this file can tell: `array._may_defer_write`, with
  * anything it would have to work out left to Python. Returns the cell's node (borrowed), or NULL for "ask Python". */
+static int is_admissible(PyObject *node);
+
 static PyObject *
 writable(PyObject *target)
 {
@@ -2082,10 +2088,9 @@ writable(PyObject *target)
         || PyTuple_GET_SIZE(SLOT(held, node_at[N_SHAPE])) == 0) {
         return NULL;
     }
-    /* No length of zero and an element type the layer defers: what `rules._admissible` says, remembered. */
-    PyObject *spec = SLOT(held, node_at[N_SPEC]);
-    PyObject *allowed = spec ? PyDict_GetItemWithError(admissible, spec) : NULL;
-    if (allowed != Py_True) {
+    /* No length of zero and an element type the layer defers: what `rules._admissible` says, remembered. A node
+     * made with its value has not been asked for its number yet, and is asked here. */
+    if (is_admissible(held) != 1) {
         PyErr_Clear();
         return NULL;
     }
@@ -2702,19 +2707,26 @@ item_now(PyObject *target, PyObject *index, PyFrameObject *frame)
     if (value == NULL) {
         goto fail;
     }
-    shape = PyObject_GetAttr(value, s_shape);
-    dtype = shape ? PyObject_GetAttr(value, s_dtype) : NULL;
-    if (dtype == NULL || !PyTuple_CheckExact(shape)) {
+    int is_view = basic && Py_TYPE(value) == Ndarray;
+    if (basic) {
+        /* A view or one element: the array's element type, and for an element no shape. Asking a NumPy scalar
+         * for either costs more than reading the element did. */
+        dtype = Py_NewRef(SLOT(node, node_at[N_DTYPE]));
+        shape = is_view ? PyObject_GetAttr(value, s_shape) : Py_NewRef(empty_tuple);
+    } else {
+        shape = PyObject_GetAttr(value, s_shape);
+        dtype = shape ? PyObject_GetAttr(value, s_dtype) : NULL;
+    }
+    if (shape == NULL || dtype == NULL || !PyTuple_CheckExact(shape)) {
         goto fail;
     }
-    int is_view = basic && Py_TYPE(value) == Ndarray;
     if (is_view) {
         origin = origin_of(frame);
         if (origin == NULL) {
             goto fail;
         }
     }
-    made = value_node(value, s_getitem, shape, dtype, strict ? Py_True : Py_False, zero, origin);
+    made = value_node(value, s_getitem, shape, dtype, strict ? Py_True : Py_False, zero, origin, at_once_kind);
     value = NULL; /* Stolen. */
     if (made == NULL) {
         goto fail;
@@ -2748,6 +2760,74 @@ fail:
     Py_XDECREF(value);
     Py_XDECREF(shape);
     Py_XDECREF(dtype);
+    Py_XDECREF(made);
+    Py_XDECREF(origin);
+    Py_DECREF(node);
+    return NULL;
+}
+
+/* `x.T` and `x.transpose()` of an array that has its values, made now: NumPy's own, and a lazy array on the same
+ * cell with one more step, which is `operation`, `np.transpose`. Returns a new lazy array, `Miss` for
+ * what the ordinary road decides, or NULL. */
+static PyObject *
+view_now(PyObject *target, PyObject *operation, PyObject *name, PyFrameObject *frame)
+{
+    if (small_limit == 0 || frame == NULL) {
+        return Miss;
+    }
+    PyObject *result = Miss, *value = NULL, *shape = NULL, *made = NULL, *origin = NULL;
+    PyObject *node = node_of(target);
+    if (node == NULL) {
+        return NULL;
+    }
+    if (Py_TYPE(node) != Node || !has_value(node) || Py_TYPE(SLOT(node, node_at[N_VALUE])) != Ndarray) {
+        goto done;
+    }
+    int admitted = is_admissible(node);
+    if (admitted < 0) {
+        goto fail;
+    }
+    if (!admitted) {
+        goto done;
+    }
+    /* `np.transpose(x)` with no axes is `x.transpose()`, which NumPy's function reaches through two more calls. */
+    value = PyObject_CallMethodNoArgs(SLOT(node, node_at[N_VALUE]), s_transpose);
+    if (value == NULL) {
+        goto fail;
+    }
+    if (Py_TYPE(value) != Ndarray) {
+        goto done;
+    }
+    shape = PyObject_GetAttr(value, s_shape);
+    origin = shape ? origin_of(frame) : NULL;
+    if (origin == NULL || !PyTuple_CheckExact(shape)) {
+        goto fail;
+    }
+    PyObject *dtype = SLOT(node, node_at[N_DTYPE]);
+    made = value_node(value, name, shape, dtype, SLOT(node, node_at[N_STRICT]), zero, origin, at_once_kind);
+    value = NULL; /* Stolen. */
+    if (made == NULL) {
+        goto fail;
+    }
+    PyObject *kwargs = PyDict_New();
+    PyObject *step = kwargs ? new_step(operation, name, empty_tuple, kwargs, shape, dtype, origin, 1) : NULL;
+    PyObject *steps = step ? PyTuple_Pack(1, step) : NULL;
+    PyObject *all = steps ? PySequence_Concat(SLOT(target, lazy_at[L_STEPS]), steps) : NULL;
+    result = all ? new_view(made, SLOT(target, lazy_at[L_CELL]), all) : NULL;
+    Py_XDECREF(kwargs);
+    Py_XDECREF(step);
+    Py_XDECREF(steps);
+    Py_XDECREF(all);
+done:
+    Py_XDECREF(value);
+    Py_XDECREF(shape);
+    Py_XDECREF(made);
+    Py_XDECREF(origin);
+    Py_DECREF(node);
+    return result;
+fail:
+    Py_XDECREF(value);
+    Py_XDECREF(shape);
     Py_XDECREF(made);
     Py_XDECREF(origin);
     Py_DECREF(node);
@@ -2827,6 +2907,113 @@ fail:
     return NULL;
 }
 
+/* The number of elements of a shape whose lengths are all known, or -1. */
+static Py_ssize_t
+size_of(PyObject *shape)
+{
+    Py_ssize_t size = 1;
+    for (Py_ssize_t axis = 0; axis < PyTuple_GET_SIZE(shape); axis++) {
+        PyObject *length = PyTuple_GET_ITEM(shape, axis);
+        if (!PyLong_CheckExact(length)) {
+            return -1;
+        }
+        Py_ssize_t count = PyLong_AsSsize_t(length);
+        if (count < 0 || (count != 0 && size > PY_SSIZE_T_MAX / count)) {
+            PyErr_Clear();
+            return -1;
+        }
+        size *= count;
+    }
+    return size;
+}
+
+/* A lazy array on a new node for a value NumPy has just given: an `ndarray` or a NumPy scalar. Steals the reference
+ * to `value`. `kind` is what the node says of itself, `source` what an observer is told made it. */
+static PyObject *
+lazy_of_value(PyObject *value, PyObject *source, PyObject *kind, PyObject *strict)
+{
+    PyObject *shape = PyObject_GetAttr(value, s_shape);
+    PyObject *dtype = shape ? PyObject_GetAttr(value, s_dtype) : NULL;
+    if (dtype == NULL || !PyTuple_CheckExact(shape)) {
+        if (dtype != NULL) {
+            PyErr_SetString(PyExc_TypeError, "a value NumPy gave has a shape that is no tuple");
+        }
+        Py_XDECREF(shape);
+        Py_XDECREF(dtype);
+        Py_DECREF(value);
+        return NULL;
+    }
+    PyObject *node = value_node(value, source, shape, dtype, strict, zero, NULL, kind);
+    Py_DECREF(shape);
+    Py_DECREF(dtype);
+    if (node == NULL) {
+        return NULL;
+    }
+    PyObject *lazy = new_lazy(node);
+    Py_DECREF(node);
+    return lazy;
+}
+
+/* A ufunc called now on small operands that have their values (`small_limit`): NumPy's own call, with no rule asked
+ * and no node written but the one that holds the result. Taken when every operand is a lazy array with a value of
+ * fewer than `small_limit` elements or a Python number, and one at least is an array. Returns a new lazy array,
+ * `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's at that line. */
+static PyObject *
+ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count)
+{
+    if (small_limit == 0 || count < 1 || count > 3 || Py_TYPE(ufunc) != Ufunc) {
+        return Miss;
+    }
+    PyObject *values[3], *nodes[3] = {NULL, NULL, NULL};
+    PyObject *result = Miss;
+    int strict = 0, arrays = 0;
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *operand = operands[place];
+        if (Py_TYPE(operand) == Lazy) {
+            PyObject *node = node_of(operand);
+            if (node == NULL) {
+                result = NULL;
+                goto done;
+            }
+            nodes[place] = node;
+            if (Py_TYPE(node) != Node || !has_value(node)) {
+                goto done;
+            }
+            Py_ssize_t size = size_of(SLOT(node, node_at[N_SHAPE]));
+            if (size < 0 || size >= small_limit) {
+                goto done;
+            }
+            strict = strict || SLOT(node, node_at[N_STRICT]) == Py_True;
+            values[place] = SLOT(node, node_at[N_VALUE]);
+            arrays++;
+        } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
+                   || PyComplex_CheckExact(operand)) {
+            values[place] = operand;
+        } else {
+            goto done;
+        }
+    }
+    if (arrays == 0) {
+        goto done;
+    }
+    PyObject *value = PyObject_Vectorcall(ufunc, values, (size_t)count, NULL);
+    if (value == NULL) {
+        result = NULL;
+        goto done;
+    }
+    if (Py_TYPE(value) != Ndarray && !PyObject_HasAttr(value, s_dtype)) {
+        result = value; /* Not an array: whatever NumPy answered is the answer. */
+        goto done;
+    }
+    made_at_once++;
+    result = lazy_of_value(value, s_array, at_once_kind, strict ? Py_True : Py_False);
+done:
+    Py_XDECREF(nodes[0]);
+    Py_XDECREF(nodes[1]);
+    Py_XDECREF(nodes[2]);
+    return result;
+}
+
 /* ---- A road: what stands on `LazyArray` where a method stood, takes the calls it can, and hands the others
  * to the method. ---- */
 
@@ -2881,20 +3068,125 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             goto python;
         }
         int owned = 1;
+        /* Whether an argument is a shape or an axis: a tuple of plain values, which holds no array. */
+        int with_tuple = 0;
+        PyObject *function = SLOT(args[0], callable_at[F_FUNCTION]);
         for (Py_ssize_t place = 1; place < count + named; place++) {
             if (place < count && Py_TYPE(args[place]) == Lazy) {
                 owned = 0;
             } else {
                 int is_plain = PySet_Contains(road->name, (PyObject *)Py_TYPE(args[place]));
-                if (is_plain <= 0) {
+                if (is_plain < 0) {
                     PyErr_Clear();
                     goto python;
                 }
+                if (is_plain == 0) {
+                    if (!PyTuple_CheckExact(args[place])) {
+                        goto python;
+                    }
+                    for (Py_ssize_t part = 0; part < PyTuple_GET_SIZE(args[place]); part++) {
+                        if (PySet_Contains(road->name, (PyObject *)Py_TYPE(PyTuple_GET_ITEM(args[place], part))) <= 0) {
+                            PyErr_Clear();
+                            goto python;
+                        }
+                    }
+                    with_tuple = 1;
+                }
             }
         }
-        PyObject *made = PyObject_Vectorcall(SLOT(args[0], callable_at[F_FUNCTION]), args + 1, count - 1, kwnames);
+        if (!owned && !named && !with_tuple) {
+            /* A ufunc on small arrays that have their values: made here, without NumPy's way round through
+             * `__array_ufunc__`. */
+            PyObject *quick = ufunc_now(function, args + 1, count - 1);
+            if (quick != Miss) {
+                return quick;
+            }
+        }
+        if (!owned && small_limit != 0 && count >= 2 && Py_TYPE(args[1]) == Lazy && Py_TYPE(function) != Ufunc) {
+            int alike = PySet_Contains(shaped_like, function);
+            if (alike < 0) {
+                PyErr_Clear();
+            } else if (alike) {
+                /* `np.zeros_like(x)` of an array that has its values: NumPy's own, on the values. */
+                PyObject *node = node_of(args[1]);
+                if (node == NULL) {
+                    return NULL;
+                }
+                int lone = 1;
+                for (Py_ssize_t place = 2; place < count; place++) {
+                    lone = lone && Py_TYPE(args[place]) != Lazy;
+                }
+                if (lone && Py_TYPE(node) == Node && has_value(node) && Py_TYPE(SLOT(node, node_at[N_VALUE])) == Ndarray) {
+                    PyObject *stack[8];
+                    if (count + named <= 8) {
+                        stack[0] = SLOT(node, node_at[N_VALUE]);
+                        for (Py_ssize_t place = 2; place < count + named; place++) {
+                            stack[place - 1] = args[place];
+                        }
+                        PyObject *made = PyObject_Vectorcall(function, stack, (size_t)(count - 1), kwnames);
+                        int strict = SLOT(node, node_at[N_STRICT]) == Py_True || SLOT(args[0], callable_at[F_STRICT]) == Py_True;
+                        Py_DECREF(node);
+                        if (made == NULL) {
+                            return NULL;
+                        }
+                        if (Py_TYPE(made) == Ndarray) {
+                            return lazy_of_value(made, SLOT(args[0], callable_at[F_SOURCE]), empty_string,
+                                                 strict ? Py_True : Py_False);
+                        }
+                        PyObject *lazy = PyObject_CallFunctionObjArgs(road->operation, made, SLOT(args[0], callable_at[F_SOURCE]),
+                                                                      strict ? Py_True : Py_False, Py_True, NULL);
+                        Py_DECREF(made);
+                        return lazy;
+                    }
+                }
+                Py_DECREF(node);
+            }
+        }
+        if (!owned && Py_TYPE(function) != Ufunc && PyFunction_Check(function) == 0 && Py_TYPE(args[1]) == Lazy) {
+            /* A function of NumPy's on a lazy array. NumPy would look through the arguments, find the lazy array
+             * and call its `__array_function__`, which asks the rules. They are asked here, with the same
+             * function and the same arguments; whatever they do not answer goes NumPy's way as before. */
+            int apart = PySet_Contains(handled_apart, function);
+            int writes = 0;
+            for (Py_ssize_t place = 0; place < named; place++) {
+                writes = writes || PyUnicode_Compare(PyTuple_GET_ITEM(kwnames, place), s_out) == 0;
+            }
+            if (apart < 0) {
+                PyErr_Clear();
+            } else if (!apart && !writes) {
+                PyObject *given = PyTuple_New(count - 1);
+                PyObject *keywords = given ? PyDict_New() : NULL;
+                PyObject *called = keywords ? PyObject_GetAttr(function, s_dunder_name) : NULL;
+                PyObject *quick = Miss;
+                if (called != NULL) {
+                    for (Py_ssize_t place = 1; place < count; place++) {
+                        PyTuple_SET_ITEM(given, place - 1, Py_NewRef(args[place]));
+                    }
+                    int kept = 0;
+                    for (Py_ssize_t place = 0; place < named && kept == 0; place++) {
+                        kept = PyDict_SetItem(keywords, PyTuple_GET_ITEM(kwnames, place), args[count + place]);
+                    }
+                    quick = kept < 0 ? NULL : try_defer(function, called, given, keywords, NULL, frame);
+                } else {
+                    PyErr_Clear();
+                }
+                Py_XDECREF(given);
+                Py_XDECREF(keywords);
+                Py_XDECREF(called);
+                if (quick != Miss) {
+                    return quick;
+                }
+                forget_declined();
+            }
+        }
+        PyObject *made = PyObject_Vectorcall(function, args + 1, count - 1, kwnames);
         if (made == NULL || Py_TYPE(made) == Lazy) {
             return made; /* Deferred: the commonest answer. */
+        }
+        if (owned && Py_TYPE(made) == Ndarray) {
+            /* An array made of no array, as `np.zeros(n)` is: a lazy array that has its values, whose memory
+             * nothing outside the layer knows. `array.wrap(made, source, strict, owned=True)`. */
+            return lazy_of_value(made, SLOT(args[0], callable_at[F_SOURCE]), empty_string, SLOT(args[0], callable_at[F_STRICT]));
         }
         PyObject *lazy = PyObject_CallFunctionObjArgs(road->operation, made, SLOT(args[0], callable_at[F_SOURCE]),
                                                       SLOT(args[0], callable_at[F_STRICT]), owned ? Py_True : Py_False, NULL);
@@ -2928,6 +3220,13 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (named || count != (road->kind == BINARY ? 2 : 1)) {
             goto python;
         }
+        if (small_limit != 0) {
+            PyObject *pair[2] = {road->reflected ? args[count - 1] : args[0], road->reflected ? args[0] : args[count - 1]};
+            result = ufunc_now(road->operation, pair, count);
+            if (result != Miss) {
+                break;
+            }
+        }
         operands = road->kind == UNARY ? PyTuple_Pack(1, args[0])
                    : road->reflected ? PyTuple_Pack(2, args[1], args[0]) : PyTuple_Pack(2, args[0], args[1]);
         kwargs = PyDict_New();
@@ -2948,6 +3247,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         if (named) {
             goto python;
+        }
+        result = ufunc_now(args[1], args + 3, count - 3);
+        if (result != Miss) {
+            break;
         }
         operands = PyTuple_New(count - 3);
         kwargs = PyDict_New();
@@ -3027,6 +3330,12 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         Py_ssize_t given = count - 1;
         if (named || (road->kind == SWAPAXES && given != 2) || (road->kind == RAVEL && given != 0)) {
             goto python;
+        }
+        if (road->kind == TRANSPOSE && given == 0) {
+            result = view_now(args[0], road->operation, road->name, frame);
+            if (result != Miss) {
+                break;
+            }
         }
         if (road->kind == SWAPAXES) {
             operands = PyTuple_Pack(3, args[0], args[1], args[2]);
@@ -3143,6 +3452,10 @@ road_get(PyObject *self, PyObject *instance, PyObject *owner)
         PyObject *result = Miss;
         PyFrameObject *frame = PyEval_GetFrame();
         if (enabled && frame != NULL && Py_TYPE(instance) == Lazy) {
+            result = view_now(instance, road->operation, road->name, frame);
+            if (result != Miss) {
+                return result;
+            }
             PyObject *operands = PyTuple_Pack(1, instance);
             PyObject *kwargs = PyDict_New();
             result = operands && kwargs ? try_defer(road->operation, road->name, operands, kwargs, NULL, frame) : NULL;
@@ -3356,7 +3669,8 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "nonzeros", &PyFrozenSet_Type, &nonzeros) || take(given, "getitem", NULL, &getitem)
         || take(given, "count_nonzero", NULL, &count_nonzero) || take(given, "Write", &PyType_Type, &write)
         || take(given, "Assign", &PyType_Type, &assign) || take(given, "fitting", &PySet_Type, &fitting)
-        || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "at_once", &PyUnicode_Type, &at_once_kind) || take(given, "LazyCallable", &PyType_Type, &standin_call)
+        || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "at_once", &PyUnicode_Type, &at_once_kind) || take(given, "handled_apart", NULL, &handled_apart)
+        || take(given, "shaped_like", NULL, &shaped_like) || take(given, "LazyCallable", &PyType_Type, &standin_call)
         || take(given, "LazyNumPy", &PyType_Type, &standin_module) || take(given, "slots", &PyTuple_Type, &slots)) {
         return NULL;
     }
@@ -3579,10 +3893,12 @@ PyInit__core(void)
     own_dtypes = PyDict_New();
     s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
     s_array = PyUnicode_InternFromString("array");
+    empty_string = PyUnicode_InternFromString("");
+    s_transpose = PyUnicode_InternFromString("transpose");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
-        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array) {
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !empty_string || !s_transpose) {
         Py_DECREF(module);
         return NULL;
     }

@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 19
+CORE_VERSION = 20
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -460,6 +460,10 @@ def _hand_out(call: str, strict: bool, everything: bool, nodes: list[Node], refu
     """
     if strict:
         raise NotGathered(refusal)
+    if _at_once_limit and not graph._pending and not any(node.pending or node.failure is not None for node in nodes):
+        # With small calls made at once (`at_once_below`) most arrays have their values when they are handed
+        # out, and with nothing pending no graph is cut by it: nothing to compute, to count or to log.
+        return
     if everything or any(node.pending for node in nodes):
         # A number, a truth value or a string read from arrays that have
         # their values computes nothing and cuts no graph: not counted, not
@@ -2007,6 +2011,8 @@ LazyArray.ravel.road = ("ravel", np.ravel, "ravel")
 _python_deferred = graph.deferred
 # The C core in use, or None: every call then goes the Python way.
 _core: Any = None
+# The limit `at_once_below` was last given, for the roads Python takes; 0 for none.
+_at_once_limit = 0
 # The Python methods of `LazyArray` that a road of the core stands in for at present, by name.
 _stood_in_for: dict[str, Callable[..., Any]] = {}
 # The same for the classes of the stand-in for the module: (the class, the name, the method).
@@ -2034,7 +2040,7 @@ def _set_up(core: Any) -> None:
                matmul=np.matmul, matrix_product=rules.MATRIX_PRODUCT,
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
-               at_once=graph.AT_ONCE)
+               at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE)
 
 
 def use_core(core: Any) -> None:
@@ -2062,7 +2068,7 @@ def use_core(core: Any) -> None:
     _stood_in_for_elsewhere.clear()
     graph.deferred = _python_deferred
     if _core is not None:
-        _core.at_once_below(0)
+        at_once_below(0)
         _core.enable(False)
     _core = None
     if core is None or getattr(core, "VERSION", None) != CORE_VERSION:
@@ -2110,7 +2116,11 @@ def at_once_below(limit: int) -> int:
     Returns:
         The limit this one replaces; 0 without the C core.
     """
-    return _core.at_once_below(limit) if _core is not None else 0
+    global _at_once_limit
+    if _core is None:
+        return 0
+    _at_once_limit = limit
+    return _core.at_once_below(limit)
 
 
 def at_once_counts() -> tuple[int, int]:
