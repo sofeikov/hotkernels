@@ -1,16 +1,20 @@
-"""Times each program of the corpus three ways: NumPy, the lazy layer node by node, and the lazy layer with fusion.
+"""Times each program of the corpus four ways: NumPy, NumPy with hotkernels installed, the lazy layer, and fusion.
 
     uv run --group apps python -m prototypes.lazy.programs.fusion_time --size large
 
 For each program:
 
 - **NumPy** is the program as it is, with `import numpy as np`.
+- **Installed** is the same eager program after `hotkernels.install()`:
+  each NumPy call the package has a kernel for is served by it, one
+  operation at a time, with no graph. It is what the package gives today,
+  and what a lazy run has to beat to be worth its graph.
 - **Lazy** is the same program with the stand-in for `np`, its graph
   computed one node at a time, each with the call the program wrote.
 - **Fused** is the lazy run with `fuse.enable()`: expressions the library
   has kernels for are computed by one kernel call each.
 
-The results of all three are compared bit for bit before anything is
+The results of all four are compared bit for bit before anything is
 printed, and the run stops if they differ.
 
 A lazy run's time is split in two. *Computing* is the time inside the
@@ -52,8 +56,10 @@ TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 TABLE_TEMPLATE = "fusion_time.txt.j2"
 # Nanoseconds in a millisecond, and bytes in a megabyte.
 NS_PER_MS, BYTES_PER_MB = 1e6, 1e6
-# The three ways a program is run.
+# The ways a program is run: eagerly, lazily node by node, and lazily with fusion.
 NUMPY, LAZY, FUSED = "numpy", "lazy", "fused"
+# The eager run under `hotkernels.install()`, as a key of `Row.timings`.
+INSTALLED = "installed"
 
 app = typer.Typer(add_completion=False)
 
@@ -96,9 +102,9 @@ class Row:
     # The program's name and one line on its size.
     name: str
     size: str
-    # The quickest run each way, by NUMPY, LAZY and FUSED.
+    # The quickest run each way, by NUMPY, INSTALLED, LAZY and FUSED.
     timings: dict[str, Timing] = field(default_factory=dict)
-    # The same under `hotkernels.install()`, when asked for.
+    # The lazy ways under `hotkernels.install()` as well, by NUMPY, LAZY and FUSED, when asked for.
     installed: dict[str, Timing] = field(default_factory=dict)
     # What the graphs were, node by node and fused.
     lazy: Shape = field(default_factory=Shape)
@@ -241,14 +247,15 @@ def shape_of(program: corpus.Program, inputs: tuple, way: str) -> tuple[Shape, f
     return shape, stats, values
 
 
-def measure(program: corpus.Program, size: str, runs: int, install: Callable[[], Any] | None) -> Row:
+def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], install: bool) -> Row:
     """Measure one program every way.
 
     Args:
         program: The program.
         size: `corpus.SMALL` or `corpus.LARGE`.
         runs: How many times each way is timed; the quickest counts.
-        install: `hotkernels.enabled`, to time every way under the single-operation kernels as well; or None.
+        enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
+        install: Whether to time the lazy ways under the single-operation kernels as well.
 
     Returns:
         The program's row.
@@ -266,11 +273,15 @@ def measure(program: corpus.Program, size: str, runs: int, install: Callable[[],
     del expected, lazily, fused
     for way in (NUMPY, LAZY, FUSED):
         row.timings[way] = quickest(program, inputs, way, runs)
-    if install is not None:
-        with install():
-            assert _same(_run(program, inputs, NUMPY), _run(program, inputs, FUSED)), \
-                f"{program.name}: under hotkernels.install() the fused run does not give NumPy's results"
-            for way in (NUMPY, LAZY, FUSED):
+    with enabled():
+        served = _run(program, inputs, NUMPY)
+        assert _same(served, _run(program, inputs, FUSED)), \
+            f"{program.name}: under hotkernels.install() the fused run does not give NumPy's results"
+        del served
+        row.timings[INSTALLED] = quickest(program, inputs, NUMPY, runs)
+        if install:
+            row.installed[NUMPY] = row.timings[INSTALLED]
+            for way in (LAZY, FUSED):
                 row.installed[way] = quickest(program, inputs, way, runs)
     return row
 
@@ -294,7 +305,7 @@ def render(rows: list[Row], size: str, runs: int) -> str:
             calls[name] = calls.get(name, 0) + count
     return environment.get_template(TABLE_TEMPLATE).render(
         rows=rows, size=size, runs=runs, ns_per_ms=NS_PER_MS, bytes_per_mb=BYTES_PER_MB, core=array.core_in_use(),
-        numpy=NUMPY, lazy=LAZY, fused=FUSED, calls=sorted(calls.items(), key=lambda item: item[1], reverse=True),
+        numpy=NUMPY, installed=INSTALLED, lazy=LAZY, fused=FUSED, calls=sorted(calls.items(), key=lambda item: item[1], reverse=True),
         kernels=len({kernel.name for kernel in fuse.LIBRARY.values()})).strip("\n")
 
 
@@ -302,24 +313,21 @@ def render(rows: list[Row], size: str, runs: int) -> str:
 def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are run at: small or large."),
          program: list[str] = typer.Option(None, help="A program to time; may be given several times. Default: all."),
          runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
-         install: bool = typer.Option(False, help="Also time every way under hotkernels.install().")) -> None:
-    """Time the corpus three ways and print the tables.
+         install: bool = typer.Option(False, help="Also time the lazy ways under hotkernels.install().")) -> None:
+    """Time the corpus four ways and print the tables.
 
     Args:
         size: The size the programs are run at.
         program: The names of the programs to time, or none for all of them that run with NumPy.
         runs: How many times each way is timed.
-        install: Whether to time every way under `hotkernels.install()` as well.
+        install: Whether to time the lazy and the fused run under `hotkernels.install()` as well.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not fuse.enable():
         log.error("the fused kernels are not built: uv run python -m prototypes.lazy.build_fused")
         raise typer.Exit(1)
     fuse.disable()
-    enabled = None
-    if install:
-        import hotkernels
-        enabled = hotkernels.enabled
+    import hotkernels
     asked = corpus.by_name(list(program) if program else None)
     for each in asked:
         if not each.available:
@@ -327,7 +335,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
     chosen = [each for each in asked if each.eager and each.available]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rows = [measure(each, size, runs, enabled) for each in chosen]
+        rows = [measure(each, size, runs, hotkernels.enabled, install) for each in chosen]
     log.info("%s", render(rows, size, runs))
 
 

@@ -58,6 +58,12 @@ WRITING_UFUNC_METHOD = "at"
 OUT_FUNCTIONS = frozenset({np.clip, np.round, np.around})
 # What a recording calls an element read from an array that has its values, where it is an input of a later graph.
 ELEMENT_SOURCE = "x[index]"
+# The layout a write's copy of an array is given: the array's own, as far as NumPy can keep it. A write that
+# NumPy makes in place leaves the array laid out as it was, and a later sum over it adds in that order.
+KEPT_ORDER = "K"
+# What the node of `x.shape = s` is called, and the length NumPy works out by itself in a shape.
+SHAPE_ASSIGNMENT = "x.shape = s"
+UNKNOWN_LENGTH = -1
 # The types `_lazies_in` looks inside.
 COLLECTIONS = (list, tuple, dict)
 # NumPy functions `__array_function__` answers by a road of their own, before it tries to defer.
@@ -176,12 +182,28 @@ class _Write:
         Returns:
             The cell's contents after the write.
         """
-        new = old.copy()
+        new = old.copy(order=KEPT_ORDER)
         view = new
         for step in self.steps:
             view = step.of(view)
         self.perform(view, *values)
         return new
+
+    def in_place(self, old: np.ndarray, *values: Any) -> np.ndarray:
+        """Make the write into the memory the array has: what `evaluate` calls when nothing reads the old contents again.
+
+        Args:
+            old: The cell's contents before the write, in an array nothing else will read.
+            *values: The values of what the write reads.
+
+        Returns:
+            The same array, written into.
+        """
+        view = old
+        for step in self.steps:
+            view = step.of(view)
+        self.perform(view, *values)
+        return old
 
 
 @dataclass(eq=False, slots=True)
@@ -216,6 +238,52 @@ class _Into:
             *values: The call's positional arguments, with values for lazy arrays.
         """
         self.function(*values, out=view)
+
+
+def _set_shape(array: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
+    """Return a view of an array in another shape, or fail as `array.shape = shape` fails.
+
+    Args:
+        array: A computed array.
+        shape: The new shape, every length known.
+
+    Returns:
+        A view of the same memory. Never a copy: where `np.reshape` would
+        copy, assigning a shape raises, and so does this.
+    """
+    view = array.view()
+    view.shape = shape
+    return view
+
+
+def _resolved_shape(shape: Any, size: int) -> tuple[int, ...]:
+    """Work out the shape an assignment to `.shape` asks for.
+
+    Args:
+        shape: What was assigned: a whole number or a sequence of them, at most one of them -1.
+        size: How many elements the array has.
+
+    Returns:
+        The shape with the -1 replaced by the length that makes the sizes agree.
+
+    Raises:
+        ValueError: With NumPy's words, when no such shape holds `size` elements.
+    """
+    wanted = tuple(operator.index(length) for length in shape) if isinstance(shape, (tuple, list)) \
+        else (operator.index(shape),)
+    known = 1
+    for length in wanted:
+        if length != UNKNOWN_LENGTH:
+            known *= length
+    if wanted.count(UNKNOWN_LENGTH) > 1:
+        raise ValueError("can only specify one unknown dimension")
+    if UNKNOWN_LENGTH in wanted:
+        if known == 0 or size % known:
+            raise ValueError(f"cannot reshape array of size {size} into shape {wanted}")
+        wanted = tuple(size // known if length == UNKNOWN_LENGTH else length for length in wanted)
+    elif known != size:
+        raise ValueError(f"cannot reshape array of size {size} into shape {wanted}")
+    return wanted
 
 
 def wrap(value: Any, source: str = "array", strict: bool = False, owned: bool = False) -> "LazyArray":
@@ -1489,6 +1557,32 @@ class LazyArray:
     def shape(self) -> tuple[int, ...]:
         """The shape NumPy would give the array."""
         return self._settled_shape()
+
+    @shape.setter
+    def shape(self, shape: Any) -> None:
+        """Give the array another shape where it is, as `x.shape = s` does to an `ndarray`.
+
+        Nothing is computed and nothing is copied. The array becomes a view
+        of its own contents in the new shape: other arrays that look at the
+        same memory keep their shapes, and a write through either is seen by
+        both, as with NumPy.
+
+        Args:
+            shape: The new shape: a whole number or a sequence of them, one of which may be -1.
+
+        Raises:
+            ValueError: With NumPy's words, when the shape does not hold the array's elements.
+            AttributeError: NumPy's own, when the array is computed, if its
+                memory cannot be read in the new shape without a copy.
+        """
+        size = int(np.prod(self._settled_shape(), dtype=np.int64))
+        wanted = _resolved_shape(shape, size)
+        node = self._node
+        made = graph.deferred(_set_shape, SHAPE_ASSIGNMENT, (node, wanted), {}, wanted, node.dtype, rules.VIEW,
+                              node.strict, None, 0, sys._getframe(1))
+        step = _Step(_set_shape, SHAPE_ASSIGNMENT, (wanted,), {}, wanted, node.dtype, made.origin)
+        self._steps = self._steps + (step,)
+        self._seen = (self._cell.node, made)
 
     @property
     def dtype(self) -> np.dtype:

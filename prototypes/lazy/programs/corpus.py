@@ -1,16 +1,26 @@
 """The programs fusion is studied on: each can be run with NumPy or with the lazy stand-in for it.
 
-Twelve programs. Three are this directory's examples, six are the
-applications of `delivery/apps/` that need NumPy alone (the Veros routines
-count one each), and three are published benchmarks copied unchanged into
-`vendor/`. A program is run by `Program.run(np, inputs)`: with the real
-`numpy` module it is the eager program, and with the stand-in every `np` in
-it is the stand-in, which is the one line a user would change.
+Twenty-six programs. Three are this directory's examples, three are
+published benchmarks copied unchanged into `vendor/`, and the rest are every
+program the repository times with and without `hotkernels.install()`: the
+ten applications of `delivery/apps/` (the three Veros routines count one
+each) and the nine workloads of `delivery/workloads/`. A program is run by
+`Program.run(np, inputs)`: with the real `numpy` module it is the eager
+program, and with the stand-in every `np` in it is the stand-in, which is
+the one line a user would change.
 
 Inputs are plain `ndarray`s and numbers made once by `Program.make(size)`.
 A program that writes into its inputs is given copies made with the module
 it runs with (`np.array(a)`), so the eager and the lazy run start alike and
 the lazy copies are the layer's own.
+
+**A program that is calls into a library** (pandas, scikit-learn,
+scikit-image, Astropy, trimesh, empyrical) changes its one line like any
+other: the `np` of the module that calls the library is the stand-in, and
+the arrays it is given are the stand-in's (`np.asarray(a)`, no copy). The
+library has its own `numpy` and asks for `ndarray`s, so each array is made
+where it is handed over and what the library computes is in no graph. Such a
+program says what the layer costs a program it can do nothing for.
 """
 from __future__ import annotations
 
@@ -24,6 +34,8 @@ from typing import Any, Callable, Iterator
 
 import numpy
 
+from delivery import apps as applications
+from delivery import workloads
 from delivery.apps import min_char_rnn, mlp_train, particle_filter, veros_ocean
 from prototypes.lazy.programs import attention, monitor, regression
 from prototypes.lazy.programs.vendor.npbench import cavity_flow_numpy, hdiff_numpy
@@ -64,6 +76,27 @@ VEROS_ROUTINES = {"eos": "equation_of_state", "isoneutral": "isoneutral_mixing",
 BLACK_SCHOLES = "prototypes.lazy.programs.vendor.dpbench.black_scholes_numpy"
 # The library two programs need beside NumPy: SciPy's error function, and its LAPACK for the Veros kinetic energy.
 SCIPY = "scipy"
+# The size of `delivery/workloads/` each workload is run at, by this corpus's sizes: about 10 ms and about 100 ms of
+# plain NumPy on the machine they were set on.
+WORKLOAD_SIZES = {SMALL: "S", LARGE: "M"}
+# Where each workload's NumPy code is, as modules that have a global `np`, relative to `delivery.workloads`. A
+# workload that is a call into a library has none. `example` is a file outside the package and is found by itself.
+WORKLOAD_MODULES = {
+    "example": (),
+    "flame": ("flame",),
+    "azimint_naive": ("vendor.npbench.azimint_naive_numpy",),
+    "azimint_hist": ("vendor.npbench.azimint_hist_numpy",),
+    "mandelbrot1": ("vendor.npbench.mandelbrot1_numpy",),
+    "mandelbrot2": ("vendor.npbench.mandelbrot2_numpy",),
+    "make_decision": ("vendor.numpy_benchmarks.make_decision",),
+    "pandas_filter": (),
+    "equalize_hist": (),
+}
+# The applications of `delivery/apps/` taken as they are, by the name each has here. The four others are in the corpus
+# under names of their own: `perceptron`, `char_rnn`, `particle_filter` and the three Veros routines.
+APPLICATIONS = {"trimesh_mesh": "trimesh_mesh", "sklearn_metrics": "sklearn_metrics",
+                "empyrical_stats": "empyrical_stats", "skimage_pipeline": "skimage_pipeline",
+                "pandas_sales": "pandas_sales", "astropy_timeseries": "astropy_timeseries"}
 
 
 @dataclass(frozen=True)
@@ -346,6 +379,84 @@ def _run_options(np: Any, inputs: tuple) -> Any:
     return call, put
 
 
+# Applications given plain `ndarray`s whatever module they run with. scikit-image's `regionprops_table` asks
+# `np.isscalar` of the mean of an image it was handed; for a lazy image that mean is a lazy array without
+# dimensions, not a number, and the library fails on it. With plain inputs nothing of the program is deferred.
+PLAIN_INPUTS = frozenset({"skimage_pipeline"})
+
+
+def _handed(np: Any, value: Any) -> Any:
+    """Hand an input to a program as an array of the module it runs with.
+
+    Args:
+        np: The `numpy` module or the lazy stand-in.
+        value: An input: an `ndarray`, a list or tuple of inputs, or anything else.
+
+    Returns:
+        `np.asarray(value)` for an `ndarray`, which copies nothing; a list or tuple with its items handed the same
+        way; any other value as it is (a number, a pandas object).
+    """
+    if isinstance(value, numpy.ndarray):
+        return np.asarray(value)
+    if isinstance(value, (list, tuple)):
+        return type(value)(_handed(np, item) for item in value)
+    return value
+
+
+def _workload(workload: workloads.Workload) -> Program:
+    """Make a workload of `delivery/workloads/` a program of the corpus.
+
+    Args:
+        workload: The workload.
+
+    Returns:
+        The program, at the workload's S and M sizes; one that has a single size runs at it for both.
+    """
+    names = {size: workload_size if workload_size in workload.sizes else next(iter(workload.sizes))
+             for size, workload_size in WORKLOAD_SIZES.items()}
+
+    def make(size: str) -> tuple:
+        """Build the workload's inputs at one size."""
+        return workload.make_data(**workload.sizes[names[size]])
+
+    def run(np: Any, inputs: tuple) -> Any:
+        """Run the workload with `np` as the module of its NumPy code."""
+        modules = [importlib.import_module(f"{workloads.__name__}.{name}") for name in WORKLOAD_MODULES[workload.name]]
+        if workload.name == "example":
+            from delivery.workloads import example
+            modules = [example._program()]
+        with numpy_of(np, *modules):
+            return workload.run(*_handed(np, inputs))
+
+    def described(arguments: dict) -> str:
+        """Write one size's arguments as a line."""
+        return ", ".join(f"{value:,} {name}" for name, value in arguments.items()) or "its own size, two million elements"
+
+    return Program(workload.name, workload.title, "delivery/workloads/" + workload.name + ".py", make, run,
+                   {size: described(workload.sizes[name]) for size, name in names.items()},
+                   requires=tuple(workloads._import_name(name) for name in workload.requires))
+
+
+def _application(name: str) -> Program:
+    """Make an application of `delivery/apps/` a program of the corpus, as it is.
+
+    Args:
+        name: A key of APPLICATIONS.
+
+    Returns:
+        The program, at the application's two sizes.
+    """
+    module = applications.load(APPLICATIONS[name])
+
+    def run(np: Any, inputs: tuple) -> Any:
+        """Run the application with `np` as its module's NumPy."""
+        with numpy_of(np, module):
+            return module.run(*(inputs if name in PLAIN_INPUTS else _handed(np, inputs)))
+
+    return Program(name, module.TITLE, "delivery/apps/" + APPLICATIONS[name] + ".py", module.make_data, run,
+                   dict(module.SIZES), requires=tuple(module.REQUIRES))
+
+
 def _described(table: dict[str, tuple], text: str) -> dict[str, str]:
     """Write one line per size from a table of sizes.
 
@@ -396,6 +507,8 @@ def programs() -> list[Program]:
         Program("black_scholes", "Black-Scholes option pricing (dpbench)", vendor + "dpbench/black_scholes_numpy.py",
                 _options_data, _run_options, {size: f"{count:,} options" for size, count in OPTIONS.items()},
                 requires=(SCIPY,)),
+        *(_application(name) for name in APPLICATIONS),
+        *(_workload(workload) for workload in workloads.load()),
     ]
 
 
