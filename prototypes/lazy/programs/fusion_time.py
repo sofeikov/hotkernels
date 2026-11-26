@@ -176,7 +176,7 @@ def _run(program: corpus.Program, inputs: tuple, way: str) -> list:
     if way == NUMPY:
         return _finish(program.run(numpy, inputs))
     if way == FUSED:
-        fuse.enable()
+        fuse.enable(install=False)  # `measure` sees to what is installed for each way.
     try:
         return _finish(program.run(get_lazy(), inputs))
     finally:
@@ -343,7 +343,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
         plain: Whether to time the lazy and the fused run with nothing installed as well.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    if not fuse.enable():
+    if not fuse.enable(install=False):
         log.error("the fused kernels are not built: uv run python -m prototypes.lazy.build_fused")
         raise typer.Exit(1)
     fuse.disable()

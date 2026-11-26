@@ -455,7 +455,7 @@ def _installed(program: corpus.Program, inputs: tuple, runs: int, limit: Limit) 
         slope = watcher.slopes.get(signature)
         stays = spent.ns if slope is None else min(spent.ns, int(slope * spent.elements))
         limit.kept[label] = limit.kept.get(label, 0) + stays
-    if fuse.enable():
+    if fuse.enable(install=False):  # `measure` has the kernels installed around this.
         try:
             limit.fused_ns = _timed(program, inputs, lazy, runs)
             limit.kernel_ns, limit.fused_nodes = _in_kernels(program, inputs, lazy)

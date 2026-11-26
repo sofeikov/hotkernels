@@ -2199,8 +2199,39 @@ def _store_directly(expression: Expression) -> bool:
     return True
 
 
-def enable() -> bool:
-    """Have computations planned for fusion from now on.
+# Whether `enable()` was what installed the package's single-operation kernels, so that `disable()` takes them
+# out again and leaves an installation the program made itself alone.
+_installed_here = False
+
+
+def _install_package() -> None:
+    """Have `hotkernels.install()` in effect, unless it is already or the package is not there.
+
+    The layer makes the calls the eager program makes, so the package's
+    kernels serve them as they serve the eager program's
+    (docs/lazy-design.md, "With `hotkernels.install()`"), and a program
+    gains from both: the kernels of this module for its expressions, the
+    package's for the single calls between them.
+    """
+    global _installed_here
+    try:
+        import hotkernels
+    except ImportError:
+        return
+    if hotkernels.report().installed:
+        return
+    hotkernels.install()
+    _installed_here = hotkernels.report().installed
+
+
+def enable(install: bool = True) -> bool:
+    """Have computations planned for fusion from now on, with the package's own kernels installed as well.
+
+    Args:
+        install: Whether to have `hotkernels.install()` in effect too,
+            which is how the layer is meant to be run. False for a tool
+            that sees to the installation itself, or that measures the
+            layer without it.
 
     Returns:
         True when the fused kernels are built and in use. False when the
@@ -2223,14 +2254,24 @@ def enable() -> bool:
     # What may wait for a kernel: the arithmetic a kernel makes, on float64. Everything else on arrays that have
     # their values is made at once, whatever its size.
     array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | {operator.pow, np.power}, FLOAT64)
+    if install and not _installed_here:
+        _install_package()
     return True
 
 
 def disable() -> None:
-    """Have every node computed by its own call again, and every operation written as a node."""
+    """Have every node computed by its own call again, and every operation written as a node.
+
+    The package's kernels are taken out again if `enable()` installed them.
+    """
+    global _installed_here
     evaluate.planner = None
     array.assign_rows = None
     array.at_once_below(0)
+    if _installed_here:
+        import hotkernels
+        hotkernels.uninstall()
+        _installed_here = False
 
 
 def is_enabled() -> bool:

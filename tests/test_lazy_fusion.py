@@ -424,6 +424,26 @@ def test_rows_of_one_operation_are_made_in_any_layout(shape: tuple[int, ...]):
             assert same(theirs, ours.gather())
 
 
+def test_enabling_fusion_installs_the_packages_kernels_and_disabling_takes_them_out():
+    """`fuse.enable()` has `hotkernels.install()` in effect; an installation the program made itself is left alone."""
+    hotkernels = pytest.importorskip("hotkernels")
+    fuse.disable()
+    hotkernels.uninstall()
+    try:
+        assert fuse.enable(install=False) and not hotkernels.report().installed
+        fuse.disable()
+        assert fuse.enable() and hotkernels.report().installed
+        fuse.disable()
+        assert not hotkernels.report().installed
+        hotkernels.install()
+        assert fuse.enable()
+        fuse.disable()
+        assert hotkernels.report().installed
+    finally:
+        hotkernels.uninstall()
+        fuse.enable()
+
+
 def test_an_operation_written_over_by_the_next_line_is_one_program_with_it():
     """`e = a - b; e /= s`: what the array held is an operation the program makes, so there is no memory of it yet."""
     a, b = arrays(2, (300, 40))
