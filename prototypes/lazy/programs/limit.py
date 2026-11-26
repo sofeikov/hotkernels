@@ -14,8 +14,15 @@ For each program of `corpus.py` this tool:
 - runs it lazily, node by node, with every call timed, and puts each
   operation in a class by what a fused kernel would need to make it;
 - measures, for each different operation, what an element costs in the
-  cache, and takes that times the elements as the part that has to stay;
+  cache, on the first elements of the operands the program gave it, and
+  takes that times the elements as the part that has to stay;
 - times the fused run.
+
+The values matter: what `erf` or `exp` costs depends on its argument, so an
+operation is timed on the program's own numbers, not on made-up ones, and
+on many different pieces of them, each once a round: a loop that branches
+on its data runs faster over the same piece again and again than it ever
+does in the program.
 
 The **floor** of a program is its eager time less everything that could be
 removed from its element-by-element operations and its reductions over
@@ -39,7 +46,7 @@ import numpy
 import typer
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from prototypes.lazy import array, evaluate, fuse, get_lazy, rules
+from prototypes.lazy import array, evaluate, fuse, get_lazy, graph, rules
 from prototypes.lazy.graph import Node
 from prototypes.lazy.programs import corpus
 
@@ -63,12 +70,9 @@ CLASSES = (*REACHABLE, PRODUCTS, MOVES, REST)
 # machines this runs on, three at a time; the time for one element is the slope between the two, which leaves
 # the cost of the call out.
 SHORT, LONG = 512, 4096
-# How many times an operation is timed at each length; the quickest counts.
-CALIBRATION_RUNS = 200
-# The values the made-up operands of a calibration have: away from zero, one and anything a loop treats apart.
-LOW, HIGH = 0.5, 1.5
-# Seed of the made-up operands.
-SEED = 0
+# How many pieces of its operands an operation is timed on at each length, at most, and how many rounds over all
+# of them are timed; the quickest round counts.
+MOST_PIECES, CALIBRATION_ROUNDS = 64, 5
 
 app = typer.Typer(add_completion=False)
 
@@ -206,105 +210,152 @@ def classify(node: Node) -> str:
 
 
 class _Watcher:
-    """Watches one program's lazy run: the planner and the meter of `evaluate` for its length."""
+    """Computes one program's nodes one at a time, timing each and, once for each different operation, its cost in the cache.
+
+    It is a plan as `evaluate` asks a planner for one: every node it can
+    time is a group of its own, which it computes by the node's own call.
+    A node it does not take (a write, a node with a failed operand) is
+    computed by `evaluate` as ever, and counted through the meter.
+    """
 
     def __init__(self) -> None:
         """Start with nothing seen."""
-        # The signature and the elements of each node about to be computed, by the node's number.
-        self._waiting: dict[int, tuple[Signature, int]] = {}
-        # What each signature took.
+        # What `evaluate` reads of a plan: no node is inside a group, and each group is one node's signature.
+        self.inner: set[int] = set()
+        self.groups: dict[int, tuple[Signature, int]] = {}
+        # What each signature took, and what one element of it costs in the cache; None where that was not measured.
         self.spent: dict[Signature, Spent] = {}
+        self.slopes: dict[Signature, float | None] = {}
 
-    def plan(self, todo: list[Node]) -> None:
-        """Write down what each node of a computation is, while it still has its operands; plan nothing.
+    def plan(self, todo: list[Node]) -> "_Watcher":
+        """Write down what each node of a computation is, while it still has its operands.
 
         Args:
             todo: The pending nodes about to be computed.
+
+        Returns:
+            This object, as the computation's plan.
         """
+        self.groups = {}
         for node in todo:
             largest = max([_elements(node.shape)] + [_elements(arg.shape) for arg in node.args
                                                       if isinstance(arg, (Node, numpy.ndarray))])
             signature = Signature(classify(node), node.operation, node.name, node.kind, str(node.dtype),
                                   tuple(_operand(arg, largest) for arg in node.args))
-            self._waiting[node.number] = (signature, largest)
+            self.groups[node.number] = (signature, largest)
+        return self
+
+    def run(self, group: tuple[Signature, int], node: Node) -> bool:
+        """Compute one node by its own call, timed; and time the call in the cache if its like was not yet.
+
+        Args:
+            group: The node's signature and the elements of its largest operand or result.
+            node: The pending node.
+
+        Returns:
+            True when the node has its value. False for a write or a node with an operand that has none, which
+            `evaluate` computes.
+        """
+        signature, largest = group
+        values = []
+        for arg in node.args:
+            if type(arg) is Node:
+                if arg.operation is not None or arg.failure is not None or arg.value is None:
+                    return False
+                arg = arg.value
+            values.append(arg)
+        if node.kind == rules.WRITE:
+            return False
+        operation, kwargs = node.operation, node.kwargs
+        with warnings.catch_warnings(), numpy.errstate(**(node.errstate or {})):
+            warnings.simplefilter("ignore")
+            started = time.perf_counter_ns()
+            value = operation(*values, **kwargs)
+            taken = time.perf_counter_ns() - started
+        node.value = value
+        if not graph.is_known(node.shape):
+            node.shape = numpy.shape(value)
+        graph.settle(node)
+        self._count(signature, largest, taken)
+        if signature.label in REACHABLE and signature not in self.slopes:
+            self.slopes[signature] = in_cache(operation, values, kwargs, largest)
+        return True
+
+    def members(self, group: tuple[Signature, int]) -> list[Node]:
+        """Return the nodes inside a group that was not computed: none, since a group here is one node."""
+        return []
+
+    def _count(self, signature: Signature, largest: int, ns: int) -> None:
+        """Add one call to what its signature took."""
+        spent = self.spent.setdefault(signature, Spent())
+        spent.ns += ns
+        spent.calls += 1
+        spent.elements += largest
 
     def measure(self, node: Node, ns: int) -> None:
-        """Count the time of one call under its signature.
+        """Count the time of a call `evaluate` made itself, under its signature.
 
         Args:
             node: The node, computed.
-            ns: Nanoseconds its call took.
+            ns: Nanoseconds its call took, or the whole of `run` for a node computed there, which is not counted twice.
         """
-        found = self._waiting.pop(node.number, None)
-        if found is None:
-            return
-        spent = self.spent.setdefault(found[0], Spent())
-        spent.ns += ns
-        spent.calls += 1
-        spent.elements += found[1]
+        found = self.groups.get(node.number)
+        if found is not None and (node.kind == rules.WRITE or found[0] not in self.spent):
+            self._count(found[0], found[1], ns)
 
 
-def _made_up(operand: tuple, length: int, rng: numpy.random.Generator) -> Any:
-    """Make an operand for a calibration.
+def _piece(value: Any, largest: int, start: int, length: int) -> Any:
+    """Cut a piece out of an operand, for a calibration.
 
     Args:
-        operand: What `_operand` wrote down.
-        length: How many elements an array the loop walks is to have.
-        rng: Where the values come from.
+        value: An operand as the program had it.
+        largest: The elements of the call's largest operand or result.
+        start: Where the piece starts among the elements of an array the loop walks, in the order of its rows.
+        length: How many elements the piece has.
 
     Returns:
-        An array of that element type with `length` elements, or one element for an operand read as one value;
-        or the number itself.
+        A contiguous array of `length` elements for an array as large as the largest, its elements from `start`
+        on over and over if fewer are left; one element for a smaller array; anything else as it is.
     """
-    kind, walked = operand
-    if kind in ("bool", "int", "float", "complex"):
-        return walked
-    dtype = numpy.dtype(kind)
-    count = length if walked else 1
-    if dtype.kind == "b":
-        values = rng.random(count) < 0.5
-    elif dtype.kind == "c":
-        values = rng.uniform(LOW, HIGH, count) + 1j * rng.uniform(LOW, HIGH, count)
-    else:
-        values = rng.uniform(LOW, HIGH, count)
-    made = values.astype(dtype)
-    return made if walked else made.reshape(())
+    if not isinstance(value, numpy.ndarray):
+        return value
+    if value.size != largest or largest <= 1:
+        return value.reshape(-1)[:1].reshape(()) if value.size else value
+    cut = numpy.array(value.flat[start:start + length])
+    return cut if cut.size == length else numpy.resize(cut, length)
 
 
-def _quickest(call: Callable[[], Any]) -> int:
-    """Time a call CALIBRATION_RUNS times and return the quickest, in nanoseconds."""
-    best = None
-    for _ in range(CALIBRATION_RUNS):
-        started = time.perf_counter_ns()
-        call()
-        taken = time.perf_counter_ns() - started
-        best = taken if best is None or taken < best else best
-    return best or 0
-
-
-def in_cache(signature: Signature) -> float | None:
+def in_cache(operation: Callable[..., Any], values: list, kwargs: dict, largest: int) -> float | None:
     """Measure what one element of an operation costs on arrays in the cache, the call left out.
 
     Args:
-        signature: The operation.
+        operation: The node's callable.
+        values: Its operands as the program had them.
+        kwargs: Its keywords.
+        largest: The elements of its largest operand or result.
 
     Returns:
-        Nanoseconds for one element: the slope of the call's time between SHORT and LONG elements. None for an
-        operation that cannot be made on made-up operands, whose whole time is then counted as staying.
+        Nanoseconds for one element: the slope of the call's time between pieces of SHORT and of LONG elements,
+        over up to MOST_PIECES different pieces of the operands. None for an operation that cannot be made on
+        such pieces, whose whole time is then counted as staying.
     """
-    if any(kind == "object" for kind, _ in signature.operands):
-        return None
-    rng = numpy.random.default_rng(SEED)
+    count = max(1, min(MOST_PIECES, largest // LONG))
     times = []
     for length in (SHORT, LONG):
-        operands = [_made_up(operand, length, rng) for operand in signature.operands]
+        pieces = [[_piece(value, largest, place * LONG, length) for value in values] for place in range(count)]
+        best = None
         try:
             with warnings.catch_warnings(), numpy.errstate(all="ignore"):
                 warnings.simplefilter("ignore")
-                signature.operation(*operands)
-                times.append(_quickest(lambda: signature.operation(*operands)))
-        except Exception:  # Whatever a made-up operand does to an operation: it is then not calibrated.
+                for _ in range(CALIBRATION_ROUNDS):
+                    started = time.perf_counter_ns()
+                    for operands in pieces:
+                        operation(*operands, **kwargs)
+                    taken = time.perf_counter_ns() - started
+                    best = taken if best is None or taken < best else best
+        except Exception:  # Whatever a piece of an operand does to an operation: it is then not calibrated.
             return None
+        times.append((best or 0) / count)
     return max(0.0, (times[1] - times[0]) / (LONG - SHORT))
 
 
@@ -359,17 +410,13 @@ def measure(program: corpus.Program, size: str, runs: int) -> Limit:
         _run(program, inputs, lazy)
     finally:
         evaluate.planner, evaluate.meter = planner, meter
-    slopes: dict[tuple, float | None] = {}
     for signature, spent in watcher.spent.items():
         label = signature.label
         limit.ns[label] = limit.ns.get(label, 0) + spent.ns
         limit.calls[label] = limit.calls.get(label, 0) + spent.calls
         if label not in REACHABLE:
             continue
-        key = (signature.name, signature.kind, signature.dtype, signature.operands)
-        if key not in slopes:
-            slopes[key] = in_cache(signature)
-        slope = slopes[key]
+        slope = watcher.slopes.get(signature)
         stays = spent.ns if slope is None else min(spent.ns, int(slope * spent.elements))
         limit.kept[label] = limit.kept.get(label, 0) + stays
     if fuse.enable():

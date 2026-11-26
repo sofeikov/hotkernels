@@ -333,6 +333,22 @@ def test_arrays_at_more_than_one_pitch_are_gathered(shape: tuple[int, ...], cut:
     assert fuse.STATS.fused_nodes >= (8 if shape[-1] - cut >= SHORTEST_GATHERED else 0)
 
 
+# The shortest row a program of several steps is run on by itself: `SHORTEST_ROW` of `_fused.c`.
+SHORTEST_ROW = 16
+
+
+@pytest.mark.parametrize("length", (4, 15, 16, 25, 31, 40))
+def test_short_rows_at_two_pitches_are_a_program_each_from_sixteen_elements(length: int):
+    """Slices of grids beside arrays of their own: no pitch to walk at, and nothing a kernel cannot read in place."""
+    grid_a, grid_c = arrays(2, (6, 5, length + 1))
+    b, d = arrays(2, (6, 5, length))
+    x, z = lazy.asarray(grid_a), lazy.asarray(grid_c)
+    got = (x[..., :-1] + lazy.asarray(b)) * z[..., :-1] - lazy.asarray(d)
+    assert same((grid_a[..., :-1] + b) * grid_c[..., :-1] - d, got.gather())
+    assert fuse.STATS.declined == (0 if length >= SHORTEST_ROW else 1)
+    assert sum(fuse.STATS.calls.values()) == (2 if length >= SHORTEST_ROW else 0)
+
+
 def test_rows_with_too_much_between_them_are_left_to_numpy():
     """More than a quarter of the walk between rows: the steps would mostly compute what nobody asked for."""
     a, b = arrays(2, (30, 10))
