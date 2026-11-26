@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 26
+#define CORE_VERSION 27
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -3344,7 +3344,7 @@ static int is_observed(void);
 static PyObject *
 item_now(PyObject *target, PyObject *index, PyFrameObject *frame)
 {
-    if (small_limit == 0 || frame == NULL) {
+    if (small_limit == 0) {
         return Miss;
     }
     PyObject *result = Miss, *settled = NULL, *value = NULL, *shape = NULL, *made = NULL, *origin = NULL;
@@ -3380,7 +3380,14 @@ item_now(PyObject *target, PyObject *index, PyFrameObject *frame)
         value = NULL; /* Stolen. */
         goto done;
     }
-    /* A view: a lazy array on the same cell with one more step, as a deferred view is. */
+    /* A view: a lazy array on the same cell with one more step, as a deferred view is. The step keeps the line
+     * of the program, which is asked for only here: `frame` is NULL when the caller has not looked for it. */
+    if (frame == NULL) {
+        frame = PyEval_GetFrame();
+        if (frame == NULL) {
+            goto done;
+        }
+    }
     PyObject *cell = cell_of(target);
     int observed = cell ? is_observed() : -1;
     if (observed < 0) {
@@ -4348,6 +4355,313 @@ static PyTypeObject RoadType = {
     .tp_descr_get = road_get,
     .tp_getset = road_getset,
 };
+
+/* ---- The operators of `LazyArray` on small arrays, taken where the interpreter first looks. ----
+ *
+ * `a + b` reaches a road in three calls: the interpreter calls the class's slot for the operator, the slot looks
+ * `__add__` up on the class and calls what it finds, which is the road. For a call made at once that is a third of
+ * what the layer adds to NumPy's own time. While small calls are made at once, each slot below stands in the
+ * class's table itself: it makes the call if it is one to make now, exactly as the road would have, and hands
+ * every other call to the slot that stood there, which goes to the road. Putting a method back on the class
+ * (`array.use_core(None)`) puts the interpreter's own slot back, as it does for any class. */
+
+/* The binary operators that are one ufunc each, by the method that carries the road. */
+enum { Q_ADD, Q_SUBTRACT, Q_MULTIPLY, Q_TRUE_DIVIDE, Q_FLOOR_DIVIDE, Q_REMAINDER, Q_MATRIX_MULTIPLY, Q_AND, Q_OR, Q_XOR,
+       Q_BINARY };
+static const char *const QUICK_BINARY[Q_BINARY] = {"__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__", "__mod__",
+                                                   "__matmul__", "__and__", "__or__", "__xor__"};
+static const size_t QUICK_BINARY_AT[Q_BINARY] = {
+    offsetof(PyNumberMethods, nb_add), offsetof(PyNumberMethods, nb_subtract), offsetof(PyNumberMethods, nb_multiply),
+    offsetof(PyNumberMethods, nb_true_divide), offsetof(PyNumberMethods, nb_floor_divide), offsetof(PyNumberMethods, nb_remainder),
+    offsetof(PyNumberMethods, nb_matrix_multiply), offsetof(PyNumberMethods, nb_and), offsetof(PyNumberMethods, nb_or),
+    offsetof(PyNumberMethods, nb_xor)};
+static binaryfunc binary_before[Q_BINARY];
+static PyObject *binary_calls[Q_BINARY];
+
+/* The unary operators. */
+enum { Q_NEGATIVE, Q_POSITIVE, Q_ABSOLUTE, Q_INVERT, Q_UNARY };
+static const char *const QUICK_UNARY[Q_UNARY] = {"__neg__", "__pos__", "__abs__", "__invert__"};
+static const size_t QUICK_UNARY_AT[Q_UNARY] = {offsetof(PyNumberMethods, nb_negative), offsetof(PyNumberMethods, nb_positive),
+                                               offsetof(PyNumberMethods, nb_absolute), offsetof(PyNumberMethods, nb_invert)};
+static unaryfunc unary_before[Q_UNARY];
+static PyObject *unary_calls[Q_UNARY];
+
+/* The in-place operators. */
+enum { Q_IADD, Q_ISUBTRACT, Q_IMULTIPLY, Q_ITRUE_DIVIDE, Q_INPLACE };
+static const char *const QUICK_INPLACE[Q_INPLACE] = {"__iadd__", "__isub__", "__imul__", "__itruediv__"};
+static const size_t QUICK_INPLACE_AT[Q_INPLACE] = {
+    offsetof(PyNumberMethods, nb_inplace_add), offsetof(PyNumberMethods, nb_inplace_subtract),
+    offsetof(PyNumberMethods, nb_inplace_multiply), offsetof(PyNumberMethods, nb_inplace_true_divide)};
+static binaryfunc inplace_before[Q_INPLACE];
+static PyObject *inplace_calls[Q_INPLACE];
+
+/* The comparisons, in the order of Python's own numbers for them: `Py_LT` to `Py_GE`. */
+#define Q_COMPARISONS 6
+static const char *const QUICK_COMPARISONS[Q_COMPARISONS] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
+static PyObject *comparison_calls[Q_COMPARISONS];
+static richcmpfunc compare_before;
+static ternaryfunc power_before;
+static PyObject *power_call;
+static binaryfunc subscript_before;
+static objobjargproc assign_before;
+
+/* Where a type keeps one slot of its numbers, or NULL for a type that has none. */
+static void **
+number_slot(PyTypeObject *type, size_t at)
+{
+    return type->tp_as_number != NULL ? (void **)((char *)type->tp_as_number + at) : NULL;
+}
+
+/* Call the slot that stood in the class's table for a binary operator, with that slot back in the table for the
+ * length of the call. The interpreter's slot for an operator of two operands decides whose method to call, the
+ * left operand's or the right one's reflected, by looking in each operand's class for itself: with another
+ * function there it would find that neither has the method. The same holds for a subclass, which was given the
+ * class's slots when it was made. `quick` is this file's function for the slot and `before` the one it replaced. */
+static PyObject *
+with_own_slot(size_t at, void *quick, void *before, PyObject *left, PyObject *right, PyObject *third)
+{
+    void **first = number_slot(Py_TYPE(left), at), **second = number_slot(Py_TYPE(right), at);
+    int one = first != NULL && *first == quick, other = second != NULL && second != first && *second == quick;
+    if (one) {
+        *first = before;
+    }
+    if (other) {
+        *second = before;
+    }
+    PyObject *result = third == NULL ? ((binaryfunc)before)(left, right) : ((ternaryfunc)before)(left, right, third);
+    if (one && *first == before) {
+        *first = quick;
+    }
+    if (other && *second == before) {
+        *second = quick;
+    }
+    return result;
+}
+
+static const binaryfunc QUICK_BINARY_SLOTS[];
+
+static PyObject *
+quick_binary(int which, PyObject *left, PyObject *right)
+{
+    if (enabled && small_limit != 0 && binary_calls[which] != NULL) {
+        PyObject *pair[2] = {left, right};
+        forget_declined();
+        PyObject *result = ufunc_now(binary_calls[which], pair, 2, 1);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return with_own_slot(QUICK_BINARY_AT[which], (void *)QUICK_BINARY_SLOTS[which], (void *)binary_before[which], left, right, NULL);
+}
+
+static PyObject *
+quick_unary(int which, PyObject *operand)
+{
+    if (enabled && small_limit != 0 && unary_calls[which] != NULL) {
+        forget_declined();
+        PyObject *result = ufunc_now(unary_calls[which], &operand, 1, 1);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return unary_before[which](operand);
+}
+
+static PyObject *
+quick_inplace(int which, PyObject *target, PyObject *other)
+{
+    if (enabled && small_limit != 0 && Py_TYPE(target) == Lazy && inplace_calls[which] != NULL) {
+        forget_declined();
+        PyObject *result = in_place_now(target, other, inplace_calls[which]);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return inplace_before[which](target, other);
+}
+
+/* One function per slot: the interpreter's table holds a function and nothing that says which operator it is for. */
+#define QUICK_BINARY_SLOT(name, which) \
+    static PyObject *name(PyObject *left, PyObject *right) { return quick_binary(which, left, right); }
+#define QUICK_UNARY_SLOT(name, which) \
+    static PyObject *name(PyObject *operand) { return quick_unary(which, operand); }
+#define QUICK_INPLACE_SLOT(name, which) \
+    static PyObject *name(PyObject *target, PyObject *other) { return quick_inplace(which, target, other); }
+QUICK_BINARY_SLOT(quick_add, Q_ADD)
+QUICK_BINARY_SLOT(quick_subtract, Q_SUBTRACT)
+QUICK_BINARY_SLOT(quick_multiply, Q_MULTIPLY)
+QUICK_BINARY_SLOT(quick_true_divide, Q_TRUE_DIVIDE)
+QUICK_BINARY_SLOT(quick_floor_divide, Q_FLOOR_DIVIDE)
+QUICK_BINARY_SLOT(quick_remainder, Q_REMAINDER)
+QUICK_BINARY_SLOT(quick_matrix_multiply, Q_MATRIX_MULTIPLY)
+QUICK_BINARY_SLOT(quick_and, Q_AND)
+QUICK_BINARY_SLOT(quick_or, Q_OR)
+QUICK_BINARY_SLOT(quick_xor, Q_XOR)
+QUICK_UNARY_SLOT(quick_negative, Q_NEGATIVE)
+QUICK_UNARY_SLOT(quick_positive, Q_POSITIVE)
+QUICK_UNARY_SLOT(quick_absolute, Q_ABSOLUTE)
+QUICK_UNARY_SLOT(quick_invert, Q_INVERT)
+QUICK_INPLACE_SLOT(quick_iadd, Q_IADD)
+QUICK_INPLACE_SLOT(quick_isubtract, Q_ISUBTRACT)
+QUICK_INPLACE_SLOT(quick_imultiply, Q_IMULTIPLY)
+QUICK_INPLACE_SLOT(quick_itrue_divide, Q_ITRUE_DIVIDE)
+static const binaryfunc QUICK_BINARY_SLOTS[] = {quick_add, quick_subtract, quick_multiply, quick_true_divide,
+                                                        quick_floor_divide, quick_remainder, quick_matrix_multiply,
+                                                        quick_and, quick_or, quick_xor};
+static const unaryfunc QUICK_UNARY_SLOTS[Q_UNARY] = {quick_negative, quick_positive, quick_absolute, quick_invert};
+static const binaryfunc QUICK_INPLACE_SLOTS[Q_INPLACE] = {quick_iadd, quick_isubtract, quick_imultiply, quick_itrue_divide};
+
+static PyObject *quick_power(PyObject *base, PyObject *exponent, PyObject *modulus);
+
+/* `x ** e`. With a third operand it is Python's three-argument power, which is nothing of NumPy's. */
+static PyObject *
+quick_power(PyObject *base, PyObject *exponent, PyObject *modulus)
+{
+    if (enabled && small_limit != 0 && modulus == Py_None && power_call != NULL) {
+        PyObject *pair[2] = {base, exponent};
+        forget_declined();
+        PyObject *result = ufunc_now(power_call, pair, 2, 1);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return with_own_slot(offsetof(PyNumberMethods, nb_power), (void *)quick_power, (void *)power_before, base, exponent, modulus);
+}
+
+/* `x < y` and the other five. */
+static PyObject *
+quick_compare(PyObject *left, PyObject *right, int operation)
+{
+    if (enabled && small_limit != 0 && operation >= 0 && operation < Q_COMPARISONS && comparison_calls[operation] != NULL) {
+        PyObject *pair[2] = {left, right};
+        forget_declined();
+        PyObject *result = ufunc_now(comparison_calls[operation], pair, 2, 1);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return compare_before(left, right, operation);
+}
+
+/* `x[index]`. */
+static PyObject *
+quick_subscript(PyObject *target, PyObject *index)
+{
+    if (enabled && small_limit != 0 && Py_TYPE(target) == Lazy) {
+        forget_declined();
+        PyObject *result = item_now(target, index, NULL);
+        if (result != Miss) {
+            return result;
+        }
+    }
+    return subscript_before(target, index);
+}
+
+/* `x[index] = value`; with no value it is `del x[index]`, which is the class's to refuse. */
+static int
+quick_assign(PyObject *target, PyObject *index, PyObject *value)
+{
+    if (value != NULL && enabled && small_limit != 0 && Py_TYPE(target) == Lazy) {
+        forget_declined();
+        if (is_own_view_at(target, index, value)) {
+            return 0;
+        }
+        PyObject *result = set_now(target, index, value);
+        if (result == NULL) {
+            return -1;
+        }
+        if (result != Miss) {
+            Py_DECREF(result);
+            return 0;
+        }
+    }
+    return assign_before(target, index, value);
+}
+
+/* What a road on the class calls for an operator: the `operation` of the `Road` the class has under a name. NULL,
+ * with no error, when the class has something else there. Borrowed from the class, which keeps the road. */
+static PyObject *
+road_operation(PyObject *names, const char *name, int kind)
+{
+    PyObject *road = PyDict_GetItemString(names, name);
+    if (road == NULL || Py_TYPE(road) != &RoadType || ((Road *)road)->kind != kind) {
+        return NULL;
+    }
+    return ((Road *)road)->operation;
+}
+
+/* `quick_slots()`: stand in the slots of `LazyArray` for the operators that carry a road. Called by
+ * `array.use_core` once the roads are on the class, since putting a method on a class makes the interpreter
+ * write the class's slots again. */
+static PyObject *
+module_quick_slots(PyObject *module, PyObject *ignored)
+{
+    if (Lazy == NULL || Lazy->tp_as_number == NULL || Lazy->tp_as_mapping == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "quick_slots() comes after setup()");
+        return NULL;
+    }
+    PyObject *names = PyType_GetDict(Lazy);
+    if (names == NULL) {
+        return NULL;
+    }
+    char *numbers = (char *)Lazy->tp_as_number;
+    for (int each = 0; each < Q_BINARY; each++) {
+        PyObject *call = road_operation(names, QUICK_BINARY[each], BINARY);
+        binaryfunc *slot = (binaryfunc *)(numbers + QUICK_BINARY_AT[each]);
+        if (call != NULL && *slot != NULL && *slot != QUICK_BINARY_SLOTS[each]) {
+            Py_XSETREF(binary_calls[each], Py_NewRef(call));
+            binary_before[each] = *slot;
+            *slot = QUICK_BINARY_SLOTS[each];
+        }
+    }
+    for (int each = 0; each < Q_UNARY; each++) {
+        PyObject *call = road_operation(names, QUICK_UNARY[each], UNARY);
+        unaryfunc *slot = (unaryfunc *)(numbers + QUICK_UNARY_AT[each]);
+        if (call != NULL && *slot != NULL && *slot != QUICK_UNARY_SLOTS[each]) {
+            Py_XSETREF(unary_calls[each], Py_NewRef(call));
+            unary_before[each] = *slot;
+            *slot = QUICK_UNARY_SLOTS[each];
+        }
+    }
+    for (int each = 0; each < Q_INPLACE; each++) {
+        PyObject *call = road_operation(names, QUICK_INPLACE[each], INPLACE);
+        binaryfunc *slot = (binaryfunc *)(numbers + QUICK_INPLACE_AT[each]);
+        if (call != NULL && *slot != NULL && *slot != QUICK_INPLACE_SLOTS[each]) {
+            Py_XSETREF(inplace_calls[each], Py_NewRef(call));
+            inplace_before[each] = *slot;
+            *slot = QUICK_INPLACE_SLOTS[each];
+        }
+    }
+    PyObject *call = road_operation(names, "__pow__", BINARY);
+    if (call != NULL && Lazy->tp_as_number->nb_power != NULL && Lazy->tp_as_number->nb_power != quick_power) {
+        Py_XSETREF(power_call, Py_NewRef(call));
+        power_before = Lazy->tp_as_number->nb_power;
+        Lazy->tp_as_number->nb_power = quick_power;
+    }
+    int compared = 1;
+    for (int each = 0; each < Q_COMPARISONS; each++) {
+        call = road_operation(names, QUICK_COMPARISONS[each], BINARY);
+        compared = compared && call != NULL;
+        Py_XSETREF(comparison_calls[each], Py_XNewRef(call));
+    }
+    if (compared && Lazy->tp_richcompare != NULL && Lazy->tp_richcompare != quick_compare) {
+        compare_before = Lazy->tp_richcompare;
+        Lazy->tp_richcompare = quick_compare;
+    }
+    if (road_operation(names, "__getitem__", GETITEM) != NULL && Lazy->tp_as_mapping->mp_subscript != NULL
+        && Lazy->tp_as_mapping->mp_subscript != quick_subscript) {
+        subscript_before = Lazy->tp_as_mapping->mp_subscript;
+        Lazy->tp_as_mapping->mp_subscript = quick_subscript;
+    }
+    if (road_operation(names, "__setitem__", SETITEM) != NULL && Lazy->tp_as_mapping->mp_ass_subscript != NULL
+        && Lazy->tp_as_mapping->mp_ass_subscript != quick_assign) {
+        assign_before = Lazy->tp_as_mapping->mp_ass_subscript;
+        Lazy->tp_as_mapping->mp_ass_subscript = quick_assign;
+    }
+    Py_DECREF(names);
+    PyType_Modified(Lazy);
+    Py_RETURN_NONE;
+}
 
 /* ---- Reading the expressions off the nodes of a computation: `fuse.find`, in C. ----
  *
@@ -5853,6 +6167,8 @@ static PyMethodDef methods[] = {
      "fuse.find, in C: (the expressions of a computation's nodes, the numbers of the nodes inside them)."},
     {"find_setup", (PyCFunction)(void (*)(void))module_find_setup, METH_VARARGS | METH_KEYWORDS,
      "Be told the classes, tables and names of fuse.py, for find()."},
+    {"quick_slots", module_quick_slots, METH_NOARGS,
+     "Stand in the slots of LazyArray for the operators that carry a road, once the roads are on the class."},
     {"compute_plain", module_compute_plain, METH_O,
      "Compute one pending node whose call is plain, as evaluate._compute_one does. True when it was computed."},
     {"track", module_track, METH_O, "Make a lazy array that has just been given its cell known to the garbage collector."},

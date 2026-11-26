@@ -474,6 +474,9 @@ def test_a_subclass_of_the_layers_array_is_freed_its_own_way():
         named.label = [turn]
         watching = weakref.ref(named, told.append)
         assert same(numpy.arange(3.0) + turn, named.gather())
+        assert same(numpy.arange(3.0) + turn + 1.0, (named + 1.0).gather())
+        assert same(2.0 - (numpy.arange(3.0) + turn), (2.0 - named).gather())
+        assert same((numpy.arange(3.0) + turn) ** 2, (named ** 2).gather())
         del named
         assert watching() is None
     assert len(told) == 200

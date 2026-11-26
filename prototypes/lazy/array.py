@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 26
+CORE_VERSION = 27
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -2161,6 +2161,9 @@ def use_core(core: Any) -> None:
     # `x.T` is a property, which carries no attribute of its own: `np.transpose(x)`, deferred.
     _stood_in_for["T"] = transposed = vars(LazyArray)["T"]
     LazyArray.T = core.Road("attribute", transposed.fget, np.transpose, "transpose")
+    # Last, since putting a method on a class has the interpreter write the class's slots again: the core's own
+    # slots for the operators, which take the calls made at once without the way through the method.
+    core.quick_slots()
     graph.deferred = core.deferred
     evaluate.compute_plain = core.compute_plain
     _core = core
