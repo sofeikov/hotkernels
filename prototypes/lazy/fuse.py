@@ -1236,6 +1236,10 @@ def load_library(module: Any) -> dict[str, Kernel]:
 # reading an expression off the graph costs about two microseconds a node, and a pass of NumPy's over fewer
 # elements than this costs no more than that, so there is nothing to win back.
 MIN_ELEMENTS = 16_384
+# With fusion on, a call that gives fewer elements than this is made as the graph is built, not written as a
+# node (`array.at_once_below`). The same count as MIN_ELEMENTS: below it nothing is planned, so a node would only
+# cost its writing and its computing. Read by `enable`.
+AT_ONCE_BELOW = MIN_ELEMENTS
 # Lines of the program remembered at most as ones whose kernel raised an exception NumPy reports.
 FLAGGED_LIMIT = 4096
 # The floating-point exceptions `_fused` reports, by the name `np.errstate` has for each. Filled by `enable`.
@@ -1751,12 +1755,14 @@ def enable() -> bool:
         LIBRARY.update(load_library(module))
         _BY_TOP.update(index(LIBRARY))
     evaluate.planner = plan
+    array.at_once_below(AT_ONCE_BELOW)
     return True
 
 
 def disable() -> None:
-    """Have every node computed by its own call again."""
+    """Have every node computed by its own call again, and every operation written as a node."""
     evaluate.planner = None
+    array.at_once_below(0)
 
 
 def is_enabled() -> bool:

@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 18
+CORE_VERSION = 19
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -967,6 +967,8 @@ def _defer_write(target: "LazyArray", name: str, perform: Callable[..., Any], op
     run = _Write(target._steps, perform)
     # Read before the cell changes: an operand that is a view of this array is a view of what it held.
     read, strict = _read(operands)
+    if _core is not None and _core.write_now(target, perform, read):
+        return  # Made in the array's own memory, at once: see `at_once_below`.
     strict = cell.node.strict or strict
     if len(graph.NOT_COMPUTED) >= graph.PENDING_LIMIT:
         evaluate.compute_pending(Trigger(graph.LIMIT, "the limit of pending nodes"))
@@ -2031,7 +2033,8 @@ def _set_up(core: Any) -> None:
                spec_numbers=graph._spec_numbers, Signature=rules.Signature,
                matmul=np.matmul, matrix_product=rules.MATRIX_PRODUCT,
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
-               write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy)
+               write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
+               at_once=graph.AT_ONCE)
 
 
 def use_core(core: Any) -> None:
@@ -2059,6 +2062,7 @@ def use_core(core: Any) -> None:
     _stood_in_for_elsewhere.clear()
     graph.deferred = _python_deferred
     if _core is not None:
+        _core.at_once_below(0)
         _core.enable(False)
     _core = None
     if core is None or getattr(core, "VERSION", None) != CORE_VERSION:
@@ -2081,6 +2085,37 @@ def use_core(core: Any) -> None:
     LazyArray.T = core.Road("attribute", transposed.fget, np.transpose, "transpose")
     graph.deferred = core.deferred
     _core = core
+
+
+def at_once_below(limit: int) -> int:
+    """Have small calls made as the program writes them, instead of written as nodes; or stop doing so.
+
+    With a limit, a call that gives fewer elements than it is made at
+    once when every array it reads has its values, and so is any view of
+    an array that has them. A write is made at once, into the array's own
+    memory, when nothing at all is pending. In each case that is what the
+    eager program does at that line, and no later operation can tell: the
+    result is a lazy array like any other, and a larger operation on it is
+    deferred as before.
+
+    The layer starts with no limit, where every operation it can defer is a
+    node. A limit is for running a program quickly: NumPy makes a call on a
+    small array in less time than the layer needs to write the node, plan
+    the computation and come back to it. Only the C core does this; without
+    it the limit is not kept.
+
+    Args:
+        limit: A count of elements, or 0 for no call made at once.
+
+    Returns:
+        The limit this one replaces; 0 without the C core.
+    """
+    return _core.at_once_below(limit) if _core is not None else 0
+
+
+def at_once_counts() -> tuple[int, int]:
+    """Return how many calls and how many writes were made at once under `at_once_below`, since the core was loaded."""
+    return _core.at_once_counts() if _core is not None else (0, 0)
 
 
 def core_in_use() -> bool:

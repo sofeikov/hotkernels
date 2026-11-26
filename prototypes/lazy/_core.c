@@ -34,7 +34,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 18
+#define CORE_VERSION 19
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -135,6 +135,13 @@ static long long unknown_floor;      /* `graph.UNKNOWN_FLOOR`: a length at or ab
 
 /* False while the layer is told to go the Python way everywhere. */
 static int enabled = 0;
+/* An operation that gives fewer elements than this, on operands that all have their values, is made at once instead
+ * of being written as a node: `array.at_once_below`. 0 for never, which is how the layer starts. */
+static Py_ssize_t small_limit = 0;
+/* How many calls and writes were made at once that way, for the tools that measure a program. */
+static long long made_at_once = 0, written_at_once = 0;
+static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
+static PyObject *s_array;            /* "array", what a node with a value is called */
 /* Returned by a quick road that does not apply: the caller then takes the Python road. Never seen from Python
  * except as the result of `try_defer`. */
 static PyObject *Miss;
@@ -363,14 +370,177 @@ at_the_limit(void)
     return PySet_GET_SIZE(pending) >= most;
 }
 
+/* Whether a node has its value: computed, not failed, and the value not taken by a write made in place. */
+static int
+has_value(PyObject *node)
+{
+    return SLOT(node, node_at[N_OPERATION]) == Py_None && SLOT(node, node_at[N_FAILURE]) == Py_None
+        && SLOT(node, node_at[N_VALUE]) != Py_None;
+}
+
+/* Whether a call can be made now instead of being written as a node: `small_limit` is set, every operand that is
+ * a node has its value, no operand is a collection that might hold one, and the result is a view or has fewer than
+ * `small_limit` elements. A view of an array that exists costs nothing to take. A small result is the other case:
+ * NumPy makes such a call in less time than the layer needs to write its node, plan it and come back to it, and
+ * there is nothing to fuse in it. A write is not asked about here; see `write_now`. */
+static int
+ready_now(PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *kind)
+{
+    if (small_limit == 0 || kind == write_kind || !PyTuple_CheckExact(args) || !PyTuple_CheckExact(shape)) {
+        return 0;
+    }
+    if (kind != view_kind) {
+        Py_ssize_t size = 1;
+        for (Py_ssize_t axis = 0; axis < PyTuple_GET_SIZE(shape); axis++) {
+            PyObject *length = PyTuple_GET_ITEM(shape, axis);
+            if (!PyLong_CheckExact(length)) {
+                return 0; /* A length that is not known yet. */
+            }
+            Py_ssize_t count = PyLong_AsSsize_t(length);
+            if (count < 0 || (count != 0 && size > small_limit / count)) {
+                PyErr_Clear();
+                return 0;
+            }
+            size *= count;
+        }
+        if (size >= small_limit) {
+            return 0;
+        }
+    }
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(args); place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        if (Py_TYPE(arg) == Node) {
+            if (!has_value(arg)) {
+                return 0;
+            }
+        } else if (PyTuple_CheckExact(arg)) {
+            /* An index or a shape. One that holds a node, or anything that might, is left to the node's own call. */
+            for (Py_ssize_t part = 0; part < PyTuple_GET_SIZE(arg); part++) {
+                PyObject *item = PyTuple_GET_ITEM(arg, part);
+                if (Py_TYPE(item) == Node || Py_TYPE(item) == Lazy || PyTuple_Check(item) || PyList_Check(item)
+                    || PyDict_Check(item)) {
+                    return 0;
+                }
+            }
+        } else if (Py_TYPE(arg) == Lazy || PyTuple_Check(arg) || PyList_Check(arg) || PyDict_Check(arg)) {
+            return 0;
+        }
+    }
+    if (kwargs != NULL) {
+        Py_ssize_t position = 0;
+        PyObject *value;
+        while (PyDict_Next(kwargs, &position, NULL, &value)) {
+            if (Py_TYPE(value) == Node || Py_TYPE(value) == Lazy || PyTuple_Check(value) || PyList_Check(value)
+                || PyDict_Check(value)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Make a call now, on its operands' values: what the node's own call would have been, made where the program
+ * wrote it. NumPy's exception or warning, if any, is the program's there and then, as without the layer. Returns a
+ * node that has the value (new reference), `Miss` when NumPy answered with something that is no array, or NULL. */
+static PyObject *value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, PyObject *strict,
+                            PyObject *spec, PyObject *origin);
+
+static PyObject *
+made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *dtype,
+         PyObject *strict, PyObject *spec, PyObject *origin)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    PyObject *values = PyTuple_New(count);
+    if (values == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        PyTuple_SET_ITEM(values, place, Py_NewRef(Py_TYPE(arg) == Node ? SLOT(arg, node_at[N_VALUE]) : arg));
+    }
+    PyObject *value = PyObject_Call(operation, values, kwargs != NULL && PyDict_GET_SIZE(kwargs) ? kwargs : NULL);
+    Py_DECREF(values);
+    if (value == NULL) {
+        return NULL;
+    }
+    if (Py_TYPE(value) != Ndarray && !PyObject_HasAttr(value, s_dtype)) {
+        Py_DECREF(value);
+        return Miss;
+    }
+    return value_node(value, name, shape, dtype, strict, spec, origin);
+}
+
+/* A node that has its value: as `graph.leaf`, with the shape and the element type given, which are the value's.
+ * Steals the reference to `value`, also when it fails. `origin` is the line for a view, whose step keeps it, and
+ * NULL otherwise. Returns a new reference. */
+static PyObject *
+value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, PyObject *strict, PyObject *spec,
+           PyObject *origin)
+{
+    PyObject *number = Py_TYPE(numbers)->tp_iternext(numbers);
+    PyObject *none = PyDict_New();
+    PyObject *node = number && none ? Node->tp_alloc(Node, 0) : NULL;
+    if (node == NULL) {
+        Py_XDECREF(number);
+        Py_XDECREF(none);
+        Py_DECREF(value);
+        return NULL;
+    }
+    SLOT(node, node_at[N_NUMBER]) = number;
+    SLOT(node, node_at[N_NAME]) = Py_NewRef(s_array);
+    SLOT(node, node_at[N_OPERATION]) = Py_NewRef(Py_None);
+    SLOT(node, node_at[N_ARGS]) = Py_NewRef(empty_tuple);
+    SLOT(node, node_at[N_KWARGS]) = none;
+    SLOT(node, node_at[N_SHAPE]) = Py_NewRef(shape);
+    SLOT(node, node_at[N_DTYPE]) = Py_NewRef(dtype);
+    SLOT(node, node_at[N_ORIGIN]) = Py_NewRef(origin != NULL ? origin : Py_None);
+    SLOT(node, node_at[N_ERRSTATE]) = Py_NewRef(Py_None);
+    SLOT(node, node_at[N_VALUE]) = value;
+    SLOT(node, node_at[N_FAILURE]) = Py_NewRef(Py_None);
+    SLOT(node, node_at[N_KIND]) = Py_NewRef(at_once_kind);
+    SLOT(node, node_at[N_STRICT]) = Py_NewRef(strict);
+    SLOT(node, node_at[N_EXPOSED]) = Py_NewRef(Py_False);
+    SLOT(node, node_at[N_SPEC]) = Py_NewRef(spec);
+    made_at_once++;
+    PyObject *observer = PyDict_GetItemWithError(graph_names, s_observer);
+    if (observer != NULL && observer != Py_None) {
+        PyObject *heard = PyObject_CallMethodObjArgs(observer, s_made, node, name, NULL);
+        if (heard == NULL) {
+            Py_DECREF(node);
+            return NULL;
+        }
+        Py_DECREF(heard);
+    } else if (PyErr_Occurred()) {
+        Py_DECREF(node);
+        return NULL;
+    }
+    return node;
+}
+
 /* `graph.deferred(...)`: make a pending node and add it to the pending set, in the order the Python function
  * does: the number, the line, the error settings, the node, the set, the counter, the observer. `origin` may be
- * NULL or None for the line of `frame`. Returns a new reference. */
+ * NULL or None for the line of `frame`. Returns a new reference. When `ready_now` says so the call is made instead,
+ * and the node returned has its value. */
 static PyObject *
 deferred(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *dtype,
          PyObject *kind, PyObject *strict, PyObject *origin, PyObject *spec, PyFrameObject *frame)
 {
     PyObject *number = NULL, *line = NULL, *settings = NULL, *node = NULL, *reference = NULL;
+    if (ready_now(args, kwargs, shape, kind)) {
+        /* A view keeps the line it was written at: its step is read again whenever the array is written into. */
+        if (kind == view_kind) {
+            line = (origin != NULL && origin != Py_None) ? Py_NewRef(origin) : origin_of(frame);
+            if (line == NULL) {
+                return NULL;
+            }
+        }
+        node = made_now(operation, name, args, kwargs, shape, dtype, strict, spec, line);
+        Py_CLEAR(line);
+        if (node != Miss) {
+            return node;
+        }
+        node = NULL; /* Not an array: written as a node after all, which makes the call again when it is computed. */
+    }
     number = Py_TYPE(numbers)->tp_iternext(numbers);
     if (number == NULL) {
         goto fail;
@@ -1925,8 +2095,82 @@ writable(PyObject *target)
 /* `array._defer_write(target, name, perform, operands)`: the cell gets a new node, the contents after the
  * write. `reads` is a tuple of what the write reads, with a node for each lazy array. 0, or -1 with an error set,
  * or 1 for "ask Python" (the pending set is full). */
+/* Make a write now, into the memory the array has, when that is what the eager program does and nothing can tell
+ * the difference: `small_limit` is set and no node at all is pending, so no operation written before the write is
+ * still waiting to read what the array held. The array's node stays the cell's; its memory has the new contents,
+ * and every view of it sees them, as with NumPy. `direct`, when given, is called with the part written and the one
+ * value in place of `perform`: the function of the `operator` module behind `x += y`, so that no frame of the
+ * layer's stands between NumPy and the program's line. Returns 1 when the write was made, 0 when it was not and is
+ * to be written as a node, -1 with an error set. */
 static int
-defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads, PyFrameObject *frame)
+write_now(PyObject *target, PyObject *held, PyObject *perform, PyObject *reads, PyObject *direct)
+{
+    if (small_limit == 0 || PySet_GET_SIZE(pending) != 0 || !has_value(held)
+        || Py_TYPE(SLOT(held, node_at[N_VALUE])) != Ndarray) {
+        return 0;
+    }
+    Py_ssize_t count = PyTuple_GET_SIZE(reads);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *read = PyTuple_GET_ITEM(reads, place);
+        if (Py_TYPE(read) == Node && !has_value(read)) {
+            return 0;
+        }
+    }
+    int done = -1;
+    PyObject *view = Py_NewRef(SLOT(held, node_at[N_VALUE]));
+    PyObject *steps = SLOT(target, lazy_at[L_STEPS]);
+    PyObject *values = NULL, *made = NULL;
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(steps); place++) {
+        /* `step.of(view)`: the view operation on the array, then its own arguments. */
+        PyObject *step = PyTuple_GET_ITEM(steps, place);
+        PyObject *first = PyTuple_Pack(1, view);
+        PyObject *all = first ? PySequence_Concat(first, SLOT(step, step_at[S_TAIL])) : NULL;
+        PyObject *next = all ? PyObject_Call(SLOT(step, step_at[S_OPERATION]), all, SLOT(step, step_at[S_KWARGS])) : NULL;
+        Py_XDECREF(first);
+        Py_XDECREF(all);
+        if (next == NULL) {
+            goto out;
+        }
+        Py_SETREF(view, next);
+    }
+    values = PyTuple_New(count);
+    if (values == NULL) {
+        goto out;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *read = PyTuple_GET_ITEM(reads, place);
+        PyTuple_SET_ITEM(values, place, Py_NewRef(Py_TYPE(read) == Node ? SLOT(read, node_at[N_VALUE]) : read));
+    }
+    if (direct != NULL && count == 1) {
+        made = PyObject_CallFunctionObjArgs(direct, view, PyTuple_GET_ITEM(values, 0), NULL);
+    } else if (Py_TYPE(perform) == Assign && count == 1) {
+        made = PyObject_SetItem(view, SLOT(perform, assign_at[A_INDEX]), PyTuple_GET_ITEM(values, 0)) < 0 ? NULL : Py_NewRef(Py_None);
+    } else {
+        PyObject *first = PyTuple_Pack(1, view);
+        PyObject *all = first ? PySequence_Concat(first, values) : NULL;
+        made = all ? PyObject_Call(perform, all, NULL) : NULL;
+        Py_XDECREF(first);
+        Py_XDECREF(all);
+    }
+    if (made != NULL) {
+        done = 1;
+        written_at_once++;
+        for (Py_ssize_t place = 0; place < count; place++) {
+            PyObject *read = PyTuple_GET_ITEM(reads, place);
+            if (Py_TYPE(read) == Node && SLOT(read, node_at[N_STRICT]) == Py_True) {
+                Py_SETREF(SLOT(held, node_at[N_STRICT]), Py_NewRef(Py_True));
+            }
+        }
+    }
+out:
+    Py_XDECREF(made);
+    Py_XDECREF(values);
+    Py_DECREF(view);
+    return done;
+}
+
+static int
+defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads, PyFrameObject *frame, PyObject *direct)
 {
     int full = at_the_limit();
     if (full != 0) {
@@ -1934,6 +2178,10 @@ defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads
     }
     PyObject *cell = SLOT(target, lazy_at[L_CELL]);
     PyObject *held = SLOT(cell, cell_at[C_NODE]);
+    int now = write_now(target, held, perform, reads, direct);
+    if (now != 0) {
+        return now < 0 ? -1 : 0;
+    }
     int strict = SLOT(held, node_at[N_STRICT]) == Py_True;
     for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(reads); place++) {
         PyObject *read = PyTuple_GET_ITEM(reads, place);
@@ -2000,7 +2248,7 @@ in_place(PyObject *target, PyObject *other, PyObject *apply, PyObject *name, PyO
     }
     if (fits) {
         PyObject *reads = PyTuple_Pack(1, read);
-        int written = reads ? defer_write(target, name, perform, reads, frame) : -1;
+        int written = reads ? defer_write(target, name, perform, reads, frame, apply) : -1;
         Py_XDECREF(reads);
         if (written < 0) {
             goto fail;
@@ -2091,7 +2339,7 @@ set_item(PyObject *target, PyObject *index, PyObject *value, PyFrameObject *fram
     }
     SLOT(assign, assign_at[A_INDEX]) = Py_NewRef(index);
     PyObject *reads = PyTuple_Pack(1, read);
-    int written = reads ? defer_write(target, s_setitem, assign, reads, frame) : -1;
+    int written = reads ? defer_write(target, s_setitem, assign, reads, frame, NULL) : -1;
     Py_XDECREF(reads);
     if (written < 0) {
         goto fail;
@@ -2219,7 +2467,7 @@ set_through(PyObject *target, PyObject *index, PyObject *value, PyFrameObject *f
     }
     SLOT(assign, through_at[X_TEMPLATE]) = Py_NewRef(template);
     SLOT(assign, through_at[X_WHOLE]) = Py_NewRef(whole ? Py_True : Py_False);
-    int done_write = defer_write(target, s_setitem, assign, reads, frame);
+    int done_write = defer_write(target, s_setitem, assign, reads, frame, NULL);
     if (done_write < 0) {
         goto fail;
     }
@@ -2290,7 +2538,7 @@ write_out(PyObject *function, PyObject *const *inputs, Py_ssize_t count, PyObjec
             goto fail;
         }
         SLOT(into, into_function_at) = Py_NewRef(function);
-        int written = defer_write(target, name, into, reads, frame);
+        int written = defer_write(target, name, into, reads, frame, NULL);
         if (written < 0) {
             goto fail;
         }
@@ -2308,6 +2556,275 @@ done:
 fail:
     result = NULL;
     goto done;
+}
+
+/* ---- `x[index]` and `x[index] = v` made at once (`small_limit`), on arrays that have their values. ---- */
+
+/* Whether an index item is a whole number or a slice of whole numbers written in the program. */
+static int
+is_plain_part(PyObject *item)
+{
+    if (PyLong_CheckExact(item)) {
+        return 1;
+    }
+    if (!PySlice_Check(item)) {
+        return 0;
+    }
+    PySliceObject *slice = (PySliceObject *)item;
+    return (slice->start == Py_None || PyLong_CheckExact(slice->start)) && (slice->stop == Py_None || PyLong_CheckExact(slice->stop))
+        && (slice->step == Py_None || PyLong_CheckExact(slice->step));
+}
+
+/* One item of an index as NumPy can take it now: a whole number, a slice, `None`, `...` or an `ndarray` as it is,
+ * and a lazy array that has its values as those values. `*basic` is cleared for an item that selects by an array,
+ * which gives a copy and not a view, and `*plain` for one that is not a number or slice written in the program.
+ * A new reference, or `Miss` for anything else: a pending array, a list, a nested tuple. */
+static PyObject *
+index_item_now(PyObject *item, int *basic, int *plain, int *strict)
+{
+    if (is_plain_part(item)) {
+        return Py_NewRef(item);
+    }
+    *plain = 0;
+    if (PySlice_Check(item) || item == Py_None || item == Py_Ellipsis) {
+        return Py_NewRef(item);
+    }
+    if (Py_TYPE(item) == Ndarray) {
+        *basic = 0;
+        return Py_NewRef(item);
+    }
+    if (Py_TYPE(item) == Lazy) {
+        PyObject *node = node_of(item);
+        if (node == NULL) {
+            return NULL;
+        }
+        if (Py_TYPE(node) != Node || !has_value(node)) {
+            Py_DECREF(node);
+            return Miss;
+        }
+        *basic = 0;
+        *strict = *strict || SLOT(node, node_at[N_STRICT]) == Py_True;
+        PyObject *value = Py_NewRef(SLOT(node, node_at[N_VALUE]));
+        Py_DECREF(node);
+        return value;
+    }
+    return Miss;
+}
+
+/* A whole index as NumPy can take it now, by `index_item_now` for it or for each item of a tuple. */
+static PyObject *
+index_now(PyObject *index, int *basic, int *plain, int *strict)
+{
+    if (!PyTuple_CheckExact(index)) {
+        return index_item_now(index, basic, plain, strict);
+    }
+    Py_ssize_t count = PyTuple_GET_SIZE(index);
+    PyObject *settled = PyTuple_New(count);
+    if (settled == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *item = index_item_now(PyTuple_GET_ITEM(index, place), basic, plain, strict);
+        if (item == NULL || item == Miss) {
+            Py_DECREF(settled);
+            return item;
+        }
+        PyTuple_SET_ITEM(settled, place, item);
+    }
+    return settled;
+}
+
+/* Whether a node's element type is one the layer defers and none of its lengths is zero: `rules.is_admissible`,
+ * remembered. 1, 0, or -1 with an error set. */
+static int
+is_admissible(PyObject *node)
+{
+    PyObject *spec = spec_part(node, NULL);
+    if (spec == NULL) {
+        return -1;
+    }
+    if (spec == Miss) {
+        return 0;
+    }
+    PyObject *allowed = PyDict_GetItemWithError(admissible, spec);
+    Py_DECREF(spec);
+    if (allowed == NULL && !PyErr_Occurred()) {
+        /* Not asked about yet: the rules answer and remember, so this is once for each shape and type. */
+        PyObject *ask = PyDict_GetItemString(rules_names, "is_admissible");
+        PyObject *answer = ask ? PyObject_CallOneArg(ask, node) : NULL;
+        if (answer == NULL) {
+            return -1;
+        }
+        int said = PyObject_IsTrue(answer);
+        Py_DECREF(answer);
+        return said;
+    }
+    if (allowed != Py_True) {
+        return PyErr_Occurred() ? -1 : 0;
+    }
+    return 1;
+}
+
+/* `x[index]` on an array that has its values, made now: NumPy's own indexing of the array, where the program wrote
+ * it. A view is a lazy array on the same cell with one more step, as a deferred view is; a number or a selection is
+ * an array of its own. Returns a new lazy array, `Miss` for what the other roads decide, or NULL. */
+static PyObject *
+item_now(PyObject *target, PyObject *index, PyFrameObject *frame)
+{
+    if (small_limit == 0 || frame == NULL) {
+        return Miss;
+    }
+    PyObject *result = Miss, *settled = NULL, *value = NULL, *shape = NULL, *dtype = NULL, *made = NULL, *origin = NULL;
+    PyObject *node = node_of(target);
+    if (node == NULL) {
+        return NULL;
+    }
+    if (Py_TYPE(node) != Node || !has_value(node) || Py_TYPE(SLOT(node, node_at[N_VALUE])) != Ndarray) {
+        goto done;
+    }
+    int admitted = is_admissible(node);
+    if (admitted < 0) {
+        goto fail;
+    }
+    if (!admitted) {
+        goto done;
+    }
+    int basic = 1, plain = 1, strict = SLOT(node, node_at[N_STRICT]) == Py_True;
+    settled = index_now(index, &basic, &plain, &strict);
+    if (settled == NULL) {
+        goto fail;
+    }
+    if (settled == Miss) {
+        settled = NULL;
+        goto done;
+    }
+    value = PyObject_GetItem(SLOT(node, node_at[N_VALUE]), settled);
+    if (value == NULL) {
+        goto fail;
+    }
+    shape = PyObject_GetAttr(value, s_shape);
+    dtype = shape ? PyObject_GetAttr(value, s_dtype) : NULL;
+    if (dtype == NULL || !PyTuple_CheckExact(shape)) {
+        goto fail;
+    }
+    int is_view = basic && Py_TYPE(value) == Ndarray;
+    if (is_view) {
+        origin = origin_of(frame);
+        if (origin == NULL) {
+            goto fail;
+        }
+    }
+    made = value_node(value, s_getitem, shape, dtype, strict ? Py_True : Py_False, zero, origin);
+    value = NULL; /* Stolen. */
+    if (made == NULL) {
+        goto fail;
+    }
+    if (!is_view) {
+        result = new_lazy(made);
+    } else {
+        PyObject *kwargs = PyDict_New();
+        PyObject *tail = kwargs ? PyTuple_Pack(1, settled) : NULL;
+        PyObject *step = tail ? new_step(getitem, s_getitem, tail, kwargs, shape, dtype, origin, plain) : NULL;
+        PyObject *steps = step ? PyTuple_Pack(1, step) : NULL;
+        PyObject *all = steps ? PySequence_Concat(SLOT(target, lazy_at[L_STEPS]), steps) : NULL;
+        result = all ? new_view(made, SLOT(target, lazy_at[L_CELL]), all) : NULL;
+        Py_XDECREF(kwargs);
+        Py_XDECREF(tail);
+        Py_XDECREF(step);
+        Py_XDECREF(steps);
+        Py_XDECREF(all);
+    }
+done:
+    Py_XDECREF(settled);
+    Py_XDECREF(value);
+    Py_XDECREF(shape);
+    Py_XDECREF(dtype);
+    Py_XDECREF(made);
+    Py_XDECREF(origin);
+    Py_DECREF(node);
+    return result;
+fail:
+    Py_XDECREF(settled);
+    Py_XDECREF(value);
+    Py_XDECREF(shape);
+    Py_XDECREF(dtype);
+    Py_XDECREF(made);
+    Py_XDECREF(origin);
+    Py_DECREF(node);
+    return NULL;
+}
+
+/* `x[index] = value` made now, into the array's own memory, when nothing at all is pending: NumPy's own assignment,
+ * where the program wrote it. Returns None (new reference), `Miss` for what the other roads decide, or NULL. */
+static PyObject *
+set_now(PyObject *target, PyObject *index, PyObject *value)
+{
+    if (small_limit == 0 || PySet_GET_SIZE(pending) != 0) {
+        return Miss;
+    }
+    PyObject *held = writable(target);
+    if (held == NULL || !has_value(held) || Py_TYPE(SLOT(held, node_at[N_VALUE])) != Ndarray) {
+        return Miss;
+    }
+    PyObject *result = Miss, *settled = NULL, *assigned = NULL;
+    PyObject *view = Py_NewRef(SLOT(held, node_at[N_VALUE]));
+    int basic = 1, plain = 1, strict = 0;
+    settled = index_now(index, &basic, &plain, &strict);
+    if (settled == NULL) {
+        goto fail;
+    }
+    if (settled == Miss) {
+        settled = NULL;
+        goto done;
+    }
+    if (Py_TYPE(value) == Lazy) {
+        PyObject *read = node_of(value);
+        if (read == NULL) {
+            goto fail;
+        }
+        if (Py_TYPE(read) != Node || !has_value(read)) {
+            Py_DECREF(read);
+            goto done;
+        }
+        strict = strict || SLOT(read, node_at[N_STRICT]) == Py_True;
+        assigned = Py_NewRef(SLOT(read, node_at[N_VALUE]));
+        Py_DECREF(read);
+    } else if (PyTuple_Check(value) || PyList_Check(value) || PyDict_Check(value)) {
+        goto done; /* May hold a lazy array: Python looks. */
+    } else {
+        assigned = Py_NewRef(value);
+    }
+    PyObject *steps = SLOT(target, lazy_at[L_STEPS]);
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(steps); place++) {
+        PyObject *step = PyTuple_GET_ITEM(steps, place);
+        PyObject *first = PyTuple_Pack(1, view);
+        PyObject *all = first ? PySequence_Concat(first, SLOT(step, step_at[S_TAIL])) : NULL;
+        PyObject *next = all ? PyObject_Call(SLOT(step, step_at[S_OPERATION]), all, SLOT(step, step_at[S_KWARGS])) : NULL;
+        Py_XDECREF(first);
+        Py_XDECREF(all);
+        if (next == NULL) {
+            goto fail;
+        }
+        Py_SETREF(view, next);
+    }
+    if (PyObject_SetItem(view, settled, assigned) < 0) {
+        goto fail;
+    }
+    written_at_once++;
+    if (strict) {
+        Py_SETREF(SLOT(held, node_at[N_STRICT]), Py_NewRef(Py_True));
+    }
+    result = Py_NewRef(Py_None);
+done:
+    Py_XDECREF(settled);
+    Py_XDECREF(assigned);
+    Py_DECREF(view);
+    return result;
+fail:
+    Py_XDECREF(settled);
+    Py_XDECREF(assigned);
+    Py_DECREF(view);
+    return NULL;
 }
 
 /* ---- A road: what stands on `LazyArray` where a method stood, takes the calls it can, and hands the others
@@ -2492,7 +3009,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (named || count != 2) {
             goto python;
         }
-        result = plain_item(args[0], args[1], frame);
+        result = item_now(args[0], args[1], frame);
+        if (result == Miss) {
+            result = plain_item(args[0], args[1], frame);
+        }
         if (result == Miss) {
             result = select_item(args[0], args[1], frame);
         }
@@ -2539,7 +3059,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (named || count != 3) {
             goto python;
         }
-        result = set_item(args[0], args[1], args[2], frame);
+        result = set_now(args[0], args[1], args[2]);
+        if (result == Miss) {
+            result = set_item(args[0], args[1], args[2], frame);
+        }
         if (result == Miss) {
             result = set_through(args[0], args[1], args[2], frame);
         }
@@ -2833,7 +3356,7 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "nonzeros", &PyFrozenSet_Type, &nonzeros) || take(given, "getitem", NULL, &getitem)
         || take(given, "count_nonzero", NULL, &count_nonzero) || take(given, "Write", &PyType_Type, &write)
         || take(given, "Assign", &PyType_Type, &assign) || take(given, "fitting", &PySet_Type, &fitting)
-        || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "LazyCallable", &PyType_Type, &standin_call)
+        || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "at_once", &PyUnicode_Type, &at_once_kind) || take(given, "LazyCallable", &PyType_Type, &standin_call)
         || take(given, "LazyNumPy", &PyType_Type, &standin_module) || take(given, "slots", &PyTuple_Type, &slots)) {
         return NULL;
     }
@@ -2939,7 +3462,60 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
     Py_RETURN_NONE;
 }
 
+/* `write_now(target, perform, reads)`: make a write at once if `write_now` above allows it, for the road of a
+ * write that Python takes. True when it was made. */
+static PyObject *
+module_write_now(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 3 || Py_TYPE(args[0]) != Lazy || !PyTuple_CheckExact(args[2])) {
+        PyErr_SetString(PyExc_TypeError, "write_now(target, perform, reads)");
+        return NULL;
+    }
+    if (!enabled) {
+        Py_RETURN_FALSE;
+    }
+    PyObject *held = SLOT(SLOT(args[0], lazy_at[L_CELL]), cell_at[C_NODE]);
+    if (Py_TYPE(held) != Node) {
+        Py_RETURN_FALSE;
+    }
+    int now = write_now(args[0], held, args[1], args[2], NULL);
+    if (now < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(now);
+}
+
+/* `at_once_below(limit)`: set `small_limit`, returning what it was. */
+static PyObject *
+module_at_once_below(PyObject *module, PyObject *limit)
+{
+    Py_ssize_t wanted = PyLong_AsSsize_t(limit);
+    if (wanted == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (wanted < 0) {
+        PyErr_SetString(PyExc_ValueError, "the limit is a count of elements, 0 or more");
+        return NULL;
+    }
+    Py_ssize_t before = small_limit;
+    small_limit = wanted;
+    return PyLong_FromSsize_t(before);
+}
+
+/* `at_once_counts()`: (calls made at once because they were small, writes made at once in place), since the module
+ * was loaded. */
+static PyObject *
+module_at_once_counts(PyObject *module, PyObject *ignored)
+{
+    return Py_BuildValue("(LL)", made_at_once, written_at_once);
+}
+
 static PyMethodDef methods[] = {
+    {"at_once_below", module_at_once_below, METH_O,
+     "Have a call that gives fewer elements than this, on operands that have their values, made at once. Returns the limit it replaces."},
+    {"write_now", (PyCFunction)(void (*)(void))module_write_now, METH_FASTCALL,
+     "Make a write at once, in place, when nothing is pending and at_once_below is set. True when it was made."},
+    {"at_once_counts", module_at_once_counts, METH_NOARGS, "(calls, writes) made at once since the module was loaded."},
     {"setup", (PyCFunction)(void (*)(void))module_setup, METH_VARARGS | METH_KEYWORDS,
      "Be told the layer's classes, memories and constants."},
     {"enable", module_enable, METH_O, "Take the quick roads (True) or hand every call to Python (False). Returns what it was."},
@@ -3002,10 +3578,11 @@ PyInit__core(void)
     s_type = PyUnicode_InternFromString("type");
     own_dtypes = PyDict_New();
     s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
+    s_array = PyUnicode_InternFromString("array");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
-        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type) {
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array) {
         Py_DECREF(module);
         return NULL;
     }

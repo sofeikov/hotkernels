@@ -26,7 +26,7 @@ from typing import Any, Iterator
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, evaluate, fuse, get_lazy, graph, record_graphs
+from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, record_graphs
 from prototypes.lazy.programs import corpus
 
 # Seed of every random array in these tests.
@@ -88,8 +88,10 @@ def fusing(built_kernels: Any) -> Iterator[None]:
     assert fuse.enable()
     fuse.STATS.reset()
     fuse._flagged.clear()
-    # The tests are of what is fused, on arrays of every length; what is worth fusing is another question.
+    # The tests are of what is fused, on arrays of every length; what is worth fusing is another question. So
+    # no floor, and no small call made at once in place of a node: the tests of that turn it on themselves.
     floor, fuse.MIN_ELEMENTS = fuse.MIN_ELEMENTS, 1
+    array.at_once_below(0)
     try:
         yield
     finally:
