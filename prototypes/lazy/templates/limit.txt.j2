@@ -3,12 +3,17 @@ How far fusion could take each program ({{ size }} size, the quickest of {{ runs
 {{ "%-18s %9s %9s %9s %8s %9s %8s %9s"|format("program", "NumPy", "floor", "fused", "at best", "now", "left", "left of") }}
 {{ "%-18s %9s %9s %9s %8s %9s %8s %9s"|format("", "", "", "", "", "", "", "fused run") }}
 {% for limit in limits %}
+{% if limit.has_floor %}
 {{ "%-18s %9.2f %9.2f %9.2f %7.2fx %8.2fx %8.2f %8.1f%%"|format(limit.name, limit.eager_ns / ns_per_ms, limit.floor_ns / ns_per_ms, limit.fused_ns / ns_per_ms, limit.eager_ns / limit.floor_ns, limit.eager_ns / limit.fused_ns if limit.fused_ns else 0.0, limit.left_ns / ns_per_ms, 100.0 * limit.left_ns / limit.fused_ns if limit.fused_ns else 0.0) }}
+{% else %}
+{{ "%-18s %9.2f %9s %9.2f %8s %8.2fx %8s %9s"|format(limit.name, limit.eager_ns / ns_per_ms, "-", limit.fused_ns / ns_per_ms, "-", limit.eager_ns / limit.fused_ns if limit.fused_ns else 0.0, "-", "-") }}
+{% endif %}
 {% endfor %}
 
 `floor` is the eager time less everything that could be removed from the program's element-by-element operations
 and its reductions: what fusing all of them, at no cost, would leave. `at best` is NumPy over the floor, `now` NumPy
-over the fused run, and `left` the fused run less the floor.
+over the fused run, and `left` the fused run less the floor. A program with `-` for a floor has none that means
+anything: its arrays are so small that what could be removed from an operation, the call, is all the operation costs.
 
 Where NumPy's time is, node by node, and how much of each class could be removed
 

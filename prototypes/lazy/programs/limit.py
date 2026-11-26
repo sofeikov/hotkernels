@@ -74,6 +74,9 @@ SHORT, LONG = 512, 4096
 # of them are timed; the quickest round counts.
 MOST_PIECES, CALIBRATION_ROUNDS = 64, 5
 
+# The smallest part of a program's eager time its floor may be, as a divisor, and still be printed: a hundredth.
+LEAST_FLOOR = 100
+
 app = typer.Typer(add_completion=False)
 
 
@@ -149,6 +152,16 @@ class Limit:
     def floor_ns(self) -> int:
         """Nanoseconds a fusion of every reachable operation, with no cost of its own, would leave."""
         return max(1, self.eager_ns - min(self.reachable_ns, self.eager_ns - 1))
+
+    @property
+    def has_floor(self) -> bool:
+        """Whether the floor says anything: not when what could be removed is all but nothing of the eager time.
+
+        That is a program on arrays of a few elements, where an operation
+        costs what its call into NumPy does and the arithmetic in the cache
+        is next to nothing beside it.
+        """
+        return self.floor_ns * LEAST_FLOOR > self.eager_ns
 
     @property
     def left_ns(self) -> int:

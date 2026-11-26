@@ -319,7 +319,7 @@ The tag starts the release workflow, which builds and tests the wheels and waits
 - [docs/release-design.md](docs/release-design.md): how a release is made and published, and who can publish
 - [docs/x86-64-design.md](docs/x86-64-design.md): the second architecture: what to target, what changes, and how the kernels are carried over
 - [docs/lazy-design.md](docs/lazy-design.md): a proposal for a lazy array type, `hotkernels.get_lazy()`, whose graph is what fusing operations would need
-- [docs/lazy-fusion-design.md](docs/lazy-fusion-design.md): fusion by pattern on that graph: which expressions kernels may compute, how an expression is run block by block with a kernel for every step, the seventy-eight kernels, and what twenty-six programs gain or lose
+- [docs/lazy-fusion-design.md](docs/lazy-fusion-design.md): fusion by pattern on that graph: which expressions kernels may compute, how an expression is run block by block with a kernel for every step, the seventy-eight kernels, what twenty-six programs gain or lose, and what is left to gain on them
 - [docs/distribution-design.md](docs/distribution-design.md): what a release contains: wheels, the source distribution, other platforms, `python -m hotkernels`
 - [AGENTS.md](AGENTS.md): rules for coding agents working in this repository
 - [kernels/README.md](kernels/README.md): how to add a kernel
