@@ -27,6 +27,7 @@ import numpy
 import pytest
 
 from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, make_kernel, record_graphs
+from judge.spec import In, Scalar, load_spec
 from prototypes.lazy.programs import corpus
 
 # Seed of every random array in these tests.
@@ -321,6 +322,134 @@ def test_a_long_expression_is_covered_by_several_kernels():
     got = (la + lb * lc) * (ld - la) + 0.5 * (lb + numpy.sqrt(numpy.abs(lc)) * ld) / (la * la + 1.0)
     assert same(expected, got.gather())
     assert calls() >= 2 and fuse.STATS.fused_nodes >= 2
+
+
+def test_a_long_expression_is_one_program_with_no_array_between_its_kernels():
+    """Every operation of an arithmetic expression is a step of one program: all its nodes but the last are inside."""
+    a, b, c, d = arrays(4, (5000,), special=True)
+    with numpy.errstate(all="ignore"):
+        expected = ((a + b * c) * (d - a) + 0.5 * (b + numpy.sqrt(numpy.abs(c)) * d) / (a * a + 1.0)) - numpy.maximum(a, 0.25) * b
+        got = gathered(lambda: ((lazy.asarray(a) + lazy.asarray(b) * lazy.asarray(c)) * (lazy.asarray(d) - lazy.asarray(a))
+                                + 0.5 * (lazy.asarray(b) + numpy.sqrt(numpy.abs(lazy.asarray(c))) * lazy.asarray(d))
+                                / (lazy.asarray(a) * lazy.asarray(a) + 1.0)) - numpy.maximum(lazy.asarray(a), 0.25) * lazy.asarray(b))
+    assert same(expected, got)
+    # Sixteen operations, one group: fifteen nodes have no array of their own.
+    assert fuse.STATS.fused_nodes == 15 and fuse.STATS.declined == 0 and calls() < 16
+
+
+@pytest.mark.parametrize("length", (1, 7, 8, 9, 31, 32, 33, 1023, 1024, 1025, 4095, 4096, 4097, 9000))
+def test_a_program_is_numpys_at_every_length_around_its_blocks(length: int):
+    """A program's blocks, its last one and the elements left of it give NumPy's bits, also written in place."""
+    a, b, c = arrays(3, (length,), special=True)
+    with numpy.errstate(all="ignore"):
+        expected = (a - 0.5 * b) / (c * c + 2.0) - a * (b + c)
+        got = gathered(lambda: (lazy.asarray(a) - 0.5 * lazy.asarray(b)) / (lazy.asarray(c) * lazy.asarray(c) + 2.0)
+                       - lazy.asarray(a) * (lazy.asarray(b) + lazy.asarray(c)))
+        assert same(expected, got)
+        # The same with its result written where the first operand is.
+        w, there = lazy.array(a), a.copy()
+        w += (lazy.asarray(b) - w) * lazy.asarray(c)
+        w *= 0.75
+        there += (b - there) * c
+        there *= 0.75
+        assert same(there, w.gather())
+    # Runs of fewer than 32 elements are left to NumPy: a program there is mostly the cost of its calls.
+    assert fuse.STATS.flagged == 0 and (length < 32 or fuse.STATS.declined == 0)
+
+
+def test_an_array_that_repeats_along_outer_dimensions_does_not_end_a_run():
+    """`grid * levels[None, None, :]` is walked in long runs, the levels read from a buffer that repeats them."""
+    grid, other = arrays(2, (9, 11, 26))
+    levels, rows = arrays(1, (26,))[0], arrays(1, (11, 26))[0]
+    cases = [
+        ((grid + other * levels[None, None, :]) * 0.5 - grid, lambda: (lazy.asarray(grid) + lazy.asarray(other) * lazy.asarray(levels)[None, None, :]) * 0.5 - lazy.asarray(grid)),
+        ((grid * levels - rows) / (other * other + 1.0), lambda: (lazy.asarray(grid) * lazy.asarray(levels) - lazy.asarray(rows)) / (lazy.asarray(other) * lazy.asarray(other) + 1.0)),
+        (levels * (rows + levels) - grid, lambda: lazy.asarray(levels) * (lazy.asarray(rows) + lazy.asarray(levels)) - lazy.asarray(grid)),
+    ]
+    for expected, write in cases:
+        assert same(expected, gathered(write))
+    # The sum of the third, `rows + levels`, has another shape than the result and is NumPy's own call.
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == 3 + 4 + 1
+
+
+def test_columns_of_a_grid_are_gathered_into_blocks():
+    """An array that steps over elements is copied into a block for the kernels, and the result is NumPy's."""
+    table, other = arrays(2, (5000, 4))
+    out, expected = lazy.zeros((5000, 3)), numpy.zeros((5000, 3))
+    out[:, 1] = (lazy.asarray(table)[:, 0] - 0.5 * lazy.asarray(table)[:, 3]) * lazy.asarray(other)[:, 2] + 1.5
+    expected[:, 1] = (table[:, 0] - 0.5 * table[:, 3]) * other[:, 2] + 1.5
+    assert same(expected, out.gather())
+    column = gathered(lambda: (lazy.asarray(table)[:, 1] * lazy.asarray(table)[:, 2] - lazy.asarray(other)[:, 0]) / 3.0)
+    assert same((table[:, 1] * table[:, 2] - other[:, 0]) / 3.0, column)
+    assert fuse.STATS.declined == 0 and calls() >= 2
+
+
+def test_the_driver_refuses_a_program_that_is_not_one():
+    """`_fused.program` checks every step against its kernel and the places it names before it computes anything."""
+    module = fuse._fused
+    add = fuse.LIBRARY["add(V0,V1)"].index
+    a, b, out = numpy.ones(64), numpy.ones(64), numpy.empty(64)
+    assert module.program(((add, -1, 0, 1),), 2, (a, b), out, fuse.BLOCK_ELEMENTS) == 0 and (out == 2.0).all()
+    for steps in (((add, 2, 0, 1),),                      # The last step has to write the result.
+                  ((add, -1, 0, 1), (add, -1, 0, 1)),     # Only the last may.
+                  ((add, -1, 0, 5),),                     # Reads a buffer nothing wrote.
+                  ((add, 2, 0, 2), (add, -1, 0, 2)),      # Reads the buffer it writes.
+                  ((add, -1, 0),),                        # Not the kernel's number of operands.
+                  ((10 ** 6, -1, 0, 1),)):                # No such kernel.
+        with pytest.raises(ValueError):
+            module.program(steps, 2, (a, b), out, fuse.BLOCK_ELEMENTS)
+    with pytest.raises(ValueError):
+        module.program(((add, -1, 0, 1),), 2, (a, b), out, 100)   # A block is a multiple of eight.
+    # A result that overlaps an operand, but is not the operand, is declined before anything is written.
+    whole = numpy.arange(72.0)
+    assert module.program(((add, -1, 0, 1),), 2, (whole[:64], b), whole[8:], fuse.BLOCK_ELEMENTS) == module.DECLINED
+    assert (whole == numpy.arange(72.0)).all()
+    # The operand itself is not: the result is written where it is.
+    assert module.program(((add, -1, 0, 1),), 2, (whole[:67], numpy.ones(67)), whole[:67], fuse.BLOCK_ELEMENTS) == 0
+    assert (whole[:67] == numpy.arange(67.0) + 1.0).all() and (whole[67:] == numpy.arange(67.0, 72.0)).all()
+
+
+def test_an_expression_seen_before_is_planned_from_what_was_remembered(monkeypatch: pytest.MonkeyPatch):
+    """The second expression of a shape is not covered with shapes again, and is computed as the first was."""
+    a, b, c = arrays(3, (300,))
+    fuse._RECIPES.clear()
+    covered = []
+    monkeypatch.setattr(fuse, "tile", lambda term, library, real=fuse.tile: (covered.append(1), real(term, library))[1])
+    for turn in range(3):
+        got = gathered(lambda: (lazy.asarray(a) - 0.5 * lazy.asarray(b)) * (lazy.asarray(c) + lazy.asarray(a)) / 3.0)
+        assert same((a - 0.5 * b) * (c + a) / 3.0, got)
+    assert len(covered) == 1 and len(fuse._RECIPES) == 1 and fuse.STATS.tiled == 3
+
+
+@pytest.mark.parametrize("shape", make_kernel.SHAPES)
+def test_a_kernel_written_from_its_shape_is_called_for_it_and_gives_numpys_bits(shape: str):
+    """The oracle of a written kernel, run on lazy arrays, is computed by that kernel alone; one operation is NumPy's."""
+    name = make_kernel.name_of(shape)
+    spec = load_spec(make_kernel.KERNELS / name)
+    count = sum(1 for arg in spec.args if type(arg) is In)
+    numbers = [arg.value for arg in spec.args if type(arg) is Scalar]
+    for length in (5, 64, 1001):
+        operands = arrays(count, (length,), special=True)
+        with numpy.errstate(all="ignore"):
+            expected = spec.oracle(*operands, *numbers)
+            got = gathered(lambda: spec.oracle(*(lazy.asarray(operand) for operand in operands), *numbers))
+        assert same(expected, got), length
+    # One operation by itself is no expression: it is NumPy's call. Anything larger is this kernel's, once a length.
+    assert fuse.STATS.calls == ({} if shape.count("(") == 1 else {name: 3})
+
+
+def test_the_kernels_in_the_repository_are_what_the_tool_writes(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
+    """Every written kernel's four files are the tool's, unchanged: a tuned one says so in its log, not in silence."""
+    kept = make_kernel.KERNELS
+    monkeypatch.setattr(make_kernel, "KERNELS", tmp_path)
+    for shape in make_kernel.SHAPES:
+        written = make_kernel.write(shape)
+        for path in sorted(written.rglob("*")):
+            if path.is_file() and path.name != "attempts.md":
+                assert path.read_text() == (kept / path.relative_to(tmp_path)).read_text(), path.name
+    assert make_kernel.name_of("sub(V0,mul(S0,V1))") == "fuse_sub_v_mul_s_v_f64"
+    with pytest.raises(make_kernel.CannotWrite):
+        make_kernel.write("where(gt(V0,S0),V1,V2)")
 
 
 def test_an_intermediate_the_program_holds_is_computed_once():

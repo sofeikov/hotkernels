@@ -86,6 +86,11 @@ OPERATIONS = {
     "abs": Operation("fabs", 1, "np.abs({0})", "__builtin_fabs({0})", "absolute value"),
     "sqrt": Operation("fsqrt", 1, "np.sqrt({0})", "__builtin_sqrt({0})", "square root"),
     "sq": Operation("fmul", 1, "np.square({0})", "({0} * {0})", "square"),
+    # `np.maximum` and `np.minimum` are the processor's `fmax` and `fmin` on ARM64, at every length and position:
+    # a NaN wins over a number, and of two zeros the maximum is the positive one and the minimum the negative. C's
+    # `fmax` is another function (a number wins over a NaN), so the reference spells the rule out; see the template.
+    "max": Operation("fmax", 2, "np.maximum({0}, {1})", "larger({0}, {1})", "maximum"),
+    "min": Operation("fmin", 2, "np.minimum({0}, {1})", "smaller({0}, {1})", "minimum"),
 }
 # The names of a kernel's arrays, in the order of the shape's V0, V1, ...; and how its numbers are named.
 ARRAY_NAMES = "abcdef"
@@ -126,6 +131,8 @@ SHAPES = (
     "add(add(S0,V0),mul(V1,add(V2,add(S1,V3))))", "add(div(V0,S0),div(V1,S1))", "sub(V0,mul(V1,mul(S0,V2)))",
     "mul(V0,mul(V1,add(V2,mul(V3,V4))))", "mul(add(V0,V1),mul(S0,V2))", "add(add(S0,V0),mul(V1,add(S1,mul(S2,V2))))",
     "sub(mul(S0,add(V0,div(sub(V1,V2),S1))),sq(V3))", "div(mul(S0,V0),S1)", "add(V0,add(V1,add(V2,V3)))",
+    "max(V0,V1)", "max(S0,V0)", "min(V0,V1)", "min(S0,V0)", "div(neg(add(V0,mul(V1,V2))),sub(min(S0,V3),S1))",
+    "add(V0,mul(max(S0,mul(V1,V2)),mul(V3,V4)))", "max(S0,max(V0,min(S1,V1)))",
 )
 
 app = typer.Typer(add_completion=False)
@@ -362,6 +369,7 @@ def write(shape: str, force: bool = False) -> Path | None:
         "defaults": NUMBER_DEFAULTS[:numbers], "trials": NUMBER_TRIALS, "uses_numpy": "np." in python,
         "out": out, "length": length, "block": BLOCK, "top": TOP_REGISTER, "wide": loops[True], "narrow": loops[False],
         "words": sorted({OPERATIONS[word].word for word in OPERATIONS if f"{word}(" in shape}),
+        "larger": "max(" in shape, "smaller": "min(" in shape,
     }
     environment = Environment(loader=FileSystemLoader(TEMPLATES), undefined=StrictUndefined, trim_blocks=True,
                               lstrip_blocks=True, keep_trailing_newline=True)

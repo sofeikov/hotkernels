@@ -1,0 +1,25 @@
+// out[i] = smaller(s0, a[i]), every operation rounded by itself, in that order.
+//
+// The pragma keeps the compiler from fusing a product and a sum into one
+// multiply-add, which rounds once and gives other bits than NumPy's passes.
+#pragma STDC FP_CONTRACT OFF
+
+// `np.minimum`: the smaller of two numbers; of two zeros the negative one; a NaN if either is one, the first's
+// if both are.
+static inline double smaller(double x, double y) {
+    if (x < y) return x;
+    if (y < x) return y;
+    if (x == y) return x != 0.0 ? x : -((-x) + (-y));
+    return x != x ? x : y;
+}
+
+void fuse_min_s_v_f64(
+    const double *a,
+    double *out,
+    size_t n,
+    double s0
+) {
+    for (size_t i = 0; i < n; i++) {
+        out[i] = smaller(s0, a[i]);
+    }
+}
