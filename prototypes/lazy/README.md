@@ -116,11 +116,13 @@ Four tools, needing `--group apps --group workloads` for the programs that call 
 
 ```bash
 uv run --group apps --group workloads python -m prototypes.lazy.programs.mine --size large          # which shapes occur, and what they cost
-uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --size large   # each program: NumPy, installed, lazy, fused
-uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --install      # the lazy runs under hotkernels.install() too
+uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --size large   # each program: NumPy, and with hotkernels installed eagerly, lazily and fused
+uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --plain        # the lazy runs with nothing installed as well
 uv run --group apps --group workloads python -m prototypes.lazy.programs.limit --size large         # each program: what no fusion could remove, and what is left
 uv run python -m prototypes.lazy.make_kernel "sub(V0,mul(S0,V1))"                                   # write the kernel of a shape
 ```
+
+The timing tools run the lazy layer with `hotkernels.install()` in effect, since that is how the package is used, and measure against the program on plain NumPy.
 
 Run them on a machine that is doing nothing else.
 

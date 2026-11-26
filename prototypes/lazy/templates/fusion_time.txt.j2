@@ -1,25 +1,25 @@
 {% macro table(rows, which) %}
 {{ "%-18s %9s %9s  %9s %8s %8s  %9s %8s %8s %8s  %7s %8s %9s"|format("program", "NumPy ms", "installed", "lazy ms", "build", "compute", "fused ms", "build", "plan", "compute", "vs lazy", "vs NumPy", "vs inst.") }}
 {% for row in rows %}
-{% set t = row.timings if which == "plain" else row.installed %}
-{% set eager = row.timings[installed] if which == "plain" else row.installed[numpy] %}
-{{ "%-18s %9.2f %9.2f  %9.2f %8.2f %8.2f  %9.2f %8.2f %8.2f %8.2f  %6.2fx %7.2fx %8.2fx"|format(row.name, row.timings[numpy].total_ns / ns_per_ms, eager.total_ns / ns_per_ms, t[lazy].total_ns / ns_per_ms, t[lazy].building_ns / ns_per_ms, t[lazy].computing_ns / ns_per_ms, t[fused].total_ns / ns_per_ms, t[fused].building_ns / ns_per_ms, t[fused].planning_ns / ns_per_ms, (t[fused].computing_ns - t[fused].planning_ns) / ns_per_ms, t[lazy].total_ns / t[fused].total_ns, row.timings[numpy].total_ns / t[fused].total_ns, eager.total_ns / t[fused].total_ns) }}
+{% set t = row.timings if which == "installed" else row.plain %}
+{{ "%-18s %9.2f %9.2f  %9.2f %8.2f %8.2f  %9.2f %8.2f %8.2f %8.2f  %6.2fx %7.2fx %8.2fx"|format(row.name, row.timings[numpy].total_ns / ns_per_ms, row.timings[installed].total_ns / ns_per_ms, t[lazy].total_ns / ns_per_ms, t[lazy].building_ns / ns_per_ms, t[lazy].computing_ns / ns_per_ms, t[fused].total_ns / ns_per_ms, t[fused].building_ns / ns_per_ms, t[fused].planning_ns / ns_per_ms, (t[fused].computing_ns - t[fused].planning_ns) / ns_per_ms, t[lazy].total_ns / t[fused].total_ns, row.timings[numpy].total_ns / t[fused].total_ns, row.timings[installed].total_ns / t[fused].total_ns) }}
 {% endfor %}
 {% endmacro %}
 Each program four ways ({{ size }} size, the quickest of {{ runs }} runs, {{ kernels }} fused kernels, nodes written by {{ "the C core" if core else "Python" }})
 
-{{ table(rows, "plain") }}
-`installed` is the eager program after `hotkernels.install()`: single-operation kernels, no graph.
+{{ table(rows, "installed") }}
+`NumPy` is the program as it is, with nothing installed. Every other column is under `hotkernels.install()`:
+`installed` the eager program, single-operation kernels and no graph; `lazy` and `fused` the lazy layer's two runs.
 `build` is the time outside the layer's computing functions; `compute` the time inside them, less the planning.
 `vs lazy`, `vs NumPy` and `vs inst.` are how many times quicker the fused run is, start to last result.
-{% if rows and rows[0].installed %}
+{% if rows and rows[0].plain %}
 
-The lazy and the fused run under hotkernels.install() as well, against the same two eager runs
+The lazy and the fused run with nothing installed, against the same two eager runs
 
-{{ table(rows, "installed") }}
+{{ table(rows, "plain") }}
 {% endif %}
 
-What the graphs were, lazily; and what the fused run did
+What the graphs were, lazily; and what the fused run did, both under hotkernels.install()
 
 {{ "%-18s %8s %7s %8s %11s  %8s %7s %6s %6s %7s %6s %6s %7s %7s  %9s %9s"|format("program", "deferred", "graphs", "largest", "largest node", "deferred", "at once", "expr.", "tiled", "kernel", "fused", "given", "writes", "writes", "lazy MB", "fused MB") }}
 {{ "%-18s %8s %7s %8s %11s  %8s %7s %6s %6s %7s %6s %6s %7s %7s  %9s %9s"|format("", "ops", "", "graph", "elements", "fused", "fused", "", "", "calls", "nodes", "up", "in place", "copied", "written", "written") }}

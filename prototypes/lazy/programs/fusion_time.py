@@ -1,28 +1,32 @@
-"""Times each program of the corpus four ways: NumPy, NumPy with hotkernels installed, the lazy layer, and fusion.
+"""Times each program of the corpus four ways: NumPy, and with hotkernels installed eagerly, lazily and fused.
 
     uv run --group apps python -m prototypes.lazy.programs.fusion_time --size large
 
-For each program:
+`hotkernels.install()` is in effect for everything but the first way, since
+that is how the package is used: each NumPy call it has a kernel for is
+served by the kernel. For each program:
 
-- **NumPy** is the program as it is, with `import numpy as np`.
-- **Installed** is the same eager program after `hotkernels.install()`:
-  each NumPy call the package has a kernel for is served by it, one
+- **NumPy** is the program as it is, with `import numpy as np` and nothing
+  installed. It is what every other way is measured against.
+- **Installed** is the same eager program after `hotkernels.install()`, one
   operation at a time, with no graph. It is what the package gives today,
   and what a lazy run has to beat to be worth its graph.
 - **Lazy** is the same program with the stand-in for `np`, its graph
   computed one node at a time, each with the call the program wrote.
 - **Fused** is the lazy run with `fuse.enable()`: expressions the library
-  has kernels for are computed by one kernel call each.
+  has kernels for are computed by one kernel call each. Its time against
+  NumPy's is the figure the layer is judged by.
 
-The results of all four are compared bit for bit before anything is
-printed, and the run stops if they differ.
+The results of the three installed ways are compared bit for bit before
+anything is printed, and the run stops if they differ.
 
 A lazy run's time is split in two. *Computing* is the time inside the
 layer's two computing functions: NumPy's calls or the kernels', and for a
 fused run the planning before them, which is given by itself as well.
 *Building* is everything else: the program's own Python, writing the nodes,
-and whatever NumPy computes at once. With `--install` every way is also run
-under `hotkernels.install()`, the single-operation kernels.
+and whatever NumPy computes at once. With `--plain` the lazy and the fused
+run are also timed with nothing installed, which says what the graph and
+its kernels do by themselves.
 
 A second table says what the graphs were: how many, how large, how many
 expressions were found in them, how many nodes a kernel computed in place of
@@ -110,10 +114,10 @@ class Row:
     # The program's name and one line on its size.
     name: str
     size: str
-    # The quickest run each way, by NUMPY, INSTALLED, LAZY and FUSED.
+    # The quickest run each way, by NUMPY, INSTALLED, LAZY and FUSED: the last three under `hotkernels.install()`.
     timings: dict[str, Timing] = field(default_factory=dict)
-    # The lazy ways under `hotkernels.install()` as well, by NUMPY, LAZY and FUSED, when asked for.
-    installed: dict[str, Timing] = field(default_factory=dict)
+    # The lazy ways with nothing installed, by LAZY and FUSED, when asked for.
+    plain: dict[str, Timing] = field(default_factory=dict)
     # What the graphs were, node by node and fused.
     lazy: Shape = field(default_factory=Shape)
     fused: Shape = field(default_factory=Shape)
@@ -264,7 +268,7 @@ def shape_of(program: corpus.Program, inputs: tuple, way: str) -> tuple[Shape, f
     return shape, stats, values
 
 
-def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], install: bool) -> Row:
+def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], plain: bool) -> Row:
     """Measure one program every way.
 
     Args:
@@ -272,34 +276,33 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         size: `corpus.SMALL` or `corpus.LARGE`.
         runs: How many times each way is timed; the quickest counts.
         enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
-        install: Whether to time the lazy ways under the single-operation kernels as well.
+        plain: Whether to time the lazy ways with nothing installed as well.
 
     Returns:
         The program's row.
 
     Raises:
-        AssertionError: When a lazy run's results are not NumPy's bit for bit, with the kernels installed or without.
+        AssertionError: When a lazy run's results are not the eager program's bit for bit, with the kernels
+            installed or without.
     """
     inputs = program.make(size)
     row = Row(program.name, program.sizes[size])
-    expected = _run(program, inputs, NUMPY)
-    row.lazy, _, lazily = shape_of(program, inputs, LAZY)
-    row.fused, row.stats, fused = shape_of(program, inputs, FUSED)
-    assert _same(expected, lazily), f"{program.name}: the lazy run does not give NumPy's results"
-    assert _same(expected, fused), f"{program.name}: the fused run does not give NumPy's results"
-    del expected, lazily, fused
-    for way in (NUMPY, LAZY, FUSED):
-        row.timings[way] = quickest(program, inputs, way, runs)
+    row.timings[NUMPY] = quickest(program, inputs, NUMPY, runs)
     with enabled():
         served = _run(program, inputs, NUMPY)
-        assert _same(served, _run(program, inputs, FUSED)), \
-            f"{program.name}: under hotkernels.install() the fused run does not give NumPy's results"
-        del served
+        row.lazy, _, lazily = shape_of(program, inputs, LAZY)
+        row.fused, row.stats, fused = shape_of(program, inputs, FUSED)
+        assert _same(served, lazily), f"{program.name}: under hotkernels.install() the lazy run does not give the eager program's results"
+        assert _same(served, fused), f"{program.name}: under hotkernels.install() the fused run does not give the eager program's results"
+        del served, lazily, fused
         row.timings[INSTALLED] = quickest(program, inputs, NUMPY, runs)
-        if install:
-            row.installed[NUMPY] = row.timings[INSTALLED]
-            for way in (LAZY, FUSED):
-                row.installed[way] = quickest(program, inputs, way, runs)
+        for way in (LAZY, FUSED):
+            row.timings[way] = quickest(program, inputs, way, runs)
+    if plain:
+        expected = _run(program, inputs, NUMPY)
+        for way in (LAZY, FUSED):
+            assert _same(expected, _run(program, inputs, way)), f"{program.name}: the {way} run does not give NumPy's results"
+            row.plain[way] = quickest(program, inputs, way, runs)
     return row
 
 
@@ -330,14 +333,14 @@ def render(rows: list[Row], size: str, runs: int) -> str:
 def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are run at: small or large."),
          program: list[str] = typer.Option(None, help="A program to time; may be given several times. Default: all."),
          runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
-         install: bool = typer.Option(False, help="Also time the lazy ways under hotkernels.install().")) -> None:
+         plain: bool = typer.Option(False, help="Also time the lazy ways with nothing installed.")) -> None:
     """Time the corpus four ways and print the tables.
 
     Args:
         size: The size the programs are run at.
         program: The names of the programs to time, or none for all of them that run with NumPy.
         runs: How many times each way is timed.
-        install: Whether to time the lazy and the fused run under `hotkernels.install()` as well.
+        plain: Whether to time the lazy and the fused run with nothing installed as well.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not fuse.enable():
@@ -352,7 +355,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
     chosen = [each for each in asked if each.eager and each.available]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rows = [measure(each, size, runs, hotkernels.enabled, install) for each in chosen]
+        rows = [measure(each, size, runs, hotkernels.enabled, plain) for each in chosen]
     log.info("%s", render(rows, size, runs))
 
 

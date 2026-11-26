@@ -8,9 +8,13 @@ cannot remove the arithmetic itself. So every operation has a part no fusion
 touches, and that part can be measured: the same NumPy loop on arrays that
 fit the first-level cache, per element, with the cost of the call taken off.
 
+`hotkernels.install()` is in effect for all of it but one timing, since
+that is how the package is used: the floor is of the eager program with the
+single-operation kernels serving it, and the fused run has them too.
+
 For each program of `corpus.py` this tool:
 
-- times the program eagerly;
+- times the program eagerly, as it is and then with the kernels installed;
 - runs it lazily, node by node, with every call timed, and puts each
   operation in a class by what a fused kernel would need to make it;
 - measures, for each different operation, what an element costs in the
@@ -24,7 +28,7 @@ on many different pieces of them, each once a round: a loop that branches
 on its data runs faster over the same piece again and again than it ever
 does in the program.
 
-The **floor** of a program is its eager time less everything that could be
+The **floor** of a program is its installed eager time less everything that could be
 removed from its element-by-element operations and its reductions over
 every element: what a fusion of all of them, of any kind, with no cost of
 its own, would leave. What lies between the fused run and the floor is what
@@ -115,7 +119,10 @@ class Limit:
 
     # The program.
     name: str
-    # Nanoseconds of the eager run, of the lazy run node by node, and of the fused run: the quickest of each.
+    # Nanoseconds of the eager run with nothing installed: what the others are measured against.
+    numpy_ns: int = 0
+    # Nanoseconds of the eager run, of the lazy run node by node, and of the fused run, all three under
+    # `hotkernels.install()`: the quickest of each.
     eager_ns: int = 0
     lazy_ns: int = 0
     fused_ns: int = 0
@@ -400,19 +407,35 @@ def _timed(program: corpus.Program, inputs: tuple, np: Any, runs: int) -> int:
     return best or 0
 
 
-def measure(program: corpus.Program, size: str, runs: int) -> Limit:
+def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any]) -> Limit:
     """Measure one program's floor and where it stands.
 
     Args:
         program: The program.
         size: `corpus.SMALL` or `corpus.LARGE`.
         runs: How many times each way is timed.
+        enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
 
     Returns:
         What was measured.
     """
     inputs = program.make(size)
     limit = Limit(program.name)
+    limit.numpy_ns = _timed(program, inputs, numpy, runs)
+    with enabled():
+        _installed(program, inputs, runs, limit)
+    return limit
+
+
+def _installed(program: corpus.Program, inputs: tuple, runs: int, limit: Limit) -> None:
+    """Measure everything about one program that is measured with the single-operation kernels installed.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many times each way is timed.
+        limit: Where what is measured goes.
+    """
     lazy = get_lazy()
     limit.eager_ns = _timed(program, inputs, numpy, runs)
     limit.lazy_ns = _timed(program, inputs, lazy, runs)
@@ -438,7 +461,6 @@ def measure(program: corpus.Program, size: str, runs: int) -> Limit:
             limit.kernel_ns, limit.fused_nodes = _in_kernels(program, inputs, lazy)
         finally:
             fuse.disable()
-    return limit
 
 
 def _in_kernels(program: corpus.Program, inputs: tuple, lazy: Any) -> tuple[int, int]:
@@ -501,6 +523,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
         runs: How many times each way is timed.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    import hotkernels
     limits = []
     for asked in corpus.by_name(list(program) if program else None):
         if not asked.available:
@@ -508,7 +531,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
             continue
         if not asked.eager:
             continue  # A program that gathers by name has no eager run to set its floor against.
-        limits.append(measure(asked, size, runs))
+        limits.append(measure(asked, size, runs, hotkernels.enabled))
     log.info("%s", render(limits, size, runs).rstrip("\n"))
 
 
