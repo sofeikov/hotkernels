@@ -224,7 +224,8 @@ pooled_dealloc(PyObject *self)
     PyTypeObject *base = pool != NULL ? type : PyType_IsSubtype(type, Lazy) ? Lazy : PyType_IsSubtype(type, Node) ? Node
         : PyType_IsSubtype(type, Cell) ? Cell : Step;
     PyObject_GC_UnTrack(self);
-    if (pool != NULL && type->tp_weaklistoffset != 0 && *(PyObject **)((char *)self + type->tp_weaklistoffset) != NULL) {
+    /* For an instance of a subclass too: its deallocator leaves the weak references to a base that has them. */
+    if (type->tp_weaklistoffset != 0 && *(PyObject **)((char *)self + type->tp_weaklistoffset) != NULL) {
         PyObject_ClearWeakRefs(self);
     }
     PyObject **slot = (PyObject **)((char *)self + sizeof(PyObject));
@@ -2927,25 +2928,7 @@ set_item(PyObject *target, PyObject *index, PyObject *value, PyFrameObject *fram
         return Miss;
     }
     if (Py_TYPE(value) == Lazy && SLOT(value, lazy_at[L_HELD]) == SLOT(target, lazy_at[L_HELD])) {
-        /* Perhaps `x[i] += v`: Python takes the view, updates it, and assigns it back to where it already is.
-         * `LazyArray._is_view_at`, for a plain index; Python looks at any other. */
-        PyObject *mine = SLOT(target, lazy_at[L_STEPS]), *theirs = SLOT(value, lazy_at[L_STEPS]);
-        Py_ssize_t count = PyTuple_GET_SIZE(mine);
-        if (Py_TYPE(SLOT(target, lazy_at[L_HELD])) != Cell || PyTuple_GET_SIZE(theirs) != count + 1) {
-            return Miss;
-        }
-        for (Py_ssize_t place = 0; place < count; place++) {
-            if (PyTuple_GET_ITEM(mine, place) != PyTuple_GET_ITEM(theirs, place)) {
-                return Miss;
-            }
-        }
-        PyObject *last = PyTuple_GET_ITEM(theirs, count);
-        PyObject *tail = SLOT(last, step_at[S_TAIL]);
-        if (SLOT(last, step_at[S_OPERATION]) == getitem && PyTuple_GET_SIZE(tail) == 1
-            && same_plain_index(PyTuple_GET_ITEM(tail, 0), index)) {
-            Py_RETURN_NONE;
-        }
-        return Miss;
+        return Miss; /* A view of the same array, which the road looked at before it came here: Python looks. */
     }
     PyObject *whole = writable(target);
     if (whole == NULL) {
@@ -3473,6 +3456,32 @@ fail:
     Py_XDECREF(origin);
     Py_DECREF(memory);
     return NULL;
+}
+
+/* Whether `value` is `target[index]` as a view the layer made, for a plain index: `LazyArray._is_view_at`, with
+ * the test of the cell that goes before it. `x[i] += v` takes the view, updates it, and assigns it back to where
+ * it already is, which is nothing to do. 0 also for an index this file does not compare, which Python then does. */
+static int
+is_own_view_at(PyObject *target, PyObject *index, PyObject *value)
+{
+    if (Py_TYPE(value) != Lazy || SLOT(value, lazy_at[L_HELD]) != SLOT(target, lazy_at[L_HELD])
+        || Py_TYPE(SLOT(target, lazy_at[L_HELD])) != Cell) {
+        return 0;
+    }
+    PyObject *mine = SLOT(target, lazy_at[L_STEPS]), *theirs = SLOT(value, lazy_at[L_STEPS]);
+    Py_ssize_t count = PyTuple_GET_SIZE(mine);
+    if (PyTuple_GET_SIZE(theirs) != count + 1) {
+        return 0;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        if (PyTuple_GET_ITEM(mine, place) != PyTuple_GET_ITEM(theirs, place)) {
+            return 0;
+        }
+    }
+    PyObject *last = PyTuple_GET_ITEM(theirs, count);
+    PyObject *tail = SLOT(last, step_at[S_TAIL]);
+    return SLOT(last, step_at[S_OPERATION]) == getitem && PyTuple_GET_SIZE(tail) == 1
+        && same_plain_index(PyTuple_GET_ITEM(tail, 0), index);
 }
 
 /* `x[index] = value` made now, into the array's own memory, when nothing at all is pending: NumPy's own assignment,
@@ -4180,6 +4189,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
     case SETITEM:
         if (named || count != 3) {
             goto python;
+        }
+        if (is_own_view_at(args[0], args[1], args[2])) {
+            result = Py_NewRef(Py_None);
+            break;
         }
         result = set_now(args[0], args[1], args[2]);
         if (result == Miss) {

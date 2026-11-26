@@ -14,8 +14,10 @@ tests of the layer do; the ones of calls made at once are skipped without it.
 """
 from __future__ import annotations
 
+import gc
 import random
 import warnings
+import weakref
 from typing import Any, Callable, Iterator
 
 import numpy
@@ -293,6 +295,238 @@ def test_an_array_made_of_no_array_is_the_layers_own(at_once: None):
     assert isinstance(made, LazyArray) and not made._node.exposed and made._node.kind == ""
     like = lazy.ones_like(made)
     assert isinstance(like, LazyArray) and same(numpy.ones((3, 4)), like.gather())
+
+
+# ---- What the result of a call made at once is made of, and how the core makes and frees the layer's objects.
+
+def test_a_call_made_at_once_gives_an_array_that_holds_its_value_alone(at_once: None):
+    """No node and no cell until something asks; then they are what any array that has its values has."""
+    made = lazy.asarray(numpy.arange(6.0)) * 2.0 + 1.0
+    assert type(made._held) is numpy.ndarray and made._seen == (graph.AT_ONCE, False) and not gc.is_tracked(made)
+    assert made.shape == (6,) and made.dtype == numpy.dtype(numpy.float64)
+    node = made._node
+    assert type(made._held) is array._Cell and made._seen is None and gc.is_tracked(made)
+    assert made._node is node and made._cell.node is node
+    assert node.kind == graph.AT_ONCE and not node.pending and not node.exposed and not node.strict
+    assert node.shape == (6,) and node.dtype == numpy.dtype(numpy.float64)
+    assert same(numpy.arange(6.0) * 2.0 + 1.0, made.gather())
+
+
+def test_an_array_that_holds_its_value_alone_keeps_strictness(at_once: None):
+    """What is computed from a strict array refuses its values without `gather()`, node or no node."""
+    strict = get_lazy(strict=True)
+    made = strict.asarray(numpy.arange(6.0)) + 1.0
+    total = made.sum()
+    assert made._seen == (graph.AT_ONCE, True) and total._seen == (graph.AT_ONCE, True)
+    with pytest.raises(graph.NotGathered):
+        float(total)
+    into = lazy.zeros(6) + 0.0
+    into[2] = total  # A write made at once of something strict.
+    assert into._seen == (graph.AT_ONCE, True)
+    with pytest.raises(graph.NotGathered):
+        float(into[2])
+    assert made._node.strict and same(numpy.arange(6.0) + 1.0, made.gather())
+
+
+def test_a_deferred_operation_on_an_array_that_holds_its_value_gives_it_a_node(at_once: None):
+    """A large call waits, and what it reads becomes a node of the graph like any other."""
+    array.at_once_below(100)
+    small = lazy.zeros(50) + 3.0
+    large = lazy.asarray(numpy.arange(200.0)) * 2.0
+    assert type(small._held) is numpy.ndarray
+    pending = large[:50] + small
+    assert pending._node.pending and type(small._held) is array._Cell
+    assert small._node in pending._node.args
+    assert same((numpy.arange(200.0) * 2.0)[:50] + 3.0, pending.gather())
+
+
+def test_a_view_taken_at_once_holds_numpys_view(at_once: None):
+    """A slice and a transpose of an array that has its values: the cell is the array's, the node comes when asked."""
+    whole = lazy.zeros((4, 5)) + 1.0
+    row, turned = whole[1], whole.T
+    assert len(row._seen) == array.HOLDS_ARRAY and len(turned._seen) == array.HOLDS_ARRAY
+    assert row._held is whole._held and type(whole._held) is array._Cell
+    whole[1, 2] = 7.0  # Made at once, in the memory all three look at.
+    assert row.gather()[2] == 7.0 and turned.gather()[2, 1] == 7.0
+    node = row._node
+    assert len(row._seen) == 2 and row._node is node
+    assert node.kind == graph.AT_ONCE and node.origin is row._steps[-1].origin and not node.pending
+    assert same(numpy.array([1.0, 1.0, 7.0, 1.0, 1.0]), (row * 1.0).gather())
+
+
+def test_a_view_that_holds_its_array_is_made_again_after_a_deferred_write(at_once: None):
+    """A write that waits gives the cell new contents; the view then reads those, not the array it held."""
+    array.at_once_below(100)
+    whole = lazy.zeros(10) + 0.0
+    part = whole[2:6]
+    assert len(part._seen) == array.HOLDS_ARRAY
+    waiting = lazy.asarray(numpy.arange(200.0)) * 1.0
+    whole[3] = 9.0  # Deferred: something is pending.
+    assert whole._node.pending and part._node.pending
+    assert same(numpy.array([0.0, 9.0, 0.0, 0.0]), part.gather())
+    assert same(numpy.arange(200.0), waiting.gather())
+
+
+def test_a_line_that_takes_the_same_view_again_makes_its_step_once(at_once: None):
+    """The step of a view says nothing of the array it was taken of, so a loop's views share the one of their line."""
+    arrays = [lazy.zeros(8) + float(turn) for turn in range(6)]
+    views = [each[1:-1] for each in arrays]
+    assert views[-1]._steps[0] is views[-2]._steps[0]
+    for turn, view in enumerate(views):
+        assert same(numpy.zeros(6) + float(turn), view.gather())
+    moving = [arrays[0][start:start + 2] for start in range(5)]
+    assert len({id(view._steps[0]) for view in moving}) == len(moving)
+    for start, view in enumerate(moving):
+        assert view._steps[0].tail == (slice(start, start + 2),) and same(numpy.zeros(2), view.gather())
+    shapes = [(lazy.zeros((2, width)) + 1.0).T for width in (3, 3, 3, 4, 4)]
+    assert [view.shape for view in shapes] == [(3, 2), (3, 2), (3, 2), (4, 2), (4, 2)]
+
+
+def test_an_in_place_operator_is_made_at_once_in_the_memory(at_once: None):
+    """`x += y`, `x[i] -= v` and `s += v` on small arrays with nothing pending: NumPy's own, where the array is."""
+    def program(np: Any) -> Any:
+        """Update an array, one of its rows, and a number."""
+        x = np.zeros((4, 3)) + 2.0
+        y = np.asarray(numpy.arange(12.0).reshape(4, 3))
+        x += y
+        x[1] -= 1.0
+        x[2, 1:] *= y[0, 1:]
+        x /= 2.0
+        total = x.sum()
+        total += 1.5
+        total -= x[0, 0]
+        return x, total
+
+    expected = program(numpy)
+    _, written_before = array.at_once_counts()
+    deferred_before = graph.COUNTS.deferred
+    got = program(lazy)
+    assert array.at_once_counts()[1] - written_before == 4 and graph.COUNTS.deferred == deferred_before
+    assert same(expected[0], got[0].gather()) and same(expected[1], got[1].gather())
+
+
+def test_an_in_place_operator_that_does_not_fit_fails_as_numpys_does(at_once: None):
+    """Made at once, the error is NumPy's own at that line, and the array is as it was."""
+    x = lazy.zeros(3, dtype=numpy.int64) + 1
+    with pytest.raises(TypeError):
+        x += 0.5
+    with pytest.raises(ValueError):
+        x += lazy.asarray(numpy.arange(4))
+    assert same(numpy.ones(3, dtype=numpy.int64), x.gather())
+
+
+@pytest.mark.parametrize("method", ("sum", "mean", "max", "min", "prod", "std", "var", "argmax", "argmin", "cumsum", "any", "all"))
+def test_a_reduction_method_is_numpys_method_called_at_once(at_once: None, method: str):
+    """With no argument, with an axis by position and by keyword, and with `keepdims` where NumPy has it."""
+    data = numpy.random.default_rng(SEED).standard_normal((4, 5))
+    x = lazy.asarray(data) + 0.0
+    before = graph.COUNTS.deferred
+    assert same(getattr(data + 0.0, method)(), getattr(x, method)().gather())
+    assert same(getattr(data + 0.0, method)(1), getattr(x, method)(1).gather())
+    assert same(getattr(data + 0.0, method)(axis=0), getattr(x, method)(axis=0).gather())
+    if method not in ("argmax", "argmin", "cumsum"):
+        assert same(getattr(data + 0.0, method)(axis=0, keepdims=True), getattr(x, method)(axis=0, keepdims=True).gather())
+    assert graph.COUNTS.deferred == before
+    with pytest.raises(Exception) as theirs:
+        getattr(data, method)(axis=5)
+    with pytest.raises(type(theirs.value)):
+        getattr(x, method)(axis=5)
+
+
+def test_a_product_method_takes_another_small_array(at_once: None):
+    """`x.dot(y)` with both operands holding their values."""
+    data = numpy.arange(12.0).reshape(3, 4)
+    x, y = lazy.asarray(data) + 0.0, lazy.asarray(data.T) * 1.0
+    assert same(data.dot(data.T), x.dot(y).gather())
+    assert same(data.dot(data.T), x.dot(data.T).gather())  # An array from outside: the ordinary road.
+
+
+def test_the_objects_the_core_makes_are_freed_and_made_again():
+    """Weak references are told, pending work that is dropped is forgotten, and a long chain is dropped whole."""
+    a = lazy.asarray(numpy.arange(4.0))
+    waiting = graph.pending_count()
+    made = a + 1.0
+    told: list = []
+    watching = weakref.ref(made, told.append)
+    node = weakref.ref(made._node)
+    del made
+    assert watching() is None and len(told) == 1 and node() is None and graph.pending_count() == waiting
+    for _ in range(3):
+        chain = a
+        for _ in range(20_000):
+            chain = chain + 1.0
+        del chain
+    assert graph.pending_count() == waiting
+    again = [(a * float(turn)).gather() for turn in range(300)]
+    assert all(same(numpy.arange(4.0) * float(turn), value) for turn, value in enumerate(again))
+
+
+def test_a_subclass_of_the_layers_array_is_freed_its_own_way():
+    """The core frees the classes' own instances; one of a subclass goes back the way the subclass has."""
+    class Named(LazyArray):
+        """A lazy array with a name."""
+
+        __slots__ = ("label",)
+
+    told: list = []
+    for turn in range(200):
+        named = Named(graph.leaf(numpy.arange(3.0) + turn))
+        named.label = [turn]
+        watching = weakref.ref(named, told.append)
+        assert same(numpy.arange(3.0) + turn, named.gather())
+        del named
+        assert watching() is None
+    assert len(told) == 200
+
+
+def test_arrays_the_core_made_outlive_it(at_once: None):
+    """Put away, the core leaves its arrays to Python: they give their values, get their nodes and are freed."""
+    core = array._core
+    made = [lazy.zeros(3) + float(turn) for turn in range(300)]
+    views = [each[1:] for each in made[:50]]
+    array.use_core(None)
+    try:
+        assert all(same(numpy.zeros(3) + float(turn), each.gather()) for turn, each in enumerate(made))
+        assert all(same(numpy.zeros(2) + float(turn), each.gather()) for turn, each in enumerate(views))
+        assert all(gc.is_tracked(each) for each in made)
+        del made, views
+        gc.collect()
+    finally:
+        array.use_core(core)
+
+
+def test_a_failed_computation_that_holds_its_arrays_is_collected(at_once: None):
+    """An error keeps the frames it passed through, which hold the arrays: a cycle the collector has to see whole."""
+    array.at_once_below(100)
+
+    def failing() -> weakref.ref:
+        """Compute something that raises, catch it, and return a weak reference to an array it read."""
+        small = lazy.zeros(3) + 1.0
+        large = lazy.asarray(numpy.arange(200.0)) * 1.0
+        with numpy.errstate(divide="raise", invalid="raise"):
+            bad = large / (large * 0.0) + small.sum()
+        watching = weakref.ref(small)
+        with pytest.raises(FloatingPointError):
+            bad.gather()
+        return watching
+
+    watching = failing()
+    gc.collect()
+    assert watching() is None
+
+
+def test_a_name_of_the_stand_in_follows_the_module(at_once: None, monkeypatch: pytest.MonkeyPatch):
+    """`np.tanh` is the answer given before while NumPy has what it had, and a new one when it has something else."""
+    first = lazy.tanh
+    assert lazy.tanh is first
+    x = lazy.asarray(numpy.arange(4.0)) + 0.0
+    assert same(numpy.tanh(numpy.arange(4.0)), lazy.tanh(x).gather())
+    monkeypatch.setattr(numpy, "tanh", numpy.sinh)
+    assert lazy.tanh is not first
+    assert same(numpy.sinh(numpy.arange(4.0)), lazy.tanh(x).gather())
+    assert lazy._module is numpy and lazy._strict is False
+    with pytest.raises(AttributeError):
+        lazy.no_such_name
 
 
 def random_program(np: Any, seed: int) -> list:
