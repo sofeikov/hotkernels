@@ -45,7 +45,6 @@ import typer
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from prototypes.lazy import array, evaluate, fuse, get_lazy, graph
-from prototypes.lazy.array import LazyArray
 from prototypes.lazy.graph import Node
 from prototypes.lazy.programs import corpus
 
@@ -134,7 +133,12 @@ def _values(result: Any) -> Iterator[Any]:
 
 
 def _finish(result: Any) -> list:
-    """Gather every lazy array of a program's result.
+    """Gather every lazy array of a program's result, all in one walk of the graph.
+
+    One walk and not one for each array: a write into an array is made in
+    place only when nothing still waits to read what the array held, and
+    with the results asked for one at a time the operations behind a later
+    result are still waiting while an earlier one is computed.
 
     Args:
         result: What a program returned.
@@ -142,7 +146,7 @@ def _finish(result: Any) -> list:
     Returns:
         The values, as `ndarray`s and numbers.
     """
-    return [value.gather() if isinstance(value, LazyArray) else value for value in _values(result)]
+    return list(array.gather(*_values(result)))
 
 
 def _run(program: corpus.Program, inputs: tuple, way: str) -> list:

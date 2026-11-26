@@ -107,8 +107,8 @@ class Term:
 class ViewOf:
     """An operand that is part of an array a write is made into: what the array held there before the write."""
 
-    # The node of the array's contents before the write.
-    old: Node
+    # The node of the array's contents before the write. None in a record kept only for its steps.
+    old: Node | None
     # The view operations that lead from the array to the part.
     steps: tuple
 
@@ -1301,7 +1301,9 @@ class _StoreCall:
             target: The part written into, as steps from the array.
             ufunc: The operation whose result is stored.
         """
-        self.target = target
+        # The steps alone, under no node: a reference to the node of the old contents kept here would be
+        # counted as a reader of them, and the write would never be made in place (`evaluate.reusable`).
+        self.target = ViewOf(None, target.steps)
         self.ufunc = ufunc
 
     def __call__(self, old: np.ndarray, *values: Any) -> np.ndarray:
@@ -1456,9 +1458,9 @@ class _Group:
             True when both that holds and nothing else reads what the array held (`evaluate.reusable`).
         """
         held = self._held(write)
-        old = write.args[0]
-        # The record of the part written into refers to the old node and reads nothing of it.
-        reading = held - (1 if self.target is not None and self.target.old is old
+        # The record of the part written into refers to the old node and reads nothing of it. No name here may
+        # refer to that node while its references are counted.
+        reading = held - (1 if self.target is not None and self.target.old is write.args[0]
                           and not any(source is self.target for source in self.sources) else 0)
         if reading and self.watched:
             return False
@@ -1579,7 +1581,7 @@ class Plan:
             as its last reader has run.
         """
         nodes = list(group.members)
-        group.sources, group.members = (), ()
+        group.sources, group.members, group.target = (), (), None
         return nodes
 
 
