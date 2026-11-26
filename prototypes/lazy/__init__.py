@@ -22,7 +22,8 @@ The modules, in the order to read them:
     evaluate.py   computing nodes
     array.py      LazyArray: what the user holds
     _core.c       the hot path in C: writing a node, a small call made at once, reading
-                  expressions for fusion; optional, built by build_core.py
+                  expressions for fusion, the loop over a computation's nodes; optional,
+                  built by build_core.py
     namespace.py  the stand-in for the numpy module
     explain.py    the text of a pending graph
     record.py     the graph as an object, and the mode that records a block's graphs

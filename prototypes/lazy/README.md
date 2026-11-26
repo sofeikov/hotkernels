@@ -44,7 +44,7 @@ Try it from the repository's root with `uv run python`.
 | [_fused.c](_fused.c), [build_fused.py](build_fused.py) | The run of an expression's kernel calls, block by block, on arrays of any shape, in C, and the command that builds it with the kernels |
 | [kernels/](kernels) | The fused kernels, one directory each, checked by the judge as the kernels of `kernels/` are |
 | [make_kernel.py](make_kernel.py) | Writes a kernel from the name of its shape: the spec, the C reference and the NEON assembly |
-| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write. For fusion: `corpus.py`, twenty-six programs that run with NumPy or with the stand-in, three of them copied into `vendor/` and the rest the applications and workloads of `delivery/`; `mine.py`, which ranks the shapes of expression in them; and `fusion_time.py`, which times each four ways |
+| [programs/](programs) | A linear regression and a transformer block, each run both ways by the tests; a regression that gathers as it goes; `pages.py`, which writes the page of all three; and `build_time.py`, which times how long their graphs take to write. For fusion: `corpus.py`, twenty-six programs that run with NumPy or with the stand-in, three of them copied into `vendor/` and the rest the applications and workloads of `delivery/`; `mine.py`, which ranks the shapes of expression in them; `fusion_time.py`, which times each four ways; and `limit.py`, which measures what part of each program's time no fusion could remove, and what the fused run leaves above it, by kind of operation |
 
 ## Looking at its graphs
 
@@ -111,12 +111,13 @@ fuse.disable()
 - **A write is part of its expression:** `u[1:-1, 1:-1] = e` is computed straight into that part of `u`.
 - **Small arrays are not planned for, and not written down either.** With fusion on, a call that gives fewer than 32,768 elements on arrays that have their values is made at once, and so is a call of any size that no kernel could make (a comparison, a matrix product, `np.exp`, anything complex or float32), and a write when nothing is pending. `fuse.MIN_ELEMENTS` and `fuse.AT_ONCE_BELOW` are the two limits; `array.at_once_below(n)` is the second by itself. A call made at once costs 15 to 110 ns over NumPy's own, and needs the C core.
 
-Three tools, needing `--group apps --group workloads` for the programs that call a library:
+Four tools, needing `--group apps --group workloads` for the programs that call a library:
 
 ```bash
 uv run --group apps --group workloads python -m prototypes.lazy.programs.mine --size large          # which shapes occur, and what they cost
 uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --size large   # each program: NumPy, installed, lazy, fused
 uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --install      # the lazy runs under hotkernels.install() too
+uv run --group apps --group workloads python -m prototypes.lazy.programs.limit --size large         # each program: what no fusion could remove, and what is left
 uv run python -m prototypes.lazy.make_kernel "sub(V0,mul(S0,V1))"                                   # write the kernel of a shape
 ```
 

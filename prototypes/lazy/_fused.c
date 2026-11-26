@@ -483,16 +483,15 @@ next_row(row_walk *walk, operand **arrays, char **rows, int count, int dimension
     walk->done = axis < 0;
 }
 
-/* A program on arrays that do not all lie the same way: rows too short to be worth a call each at more than one
- * pitch (a slice of a grid beside an array computed from one), or an array that steps over elements (a column of
- * a table).
+/* A program on arrays of which one steps over elements (a column of a table), which no kernel can read where it
+ * lies.
  *
  * The shape is walked element by element in the order of its rows, a block at a time. An array that lies in that
  * order, one row after the other, is read where it is. Any other is gathered: the rows of the block are copied
- * into a buffer of the array's own, by a loop written here and not a call for each row, which is what made
- * gathering rows of 25 elements cost more than it saved. The result is written where it belongs when it lies in
- * the order of the rows, and otherwise into a buffer whose rows are copied out, as it is when it is one of the
- * arrays read, so that every row of a block is read before one is written.
+ * into a buffer of the array's own, by a loop written here and not a call for each row. The caller leaves rows
+ * shorter than `SHORTEST_RUN` to NumPy, where the copies cost what they save. The result is written where it
+ * belongs when it lies in the order of the rows, and otherwise into a buffer whose rows are copied out, as it is
+ * when it is one of the arrays read, so that every row of a block is read before one is written.
  *
  * A copy for each array that lies otherwise, within the cache, in place of a pass over memory for each step.
  * Returns 0, or -1 with an error set. */
