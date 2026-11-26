@@ -16,6 +16,7 @@ import subprocess
 import sysconfig
 from pathlib import Path
 
+import numpy
 import typer
 
 log = logging.getLogger(__name__)
@@ -62,7 +63,8 @@ def build(force: bool = False) -> Path:
     if shutil.which(CC) is None:
         raise NoCompiler(f"{CC} is not installed")
     flags = [*FLAGS, *(MACOS_FLAGS if platform.system() == "Darwin" else ())]
-    command = [CC, *flags, f"-I{sysconfig.get_paths()['include']}", str(SOURCE), "-o", str(built)]
+    includes = [f"-I{sysconfig.get_paths()['include']}", f"-I{numpy.get_include()}"]
+    command = [CC, *flags, *includes, str(SOURCE), "-o", str(built)]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return built
 

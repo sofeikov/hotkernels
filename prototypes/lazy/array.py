@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 23
+CORE_VERSION = 24
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -75,6 +75,10 @@ COLLECTIONS = (list, tuple, dict)
 HANDLED_APART = frozenset(SHAPE_QUESTIONS) | SHAPED_LIKE | WRITING_FUNCTIONS | {np.nonzero}
 # Element-by-element writes found to fit, remembered at most, before the memory is emptied.
 FIT_MEMORY_LIMIT = 4096
+# What a lazy array that holds its value alone keeps where a view keeps what it has seen: the kind and the
+# strictness its node is to have, once something asks for the node. One tuple for each pair, made here once, so
+# that such an array is one object and nothing else. In the order the C core reads them: by kind, then strictness.
+VALUED = tuple((kind, strict) for kind in ("", graph.AT_ONCE) for strict in (False, True))
 
 # The element-by-element writes that `_fits_elementwise` found to fit, by what
 # `_fit_key` writes down of each. Only those: one that does not fit is made at
@@ -1503,7 +1507,7 @@ class LazyArray:
     memory that anything may read at any time, and a pending array has none.
     """
 
-    __slots__ = ("_cell", "_steps", "_seen", "__weakref__")
+    __slots__ = ("_held", "_steps", "_seen", "__weakref__")
     # So that type(x) prints the name a user imports, not the file the class is written in.
     __module__ = "prototypes.lazy"
     # Arrays compare element by element, so they cannot be hashed. As for `ndarray`.
@@ -1518,14 +1522,39 @@ class LazyArray:
             steps: For a view, the view operations from the cell's contents to this array.
         """
         if cell is None:
-            self._cell = _Cell(node)
+            self._held = _Cell(node)
             self._steps = steps
             self._seen = None
         else:
-            self._cell = cell
+            self._held = cell
             self._steps = steps
             # For a view: the cell's contents the node was made from, and the node. Nothing reads it for an array of its own.
             self._seen = (cell.node, node)
+
+    @property
+    def _cell(self) -> _Cell:
+        """The cell the array looks into.
+
+        `_held` is the cell, for every array this file makes. The C core
+        makes one more form, for the result of a call it made at once: the
+        array holds the value NumPy gave and nothing else, with one of
+        `VALUED` in `_seen`. Such an array has no node and no cell, because
+        most are read by the next small call and dropped, and the three
+        objects cost more than the call. The first thing that asks for the
+        cell or the node gets them made here, as `graph.leaf` makes a node
+        for any array that has its values, and from then on the array is
+        like every other.
+
+        Returns:
+            The cell, made now for an array that held its value alone.
+        """
+        held = self._held
+        if type(held) is not _Cell:
+            kind, strict = self._seen
+            held = self._held = _Cell(graph.leaf(held, kind=kind, strict=strict))
+            self._seen = None
+            _track(self)
+        return held
 
     @property
     def _node(self) -> Node:
@@ -2019,6 +2048,18 @@ LazyArray.transpose.road = ("transpose", np.transpose, "transpose")
 LazyArray.swapaxes.road = ("swapaxes", np.swapaxes, "swapaxes")
 LazyArray.ravel.road = ("ravel", np.ravel, "ravel")
 
+def _no_tracking(made: LazyArray) -> None:
+    """Do nothing: what `_track` is while every lazy array is known to the garbage collector from the start.
+
+    Args:
+        made: A lazy array that has just been given its cell.
+    """
+
+
+# Called with a lazy array that held its value alone and has just been given its cell. The C core makes such an
+# array unknown to the garbage collector, since it can be part of no cycle; with a cell it can, so the core's
+# function makes it known. Python makes no such array, and without a core there is nothing to do.
+_track: Callable[[LazyArray], None] = _no_tracking
 # `graph.deferred` as Python has it, to put back when the C core is taken away.
 _python_deferred = graph.deferred
 # The C core in use, or None: every call then goes the Python way.
@@ -2053,7 +2094,8 @@ def _set_up(core: Any) -> None:
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
                at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE,
-               fresh_functions=FRESH_FUNCTIONS)
+               fresh_functions=FRESH_FUNCTIONS, valued=VALUED, generic=np.generic,
+               deferred_kinds="".join(sorted(rules.DEFERRED_KINDS)))
 
 
 def use_core(core: Any) -> None:
@@ -2071,7 +2113,7 @@ def use_core(core: Any) -> None:
             A module of another version than this file was written against
             is put away like None.
     """
-    global _core
+    global _core, _track
     from . import namespace  # Imports this module, so not at the top.
     for name, method in _stood_in_for.items():
         setattr(LazyArray, name, method)
@@ -2088,6 +2130,8 @@ def use_core(core: Any) -> None:
         return
     _set_up(core)
     core.enable(True)
+    # Kept when the core is put away again: an array it made may still hold its value alone.
+    _track = core.track
     for name, method in list(vars(LazyArray).items()):
         road = getattr(method, "road", None)
         if road is not None:
