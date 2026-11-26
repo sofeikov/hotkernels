@@ -615,7 +615,7 @@ class _Finder:
         return Leaf(kind, len(operands) - 1)
 
 
-def find(todo: list[Node], fewest: int = 1) -> tuple[list[Expression], set[int]]:
+def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[Expression], set[int]]:
     """Read the expressions off the nodes one computation is about to take.
 
     Args:
@@ -623,6 +623,8 @@ def find(todo: list[Node], fewest: int = 1) -> tuple[list[Expression], set[int]]
             before the nodes it reads, so the largest tree it is the top of is read before any part of it. The
             caller's one list of them, since references are counted (`held_among`).
         fewest: The fewest elements an expression's operations run over for it to be read.
+        alone: Whether one operation by itself counts as an expression. Not for a computation, where NumPy's
+            own call is the way to make one operation; it does for the oracle of a kernel of one operation.
 
     Returns:
         (the expressions of two operations or more, the numbers of the
@@ -636,7 +638,7 @@ def find(todo: list[Node], fewest: int = 1) -> tuple[list[Expression], set[int]]
             continue
         mark = len(finder.journal)
         expression = finder.expression(node)
-        if expression is not None and (count_operations(expression.term) > 1 or expression.result == STORE):
+        if expression is not None and (alone or count_operations(expression.term) > 1 or expression.result == STORE):
             found.append(expression)
         else:
             finder.give_up(mark)
@@ -991,6 +993,10 @@ class Entry:
     # How many vector leaves and scalar leaves the shape has.
     vectors: int
     scalars: int
+    # What each operand of the shape's top operation is: an operation's name, VECTOR or SCALAR. And the same
+    # with the two operands the other way round, for a top operation whose operands may be in either order; else None.
+    heads: tuple[str, ...] = ()
+    turned: tuple[str, ...] | None = None
 
 
 def index(library: dict[str, Any]) -> dict[str, list[Entry]]:
@@ -1005,7 +1011,9 @@ def index(library: dict[str, Any]) -> dict[str, list[Entry]]:
     by_top: dict[str, list[Entry]] = {}
     for name, kernel in library.items():
         pattern = parse(name)
-        entry = Entry(name, pattern, kernel, name.count(VECTOR), name.count(SCALAR))
+        heads = tuple(part.op or part.kind for part in pattern.parts)
+        turned = heads[::-1] if pattern.op in COMMUTATIVE and len(heads) == 2 and heads[0] != heads[1] else None
+        entry = Entry(name, pattern, kernel, name.count(VECTOR), name.count(SCALAR), heads, turned)
         by_top.setdefault(pattern.op, []).append(entry)
     for entries in by_top.values():
         entries.sort(key=lambda entry: entry.name.count("("), reverse=True)
@@ -1071,7 +1079,12 @@ def _passes(part: Term, library: dict[str, list[Entry]], best: dict[int, tuple[i
         if type(operand) is Term:
             cost += _passes(operand, library, best)
     choice: tuple[int, Tile | None] = (cost, None)
+    found = tuple(operand.op if type(operand) is Term else operand.kind for operand in part.operands)
     for entry in library.get(part.op, ()):
+        # Most shapes cannot fit, and it shows in the operands of their top operation, without a walk of the tree.
+        if entry.heads != found and not _may_fit(entry.heads, found) \
+                and (entry.turned is None or not _may_fit(entry.turned, found)):
+            continue
         vectors: list = [None] * entry.vectors
         scalars: list = [None] * entry.scalars
         terms: list = []
@@ -1081,10 +1094,33 @@ def _passes(part: Term, library: dict[str, list[Entry]], best: dict[int, tuple[i
         for vector in vectors:
             if type(vector) is Term:
                 cost += _passes(vector, library, best)
-        if cost < choice[0]:
+        # As many passes with a kernel as without: the kernel, whose pass is a step of a program and stays in the
+        # cache. Among kernels the first that is cheapest, and the library has the largest shapes first.
+        if cost < choice[0] or (cost == choice[0] and choice[1] is None):
             choice = (cost, Tile(Shape(entry.name, part, tuple(vectors), tuple(scalars), tuple(terms)), entry.kernel))
     best[id(part)] = choice
     return choice[0]
+
+
+def _may_fit(heads: tuple[str, ...], found: tuple[str, ...]) -> bool:
+    """Say whether a shape's top operation could take a term's operands, by what each operand is.
+
+    Args:
+        heads: What the shape has for each operand: an operation's name, VECTOR or SCALAR.
+        found: What the term has: an operation's name for a term, VECTOR or SCALAR for something read.
+
+    Returns:
+        False when some operand cannot fit: an operation where the term
+        has another or none, a number where the term has none, or an array
+        where the term has a number or a mask. True otherwise, which does
+        not say that the shape fits; `_fits` does.
+    """
+    if len(heads) != len(found):
+        return False
+    for wanted, there in zip(heads, found):
+        if wanted != there and (wanted != VECTOR or there == SCALAR or there in MASKS):
+            return False
+    return True
 
 
 def _collect(part: Term, best: dict[int, tuple[int, Tile | None]], tiles: dict[int, Tile]) -> None:
@@ -1163,7 +1199,7 @@ def pattern_of(oracle: Any, vectors: int, scalars: int) -> tuple[str, tuple[int,
         raise NoPattern("the oracle computed its result: an operation in it is not deferred")
     root = result._node
     todo = evaluate._needed([root])
-    expressions, _ = find(todo)
+    expressions, _ = find(todo, alone=True)
     if len(expressions) != 1 or expressions[0].root is not root or count_operations(expressions[0].term) != len(todo):
         raise NoPattern("the oracle is not one expression of operations a kernel can make")
     expression = expressions[0]
@@ -1237,6 +1273,22 @@ def load_library(module: Any) -> dict[str, Kernel]:
 # reading an expression off the graph costs about two microseconds a node, and a pass of NumPy's over fewer
 # elements than this costs no more than that, so there is nothing to win back.
 MIN_ELEMENTS = 16_384
+# The elements of a block of a program (`_fused.program`): what the kernels of an expression pass from one to
+# the next is this long, so that it stays in the first-level cache whatever the arrays' size.
+BLOCK_ELEMENTS = 4096
+# What `_fused.program` takes at most: steps, arrays or numbers read, and buffers. As `_fused.c` has them.
+MOST_STEPS, MOST_OPERANDS, MOST_BUFFERS = 512, 128, 64
+# Where a program's last step writes: the program's result. And the place of a program's first buffer while its
+# steps are written, counted down from here, before the count of its operands is known.
+RESULT, BUFFERS = -1, -2
+# The programs of the expressions planned so far, by result kind and the signature of the tree: (steps, how
+# many arrays, the kernels' names, where each thing read is among the expression's operands). At most this many.
+_RECIPES: dict[tuple, tuple] = {}
+RECIPE_LIMIT = 4096
+# The place of something a program reads that is none of its expression's operands.
+UNPLACED = -1
+# How many arrays each kernel reads, by its place in the table of `_fused`. Filled by `enable`.
+LIBRARY_VECTORS: dict[int, int] = {}
 # With fusion on, a call that gives fewer elements than this is made as the graph is built, not written as a
 # node (`array.at_once_below`). The same count as MIN_ELEMENTS: below it nothing is planned, so a node would only
 # cost its writing and its computing. Read by `enable`.
@@ -1353,24 +1405,34 @@ def _copy_for(target: ViewOf, old: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 class _Group:
-    """The nodes one kernel call computes: a tile of an expression, with what it reads."""
+    """The nodes computed together under one node: the tiles of an expression that feed one another, with what they read.
 
-    __slots__ = ("kernel", "sources", "members", "watched", "result", "target", "shape")
+    For a sum or a mean it is one kernel call that returns a number. For
+    anything else it is a program: a kernel call for each tile, the calls
+    made block by block, so that what one tile gives the next stays in the
+    cache and only the group's own result is written to memory (`_fused.program`).
+    """
 
-    def __init__(self, kernel: Kernel, sources: list, members: list[Node], watched: int, result: str,
-                 target: ViewOf | None, shape: tuple[int, ...]) -> None:
-        """Remember one planned kernel call.
+    __slots__ = ("kernel", "steps", "arrays", "names", "sources", "members", "watched", "result", "target", "shape")
+
+    def __init__(self, kernel: Kernel | None, steps: tuple, arrays: int, names: tuple[str, ...], sources: list,
+                 members: list[Node], watched: int, result: str, target: ViewOf | None, shape: tuple[int, ...]) -> None:
+        """Remember one planned group.
 
         Args:
-            kernel: The kernel.
-            sources: What it reads, in the order of its arguments: nodes, `ndarray`s, numbers, a `ViewOf`.
-            members: The nodes inside the tile, oldest first, without the node the tile gives the value of.
+            kernel: The kernel of a group that is one call returning a number; None for a program.
+            steps: For a program, its steps as `_fused.program` takes them.
+            arrays: For a program, how many of `sources` are arrays; the rest are numbers.
+            names: The names of the kernels called, one for each call, for the counters.
+            sources: What is read, the arrays and then the numbers: nodes, `ndarray`s, numbers, a `ViewOf`.
+            members: The nodes inside, oldest first, without the node the group gives the value of.
             watched: The floating-point exceptions NumPy would report for these nodes, as `_fused`'s bits.
             result: ARRAY, STORE, or a name of REDUCTIONS.
             target: For STORE, the part of the array written into.
             shape: The shape the operations run over.
         """
-        self.kernel, self.sources, self.members, self.watched = kernel, sources, members, watched
+        self.kernel, self.steps, self.arrays, self.names = kernel, steps, arrays, names
+        self.sources, self.members, self.watched = sources, members, watched
         self.result, self.target, self.shape = result, target, shape
 
     def operands(self) -> tuple | None:
@@ -1484,7 +1546,7 @@ class _Group:
         """
         if write is None:
             value = out = np.empty(self.shape)
-            return _fused.elementwise(self.kernel.index, operands, out), value
+            return _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS), value
         old = write.args[0]
         if type(old) is not Node or old.operation is not None or old.failure is not None:
             return _fused.DECLINED, None
@@ -1493,7 +1555,7 @@ class _Group:
             value, out = (memory, self.target.of(memory)) if reuse else _copy_for(self.target, memory)
         else:
             value = out = memory if reuse else np.empty_like(memory)
-        raised = _fused.elementwise(self.kernel.index, operands, out)
+        raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
         if reuse and raised != _fused.DECLINED and not raised & self.watched:
             # The old node's memory is this node's now.
             old.value = None
@@ -1501,7 +1563,7 @@ class _Group:
         return raised, value
 
     def run(self, node: Node) -> bool:
-        """Compute the group's node with one kernel call.
+        """Compute the group's node: one kernel call for a sum or a mean, otherwise the group's program.
 
         Args:
             node: The pending node the group gives the value of.
@@ -1520,7 +1582,7 @@ class _Group:
         if operands is None:
             return False
         kernel = self.kernel
-        if kernel.reduces:
+        if kernel is not None:
             answer = _fused.reduce(kernel.index, operands)
             if answer == _fused.DECLINED:
                 STATS.declined += 1
@@ -1544,7 +1606,8 @@ class _Group:
             return False
         node.value = value
         graph.settle(node)
-        STATS.calls[kernel.name] = STATS.calls.get(kernel.name, 0) + 1
+        for name in self.names:
+            STATS.calls[name] = STATS.calls.get(name, 0) + 1
         STATS.fused_nodes += len(self.members)
         # The nodes inside are done with. Nothing here may keep them alive past the call.
         self.sources, self.members = (), ()
@@ -1665,37 +1728,221 @@ def _rewrite_writes(todo: list[Node], fewest: int) -> tuple[int, bool]:
     return rewritten, large
 
 
+class _Program:
+    """Writes the steps of one program: the tiles of an expression from one tile down, each a kernel call."""
+
+    def __init__(self, expression: Expression, tiles: dict[int, Tile]) -> None:
+        """Start on one program.
+
+        Args:
+            expression: The expression the tiles are placed on.
+            tiles: Its tiling, by the number of the node at each tile's top.
+        """
+        self.expression, self.tiles = expression, tiles
+        # The steps so far. A place a step reads or writes is an operand's number, or for a buffer its number
+        # from BUFFERS down, until the count of operands is known.
+        self.steps: list[tuple] = []
+        # What the program reads, without repeats: the arrays, the numbers, and where each is among them.
+        self.arrays: list = []
+        self.numbers: list = []
+        self.places: dict[int, int] = {}
+        # Buffers not in use, and how many were ever taken.
+        self.free: list[int] = []
+        self.buffers = 0
+        # The nodes the tiles cover, the kernels called, and the exceptions NumPy reports for the nodes.
+        self.covered: list[Node] = []
+        self.names: list[str] = []
+        self.watched = 0
+
+    def _place(self, source: Any, among: list) -> int:
+        """Return where something the program reads is among its arrays or its numbers, adding it if it is new."""
+        known = self.places.get(id(source))
+        if known is None:
+            known = self.places[id(source)] = len(among)
+            among.append(source)
+        return known
+
+    def add(self, placed: Tile, writes: int) -> None:
+        """Write the steps of a tile and of the tiles it reads, the tile's own last.
+
+        Args:
+            placed: The tile.
+            writes: Where its result goes: RESULT, or a buffer's place.
+        """
+        shape, kernel, expression = placed.shape, placed.kernel, self.expression
+        read, taken = [], []
+        for part in shape.vectors:
+            below = self.tiles.get(part.node.number) if type(part) is Term else None
+            if below is not None and not below.kernel.reduces:
+                # A tile under this one: its result is a buffer of this program, taken before and let go after.
+                buffer = self.free.pop() if self.free else self._new_buffer()
+                taken.append(buffer)
+                self.add(below, BUFFERS - buffer)
+                read.append(BUFFERS - buffer)
+            else:
+                # An array the expression reads, or a term no tile is on, which its node's own call computes first.
+                read.append(self._place(_source(expression, part), self.arrays))
+        numbers = [self._place(_source(expression, part), self.numbers) for part in shape.scalars]
+        self.steps.append((kernel.index, writes, *(read[place] for place in kernel.vectors),
+                           *(numbers[place] for place in kernel.scalars)))
+        self.free.extend(taken)
+        self.names.append(kernel.name)
+        for term in shape.terms:
+            self.covered.append(term.node)
+            self.watched |= _watched_under(term.node.errstate)
+
+    def _new_buffer(self) -> int:
+        """Take a buffer that was never used."""
+        self.buffers += 1
+        return self.buffers - 1
+
+    def finished(self) -> tuple:
+        """Return the steps as `_fused.program` takes them: a buffer's place counted on from the arrays'."""
+        arrays = len(self.arrays)
+        resolved = []
+        for step in self.steps:
+            numbers_from = 2 + LIBRARY_VECTORS[step[0]]
+            places = (place if place > BUFFERS else arrays + BUFFERS - place for place in step[1:numbers_from])
+            resolved.append((step[0], *places, *step[numbers_from:]))
+        return tuple(resolved)
+
+
+def _signature(part: Term | Leaf) -> tuple:
+    """Write down the shape of a tree, with which of the expression's operands each leaf reads.
+
+    Args:
+        part: An expression's tree, or part of it.
+
+    Returns:
+        Nested tuples that are equal for two trees exactly when they have
+        the same operations on the same pattern of operands: everything a
+        tiling and its program depend on, and nothing of the values.
+    """
+    if type(part) is Leaf:
+        return (part.kind, part.place)
+    return (part.op, *[_signature(operand) for operand in part.operands])
+
+
+def _remember(key: tuple, expression: Expression, steps: tuple, arrays: int, names: tuple[str, ...],
+              sources: list) -> None:
+    """Keep the program of an expression for the next expression of the same shape.
+
+    A loop writes the same expressions at every turn, and covering a tree
+    with shapes is most of what planning one costs. What is kept is the
+    program and where each thing it reads is among the expression's
+    operands, which is the same for any expression of that shape.
+
+    Args:
+        key: The expression's result kind and the signature of its tree.
+        expression: The expression.
+        steps: Its program's steps.
+        arrays: How many arrays the program reads.
+        names: The kernels it calls, in order.
+        sources: What it reads, the arrays and then the numbers: each one of the expression's operands.
+    """
+    place_of = {id(operand): place for place, operand in enumerate(expression.operands)}
+    places = tuple(place_of.get(id(source), UNPLACED) for source in sources)
+    if UNPLACED in places:
+        return
+    if len(_RECIPES) >= RECIPE_LIMIT:
+        _RECIPES.clear()
+    _RECIPES[key] = (steps, arrays, names, places)
+
+
+def _replayed(expression: Expression, key: tuple, planned: Plan) -> bool:
+    """Plan an expression from what an earlier one of the same shape was given, if there was one.
+
+    Args:
+        expression: The expression.
+        key: Its result kind and the signature of its tree.
+        planned: The computation's plan, which gains the expression's group.
+
+    Returns:
+        True when the expression is planned. False when its shape is new,
+        or when its line's kernel once raised an exception NumPy reports:
+        the ordinary way decides then.
+    """
+    recipe = _RECIPES.get(key)
+    if recipe is None:
+        return False
+    top, root = expression.term, expression.root
+    own = root if expression.result == STORE else top.node
+    if own.origin in _flagged:
+        return False
+    steps, arrays, names, places = recipe
+    operands = expression.operands
+    covered = [term.node for term in terms_of(top)]
+    watched = _watched_under(own.errstate)
+    for node in covered:
+        watched |= _watched_under(node.errstate)
+    members = sorted((node for node in covered if node is not own), key=_number)
+    planned.groups[own.number] = _Group(None, steps, arrays, names, [operands[place] for place in places], members,
+                                        watched, expression.result,
+                                        expression.target if expression.result == STORE else None, expression.shape)
+    planned.inner.update(node.number for node in members)
+    STATS.tiled += 1
+    return True
+
+
 def _plan_expression(expression: Expression, planned: Plan) -> None:
     """Plan the kernel calls of one expression.
+
+    The tiles that feed one another become one group, a program: the
+    value one gives the next is a buffer of a block, not an array. A tile
+    whose operand is a term no tile covers reads that term's node, which
+    its own NumPy call computes first; a sum's or a mean's tile is a group
+    by itself, and what it sums is an array.
 
     Args:
         expression: The expression.
         planned: The computation's plan, which gains the expression's groups.
     """
-    _, tiles = tile(expression.term, _BY_TOP)
     top, root = expression.term, expression.root
     stores = expression.result == STORE
+    key = (expression.result, _signature(top))
+    if _replayed(expression, key, planned):
+        return
+    _, tiles = tile(top, _BY_TOP)
     if tiles:
         STATS.tiled += 1
-    for placed in tiles.values():
+    groups_before = len(planned.groups)
+    # The tiles that another tile reads as a buffer: every one that is a vector of a tile that fills an array.
+    below = {part.node.number for placed in tiles.values() if not placed.kernel.reduces
+             for part in placed.shape.vectors if type(part) is Term and part.node.number in tiles
+             and not tiles[part.node.number].kernel.reduces}
+    for number, placed in tiles.items():
+        if number in below:
+            continue
         shape, kernel = placed.shape, placed.kernel
-        read = [_source(expression, part) for part in shape.vectors]
-        numbers = [_source(expression, part) for part in shape.scalars]
-        sources = [read[place] for place in kernel.vectors] + [numbers[place] for place in kernel.scalars]
         at_top = shape.top is top
-        covered = [term.node for term in shape.terms]
         # A stored expression's value is the write's: the node at the top of the tree is inside the group too.
         own = root if at_top and stores else shape.top.node
         if own.origin in _flagged:
             continue  # This line's kernel raised an exception NumPy reports: its operations are NumPy's now.
-        members = sorted((node for node in covered if node is not own), key=_number)
-        watched = _watched_under(own.errstate)
-        for node in members:
-            watched |= _watched_under(node.errstate)
-        result = STORE if at_top and stores else ARRAY
         if kernel.reduces:
-            result = shape.top.op
-        planned.groups[own.number] = _Group(kernel, sources, members, watched, result,
+            read = [_source(expression, part) for part in shape.vectors]
+            numbers = [_source(expression, part) for part in shape.scalars]
+            sources = [read[place] for place in kernel.vectors] + [numbers[place] for place in kernel.scalars]
+            covered, steps, arrays, names = [term.node for term in shape.terms], (), 0, (kernel.name,)
+            watched = 0
+            for node in covered:
+                watched |= _watched_under(node.errstate)
+            result, only = shape.top.op, kernel
+        else:
+            program = _Program(expression, tiles)
+            program.add(placed, RESULT)
+            if len(program.steps) > MOST_STEPS or len(program.arrays) > MOST_OPERANDS \
+                    or len(program.numbers) > MOST_OPERANDS or program.buffers > MOST_BUFFERS:
+                continue  # Larger than `_fused` takes: left to NumPy's calls.
+            sources, covered, watched = program.arrays + program.numbers, program.covered, program.watched
+            steps, arrays, names = program.finished(), len(program.arrays), tuple(program.names)
+            result, only = STORE if at_top and stores else ARRAY, None
+            if at_top and len(covered) == count_operations(top) and len(planned.groups) == groups_before:
+                # One program for the whole expression: the next expression of this shape is planned from here.
+                _remember(key, expression, steps, arrays, names, sources)
+        watched |= _watched_under(own.errstate)
+        members = sorted((node for node in covered if node is not own), key=_number)
+        planned.groups[own.number] = _Group(only, steps, arrays, names, sources, members, watched, result,
                                             expression.target if result == STORE else None, expression.shape)
         planned.inner.update(node.number for node in members)
     if stores and top.node.number not in tiles and top.node is not root and _store_directly(expression):
@@ -1756,6 +2003,7 @@ def enable() -> bool:
         _fused = module
         _EXCEPTIONS.update(invalid=module.INVALID, divide=module.DIVIDE, over=module.OVER, under=module.UNDER)
         LIBRARY.update(load_library(module))
+        LIBRARY_VECTORS.update({kernel.index: len(kernel.vectors) for kernel in LIBRARY.values()})
         _BY_TOP.update(index(LIBRARY))
     evaluate.planner = plan
     array.at_once_below(AT_ONCE_BELOW)

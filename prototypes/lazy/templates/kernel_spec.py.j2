@@ -1,0 +1,74 @@
+"""`{{ python }}` on float64, NumPy's result bit for bit.
+
+A fused kernel of the lazy layer, written by `prototypes/lazy/make_kernel.py`
+from the name of its shape, `{{ shape }}`:
+{% if operations == 1 %}
+one operation, one pass. It fuses nothing by itself; it is a step of an
+expression computed block by block, where every step is a kernel.
+{% else %}
+the {{ operations }} passes NumPy makes for the expression, each into a temporary, as
+one pass with none.
+{% endif %}
+`prototypes/lazy/fuse.py` reads the pattern it serves off this file's oracle.
+
+Each element goes through the same IEEE operations in the same order as in
+NumPy's passes, each rounded by itself. What that leaves open, and what a
+fused kernel may assume of its caller, is in [the kernels' README](../README.md).
+"""
+{% if uses_numpy %}
+import numpy as np
+
+{% endif %}
+from judge.spec import In, Kernel, Out{% if numbers %}, Scalar, ScalarSet{% endif %}, Size
+{% if numbers %}
+
+# The default number{{ "s" if numbers|length > 1 }}: no power of two, so a product or a quotient with one is rounded.
+{{ numbers|map("upper")|join(", ") }} = {{ defaults|join(", ") }}
+# A number that overflows ordinary values, and one that brings them down to denormals.
+HUGE, TINY = 1e300, 1e-310
+
+SCALAR_SETS = [
+{% for number in numbers %}
+{% for trial, value in trials %}
+    ScalarSet("{{ trial }}_{{ number }}", {"{{ number }}": {{ value }}}),
+{% endfor %}
+{% endfor %}
+]
+{% endif %}
+
+
+def oracle({{ (arrays + numbers)|join(", ") }}):
+    """The expression as a program writes it.
+
+    Args:
+{% for array in arrays %}
+        {{ array }}: The array the shape calls V{{ loop.index0 }}, float64{{ "" if loop.first else ", of the same length" }}.
+{% endfor %}
+{% for number in numbers %}
+        {{ number }}: The number the shape calls S{{ loop.index0 }}.
+{% endfor %}
+
+    Returns:
+        `{{ python }}`, a new float64 array.
+    """
+    return {{ python }}
+
+
+KERNEL = Kernel(
+    name="{{ name }}",
+    returns="void",
+    args=[
+{% for array in arrays %}
+        In("{{ array }}", "f64"),
+{% endfor %}
+        Out("out", "f64"),
+        Size("n"),
+{% for number in numbers %}
+        Scalar("{{ number }}", "f64", {{ number|upper }}),
+{% endfor %}
+    ],
+    oracle=oracle,
+{% if numbers %}
+    scalar_sets=SCALAR_SETS,
+{% endif %}
+)

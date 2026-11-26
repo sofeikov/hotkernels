@@ -26,7 +26,7 @@ from typing import Any, Iterator
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, record_graphs
+from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, make_kernel, record_graphs
 from prototypes.lazy.programs import corpus
 
 # Seed of every random array in these tests.
@@ -181,7 +181,10 @@ def expressions(np: Any, a: Any, b: Any, c: Any, d: Any, e: Any, f: Any) -> dict
 def test_the_library_has_the_shape_each_kernels_oracle_writes():
     """A kernel's pattern is read off its spec's oracle, and is the shape the kernel was written for."""
     by_kernel = {kernel.name: name for name, kernel in fuse.LIBRARY.items() if not kernel.mean}
-    assert by_kernel == PATTERNS
+    # The kernels `make_kernel.py` wrote are named after their shapes; the others are in the table above.
+    written = {make_kernel.name_of(shape): shape for shape in make_kernel.SHAPES}
+    assert {name: shape for name, shape in by_kernel.items() if name not in written} == PATTERNS
+    assert {name: shape for name, shape in by_kernel.items() if name in written} == written
     # A kernel that sums also serves the mean of the same expression.
     assert fuse.LIBRARY["mean(sq(V0))"].name == "fuse_sum_squares_f64" and fuse.LIBRARY["mean(sq(V0))"].mean
 
@@ -409,7 +412,9 @@ def test_an_in_place_operator_on_a_whole_array_is_one_call():
         expected += gradient * start
         expected *= 1.5
     assert alias is w and same(expected, w.gather())
-    assert fuse.STATS.calls == {"fuse_sub_scaled_f64": 5, "fuse_add_product_f64": 5} and fuse.STATS.whole_writes == 15
+    # The fifteen writes and the ten products they read are one expression: each write is read once, by the next.
+    # So all but the last node are computed inside one group, with no array between them.
+    assert fuse.STATS.whole_writes == 15 and fuse.STATS.fused_nodes == 24
 
 
 def test_a_write_into_a_whole_array_keeps_what_was_read_before_it():
@@ -435,7 +440,8 @@ def test_an_expression_assigned_to_part_of_an_array_is_computed_into_it():
     u[:, :] = u * (held - u)
     expected[:, :] = expected * (other - expected)
     assert same(expected, u.gather())
-    assert fuse.STATS.calls == {"fuse_add_scaled_f64": 1, "fuse_mul_difference_f64": 1} and fuse.STATS.part_writes == 1
+    # The one subtraction of the second line is a program of one step, written into the part like the others.
+    assert fuse.STATS.calls == {"fuse_add_scaled_f64": 1, "fuse_sub_v_v_f64": 1, "fuse_mul_difference_f64": 1}
 
 
 def test_an_in_place_operator_on_part_of_an_array_reads_what_the_part_held():
