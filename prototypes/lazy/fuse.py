@@ -83,6 +83,11 @@ VECTOR, SCALAR = "V", "S"
 # What an expression gives: an array of its own, the sum or the mean of one, or an array stored into part of another.
 ARRAY, STORE = "array", "store"
 
+# The most operations deep an expression is read: below that an operand is read as an array, which is then the
+# top of an expression of its own. A loop that adds to one array a few thousand times without ever asking for a
+# value writes a tree that deep, and reading, covering and writing down a tree each walk it one call per level.
+MOST_DEPTH = 200
+
 # The most operations a shape cut out of an expression may have. A kernel of more would need more registers than
 # hold its operands and intermediates, and no shape of more was common in the programs mined.
 MOST_OPERATIONS = 6
@@ -415,6 +420,8 @@ class _Finder:
         self.inside: set[int] = set()
         # The same in the order they were put there, so that a tree given up can take its nodes out again.
         self.journal: list[int] = []
+        # How many operations deep the operand being read is.
+        self.depth = 0
 
     def give_up(self, mark: int) -> None:
         """Take out the nodes put inside since a point: the tree they were read for is not an expression.
@@ -600,10 +607,12 @@ class _Finder:
         Returns:
             The tree or the leaf, or None for an operand a kernel does not read.
         """
-        if type(arg) is Node and self._is_inner(arg, shape):
+        if type(arg) is Node and self.depth < MOST_DEPTH and self._is_inner(arg, shape):
             read = operation_of(arg)
             if read is not None and (read[0] in MASKS) == mask and arg.dtype == (BOOLEAN if mask else FLOAT64):
+                self.depth += 1
                 term = self._operation(arg, read[0], read[1], shape, operands)
+                self.depth -= 1
                 if term is not None:
                     self._put_inside(arg)
                     return term
@@ -622,6 +631,31 @@ class _Finder:
         return Leaf(kind, len(operands) - 1)
 
 
+# The C core that was last told this module's classes and tables, or None.
+_told_core: Any = None
+
+
+def _reading_core() -> Any:
+    """Return the C core when it is the one writing nodes, told what it needs of this module the first time.
+
+    Returns:
+        The core, whose `find` reads expressions as `_Finder` does and gives
+        the same `Expression`s; or None when the layer runs in Python alone,
+        where `_Finder` reads them.
+    """
+    global _told_core
+    core = array._core
+    if core is not None and core is not _told_core:
+        core.find_setup(Expression=Expression, Term=Term, Leaf=Leaf, ViewOf=ViewOf, WholeCall=_WholeCall,
+                        operations=OPERATIONS, in_place=IN_PLACE, arithmetic=ARITHMETIC, unary=UNARY, masks=MASKS,
+                        reductions=REDUCTIONS, square_exponents=SQUARE_EXPONENTS, square=SQUARE, where=WHERE,
+                        vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
+                        float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
+                        is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH)
+        _told_core = core
+    return core
+
+
 def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[Expression], set[int]]:
     """Read the expressions off the nodes one computation is about to take.
 
@@ -638,6 +672,9 @@ def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[E
         nodes inside them). Each node is in one expression at most; a node
         inside one is not the root of another.
     """
+    core = _reading_core()
+    if core is not None:
+        return core.find(todo, fewest, alone)
     finder = _Finder(todo, fewest)
     found = []
     for node in todo:
@@ -1821,27 +1858,38 @@ class _Program:
             among.append(source)
         return known
 
-    def add(self, placed: Tile, writes: int) -> None:
+    def add(self, placed: Tile, writes: int | None = None) -> int:
         """Write the steps of a tile and of the tiles it reads, the tile's own last.
+
+        A tile that fills a buffer takes it only now, when the tiles it
+        reads have written their steps and before their buffers are let go:
+        so the buffer is none of theirs, and one taken any earlier would
+        wait unused under every tile below. A chain of calls, each reading
+        the one before, runs in two buffers however long it is.
 
         Args:
             placed: The tile.
-            writes: Where its result goes: RESULT, or a buffer's place.
+            writes: RESULT for the tile at the top, whose result is the program's. None for a tile under
+                another, whose result is a buffer of the program.
+
+        Returns:
+            Where the result goes: RESULT, or the buffer's place, which the tile above reads and lets go.
         """
         shape, kernel, expression = placed.shape, placed.kernel, self.expression
         read, taken = [], []
         for part in shape.vectors:
             below = self.tiles.get(part.node.number) if type(part) is Term else None
             if below is not None and not below.kernel.reduces:
-                # A tile under this one: its result is a buffer of this program, taken before and let go after.
-                buffer = self.free.pop() if self.free else self._new_buffer()
-                taken.append(buffer)
-                self.add(below, BUFFERS - buffer)
-                read.append(BUFFERS - buffer)
+                # A tile under this one: its result is a buffer of this program, let go after this tile's step.
+                place = self.add(below)
+                taken.append(BUFFERS - place)
+                read.append(place)
             else:
                 # An array the expression reads, or a term no tile is on, which its node's own call computes first.
                 read.append(self._place(_source(expression, part), self.arrays))
         numbers = [self._place(_source(expression, part), self.numbers) for part in shape.scalars]
+        if writes is None:
+            writes = BUFFERS - (self.free.pop() if self.free else self._new_buffer())
         self.steps.append((kernel.index, writes, *(read[place] for place in kernel.vectors),
                            *(numbers[place] for place in kernel.scalars)))
         self.free.extend(taken)
@@ -1849,6 +1897,7 @@ class _Program:
         for term in shape.terms:
             self.covered.append(term.node)
             self.watched |= _watched_under(term.node.errstate)
+        return writes
 
     def _new_buffer(self) -> int:
         """Take a buffer that was never used."""

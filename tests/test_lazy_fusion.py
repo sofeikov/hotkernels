@@ -700,6 +700,107 @@ def test_a_node_held_by_the_program_is_seen_by_its_references():
         del todo
 
 
+def _written(part: Any) -> tuple:
+    """Write a tree down with the number of the node at each term, and nothing that refers to a node."""
+    if type(part) is fuse.Leaf:
+        return (part.kind, part.place)
+    return (part.op, part.node.number, *[_written(operand) for operand in part.operands])
+
+
+def _read_operand(operand: Any) -> tuple:
+    """Write down one thing an expression reads, without referring to it."""
+    if type(operand) is graph.Node:
+        return ("node", operand.number)
+    if type(operand) is fuse.ViewOf:
+        return ("part", operand.old.number, len(operand.steps))
+    if type(operand) is numpy.ndarray:
+        return ("array", id(operand))
+    return (type(operand).__name__, repr(operand))
+
+
+def _described(expressions: list) -> list:
+    """Write down everything `fuse.find` says of each expression, as values that keep no node alive."""
+    described = []
+    for expression in expressions:
+        target = expression.target
+        steps = None if target is None else [(step.name, repr(step.tail), step.shape, step.plain) for step in target.steps]
+        described.append((expression.root.number, expression.result, expression.shape, _written(expression.term),
+                          [_read_operand(operand) for operand in expression.operands],
+                          None if target is None else target.old.number, steps))
+    return described
+
+
+# The programs whose computations both readers of expressions are run on: the ones with the most to read, of
+# every kind an expression has (an array, a sum, a part written into, a mask).
+READ_BOTH_WAYS = ("cavity_flow", "hdiff", "veros_eos", "veros_isoneutral", "veros_tke", "particle_filter", "regression",
+                  "black_scholes")
+
+
+@pytest.mark.parametrize("name", READ_BOTH_WAYS)
+def test_the_core_reads_the_expressions_python_reads(name: str, lazy_core: str, monkeypatch: pytest.MonkeyPatch):
+    """With the C core `fuse.find` is the core's; on every computation of a program it finds what `_Finder` finds."""
+    if lazy_core != "c":
+        pytest.skip("one reader only without the C core")
+    (program,) = corpus.by_name([name])
+    if not program.available:
+        pytest.skip(f"needs {', '.join(program.requires)}")
+    find, reading = fuse.find, fuse._reading_core
+    compared: list[int] = []
+
+    def both(todo: list, fewest: int = 1, alone: bool = False) -> tuple:
+        """Read a computation's expressions in Python, then in C, and hand on the second after comparing them.
+
+        What the first reading found is written down and dropped before the second: an expression refers to
+        its nodes, and a node something refers to is one the reader does not compute past.
+        """
+        fuse._reading_core = lambda: None
+        try:
+            found, inside = find(todo, fewest, alone)
+        finally:
+            fuse._reading_core = reading
+        theirs = (_described(found), sorted(inside))
+        del found, inside
+        found, inside = find(todo, fewest, alone)
+        assert (_described(found), sorted(inside)) == theirs
+        compared.append(len(found))
+        return found, inside
+
+    monkeypatch.setattr(fuse, "find", both)
+    inputs = program.make(corpus.SMALL)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        array.gather(*_flat(program.run(lazy, inputs)))
+    assert sum(compared) > 0
+
+
+def _flat(result: Any) -> list:
+    """List what a program returned, whatever tuples and lists it is in."""
+    if isinstance(result, (tuple, list)):
+        return [value for item in result for value in _flat(item)]
+    return [result]
+
+
+@pytest.mark.parametrize("depth", (fuse.MOST_DEPTH - 1, fuse.MOST_DEPTH, fuse.MOST_DEPTH + 1, 5 * fuse.MOST_DEPTH + 3))
+def test_an_expression_too_deep_to_read_whole_is_read_in_pieces(depth: int):
+    """A loop that adds to one array again and again writes one long chain: every operation is fused all the same."""
+    def program(np: Any) -> Any:
+        """Add to an array `depth` times, never asking for a value."""
+        x = np.asarray(numpy.linspace(0.0, 1.0, 64))
+        y = x
+        for turn in range(depth):
+            y = y + 0.5 if turn % 2 else y * 1.0625
+        return y
+
+    expected = program(numpy)
+    result = program(lazy)
+    got = result.gather()
+    assert same(expected, got)
+    # A piece is an operation and MOST_DEPTH more under it; a last piece of one operation is NumPy's call.
+    pieces, left = divmod(depth, fuse.MOST_DEPTH + 1)
+    assert fuse.STATS.expressions == pieces + (left > 1)
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == depth - fuse.STATS.expressions - (left == 1)
+
+
 @pytest.mark.parametrize("name", [program.name for program in corpus.programs() if program.eager])
 def test_a_program_of_the_corpus_gives_numpys_results_with_fusion(name: str):
     """Each program run with the stand-in and fusion matches the program run with NumPy, bit for bit."""

@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 24
+#define CORE_VERSION 25
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -4319,6 +4319,911 @@ static PyTypeObject RoadType = {
     .tp_getset = road_getset,
 };
 
+/* ---- Reading the expressions off the nodes of a computation: `fuse.find`, in C. ----
+ *
+ * The functions of `fuse._Finder`, one for one and in its order, on the same objects: what is returned is the
+ * `Expression`s, `Term`s and `Leaf`s the Python makes, for the Python that plans them. The Python is the
+ * definition, and the tests of fusion run both. What differs is how the finder keeps its own notes: where the
+ * Python has a set and two dictionaries by node number, this has one table by node, since a computation of a
+ * few thousand nodes asks them a few times per node. */
+
+/* What `find_setup()` was given: the classes of fuse.py, their slots, its tables and its names. */
+static PyTypeObject *FExpression, *FTerm, *FLeaf, *FViewOf, *FWholeCall;
+enum { E_ROOT, E_TERM, E_OPERANDS, E_RESULT, E_SHAPE, E_TARGET, E_FIELDS };
+static const char *const EXPRESSION_FIELDS[E_FIELDS] = {"root", "term", "operands", "result", "shape", "target"};
+enum { T_OP, T_OPERANDS, T_NODE, T_FIELDS };
+static const char *const TERM_FIELDS[T_FIELDS] = {"op", "operands", "node"};
+enum { LEAF_KIND, LEAF_PLACE, LEAF_FIELDS };
+static const char *const LEAF_FIELD_NAMES[LEAF_FIELDS] = {"kind", "place"};
+enum { V_OLD, V_STEPS, V_FIELDS };
+static const char *const VIEWOF_FIELDS[V_FIELDS] = {"old", "steps"};
+enum { WC_UFUNC, WC_READS_OLD, WC_FIELDS };
+static const char *const WHOLECALL_FIELDS[WC_FIELDS] = {"ufunc", "reads_old"};
+static Py_ssize_t expression_at[E_FIELDS], term_at[T_FIELDS], leaf_at[LEAF_FIELDS], viewof_at[V_FIELDS], wholecall_at[WC_FIELDS];
+static PyObject *f_operations;       /* `fuse.OPERATIONS` */
+static PyObject *f_in_place;         /* `fuse.IN_PLACE` */
+static PyObject *f_arithmetic;       /* `fuse.ARITHMETIC` */
+static PyObject *f_unary;            /* `fuse.UNARY` */
+static PyObject *f_masks;            /* `fuse.MASKS` */
+static PyObject *f_reductions;       /* `fuse.REDUCTIONS` */
+static PyObject *f_square_exponents; /* `fuse.SQUARE_EXPONENTS` */
+static PyObject *f_square, *f_where, *f_vector, *f_scalar, *f_array, *f_store, *f_mul; /* Its names, "mul" among them */
+static PyObject *f_float64, *f_boolean; /* `fuse.FLOAT64` and `fuse.BOOLEAN` */
+static PyObject *f_power, *f_pow;    /* `np.power` and `operator.pow` */
+static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
+static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
+static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
+static PyObject *s_isnative;
+
+/* What the finder notes of one node the computation takes. */
+typedef struct {
+    PyObject *node;   /* The node, borrowed from the list of them; NULL for an empty place of the table. */
+    int uses;         /* How many operands of the computation's nodes it is: `_Finder.uses`. */
+    int unread;       /* How often it is kept, unread, as the old contents of an array: `_Finder.unread`. */
+    char held;        /* Whether something outside the computation will want its value: `_Finder.held`. */
+    char inside;      /* Whether it is inside an expression found so far: `_Finder.inside`. */
+} Taken;
+
+typedef struct {
+    Taken *table;             /* The nodes the computation takes, by their addresses: `_Finder.taking`. */
+    size_t mask;              /* The table's size less one; the size is a power of two. */
+    Py_ssize_t fewest;        /* The fewest elements an expression's operations run over for it to be read. */
+    Taken **journal;          /* The nodes put inside, in order: `_Finder.journal`. */
+    Py_ssize_t journal_count; /* How many there are. */
+    Py_ssize_t journal_room;  /* How many the journal has room for. */
+    Py_ssize_t depth;         /* How many operations deep the operand being read is. */
+} Finder;
+
+/* Where a node is in the table, or where it would go. */
+static Taken *
+taken_place(Finder *finder, PyObject *node)
+{
+    size_t place = (((uintptr_t)node >> 4) * (size_t)0x9E3779B97F4A7C15ULL) & finder->mask;
+    while (finder->table[place].node != NULL && finder->table[place].node != node) {
+        place = (place + 1) & finder->mask;
+    }
+    return &finder->table[place];
+}
+
+/* What is noted of a node, or NULL for one the computation does not take. */
+static Taken *
+taken_of(Finder *finder, PyObject *node)
+{
+    Taken *taken = taken_place(finder, node);
+    return taken->node == node ? taken : NULL;
+}
+
+/* `_Finder._put_inside`. 0, or -1 with an error set. */
+static int
+put_inside(Finder *finder, Taken *taken)
+{
+    if (finder->journal_count == finder->journal_room) {
+        Py_ssize_t room = finder->journal_room ? finder->journal_room * 2 : 64;
+        Taken **grown = PyMem_Realloc(finder->journal, (size_t)room * sizeof(Taken *));
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        finder->journal = grown;
+        finder->journal_room = room;
+    }
+    taken->inside = 1;
+    finder->journal[finder->journal_count++] = taken;
+    return 0;
+}
+
+/* `_Finder.give_up`. */
+static void
+give_up(Finder *finder, Py_ssize_t mark)
+{
+    while (finder->journal_count > mark) {
+        finder->journal[--finder->journal_count]->inside = 0;
+    }
+}
+
+/* Whether two strings are the same text. The names and kinds compared here are constants of the layer's modules,
+ * and nearly always the same object. */
+static int
+same_text(PyObject *first, PyObject *second)
+{
+    return first == second
+        || (PyUnicode_CheckExact(first) && PyUnicode_CheckExact(second) && PyUnicode_Compare(first, second) == 0);
+}
+
+/* Whether an element type is `wanted`: `dtype == wanted`. */
+static int
+dtype_is(PyObject *dtype, PyObject *wanted)
+{
+    if (dtype == wanted) {
+        return 1;
+    }
+    int same = PyObject_RichCompareBool(dtype, wanted, Py_EQ);
+    if (same < 0) {
+        PyErr_Clear();
+        return 0;
+    }
+    return same;
+}
+
+/* `graph.is_known(shape)`. */
+static int
+shape_known(PyObject *shape)
+{
+    for (Py_ssize_t axis = 0; axis < PyTuple_GET_SIZE(shape); axis++) {
+        long long length = PyLong_AsLongLong(PyTuple_GET_ITEM(shape, axis));
+        if (length == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            return 0; /* Too large for a length, as a stand-in a reshape doubled is. */
+        }
+        if (length >= unknown_floor) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Whether a shape has `fewest` elements or more: `fuse._elements(shape) >= fewest`, without the product ever
+ * being too large to hold. */
+static int
+has_elements(PyObject *shape, Py_ssize_t fewest)
+{
+    Py_ssize_t count = 1;
+    int zero = 0;
+    for (Py_ssize_t axis = 0; axis < PyTuple_GET_SIZE(shape); axis++) {
+        long long length = PyLong_AsLongLong(PyTuple_GET_ITEM(shape, axis));
+        if (length == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            length = PY_SSIZE_T_MAX;
+        }
+        if (length <= 0) {
+            zero = 1;
+        } else if (count > PY_SSIZE_T_MAX / length) {
+            count = PY_SSIZE_T_MAX;
+        } else {
+            count *= (Py_ssize_t)length;
+        }
+    }
+    return (zero ? 0 : count) >= fewest;
+}
+
+/* The length of a shape along its last axis; -1 for one too large to be a length. */
+static long long
+last_length(PyObject *shape)
+{
+    long long length = PyLong_AsLongLong(PyTuple_GET_ITEM(shape, PyTuple_GET_SIZE(shape) - 1));
+    if (length == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+    return length;
+}
+
+/* `fuse.call_of(node)`: 1 with the callable and its operands as written, which are `count` items of the node's
+ * own arguments; 0 for None. */
+static int
+call_of(PyObject *node, PyObject **operation, PyObject ***items, Py_ssize_t *count)
+{
+    PyObject *made = SLOT(node, node_at[N_OPERATION]), *args = SLOT(node, node_at[N_ARGS]);
+    PyObject *kind = SLOT(node, node_at[N_KIND]);
+    if (!PyTuple_CheckExact(args)) {
+        return 0;
+    }
+    PyObject **all = &PyTuple_GET_ITEM(args, 0);
+    Py_ssize_t given = PyTuple_GET_SIZE(args);
+    if (same_text(kind, elementwise_kind)) {
+        PyObject *kwargs = SLOT(node, node_at[N_KWARGS]);
+        if (!PyDict_Check(kwargs) || PyDict_GET_SIZE(kwargs) != 0) {
+            return 0;
+        }
+        *operation = made;
+        *items = all;
+        *count = given;
+        return 1;
+    }
+    if (!same_text(kind, write_kind)) {
+        return 0;
+    }
+    if (Py_TYPE(made) == Write) {
+        if (PyTuple_GET_SIZE(SLOT(made, write_at[W_STEPS])) != 0) {
+            return 0;
+        }
+        PyObject *perform = SLOT(made, write_at[W_PERFORM]);
+        if (Py_TYPE(perform) == Into) {
+            /* `np.add(a, b, out=x)` leaves nothing of what `x` held: the operands after it are the call's. */
+            PyObject *function = SLOT(perform, into_function_at);
+            if (!PyObject_TypeCheck(function, Ufunc) || given < 1) {
+                return 0;
+            }
+            *operation = function;
+            *items = all + 1;
+            *count = given - 1;
+            return 1;
+        }
+        PyObject *ufunc = PyDict_GetItemWithError(f_in_place, SLOT(node, node_at[N_NAME]));
+        if (ufunc == NULL) {
+            PyErr_Clear();
+            return 0;
+        }
+        *operation = ufunc;
+        *items = all;
+        *count = given;
+        return 1;
+    }
+    if (Py_TYPE(made) == FWholeCall) {
+        /* A write `rewrite_write` has already turned into its ufunc. */
+        int reads_old = SLOT(made, wholecall_at[WC_READS_OLD]) == Py_True;
+        if (!reads_old && given < 1) {
+            return 0;
+        }
+        *operation = SLOT(made, wholecall_at[WC_UFUNC]);
+        *items = reads_old ? all : all + 1;
+        *count = reads_old ? given : given - 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* `fuse.operation_of(node)`: 1 with the operation's name in a pattern (borrowed) and its operands; 0 for None;
+ * -1 with an error set. */
+static int
+operation_of(PyObject *node, PyObject **name, PyObject ***items, Py_ssize_t *count)
+{
+    PyObject *operation;
+    if (!call_of(node, &operation, items, count)) {
+        return 0;
+    }
+    PyObject *found = PyDict_GetItemWithError(f_operations, operation);
+    if (found != NULL) {
+        *name = found;
+        return 1;
+    }
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    if ((operation == f_power || operation == f_pow) && *count >= 2) {
+        PyObject *exponent = (*items)[1];
+        if (PyLong_CheckExact(exponent) || PyFloat_CheckExact(exponent)) {
+            int square = PySequence_Contains(f_square_exponents, exponent);
+            if (square < 0) {
+                return -1;
+            }
+            if (square) {
+                *name = f_square;
+                *count = 1;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* `fuse._leaf_kind(arg, shape)`: `fuse.VECTOR` or `fuse.SCALAR` (borrowed), or `Miss` for None. */
+static PyObject *
+leaf_kind(PyObject *arg, PyObject *shape)
+{
+    if (PyFloat_CheckExact(arg) || Py_TYPE(arg) == &PyDoubleArrType_Type) {
+        return f_scalar;
+    }
+    if (PyLong_CheckExact(arg)) {
+        int overflow = 0;
+        long long value = PyLong_AsLongLongAndOverflow(arg, &overflow);
+        return !overflow && value >= -f_exact_integer && value <= f_exact_integer ? f_scalar : Miss;
+    }
+    long long wanted = last_length(shape), own;
+    if (Py_TYPE(arg) == Node) {
+        PyObject *dtype = SLOT(arg, node_at[N_DTYPE]), *has = SLOT(arg, node_at[N_SHAPE]);
+        if (dtype != f_float64) {
+            /* Another object that may still be the type: `arg.dtype != FLOAT64 or not arg.dtype.isnative`. */
+            PyObject *native = dtype_is(dtype, f_float64) ? PyObject_GetAttr(dtype, s_isnative) : NULL;
+            int is_native = native != NULL && PyObject_IsTrue(native) == 1;
+            Py_XDECREF(native);
+            PyErr_Clear();
+            if (!is_native) {
+                return Miss;
+            }
+        }
+        if (PyTuple_GET_SIZE(has) == 0) {
+            return f_scalar;
+        }
+        own = last_length(has);
+        if (own == 1 && wanted != 1) {
+            return f_scalar;
+        }
+        return own == wanted && shape_known(has) ? f_vector : Miss;
+    }
+    if (Py_TYPE(arg) == Ndarray) {
+        PyArrayObject *array = (PyArrayObject *)arg;
+        PyArray_Descr *descr = PyArray_DESCR(array);
+        if ((PyObject *)descr != f_float64 && !(descr->type_num == NPY_DOUBLE && PyArray_ISNBO(descr->byteorder)
+                                                && dtype_is((PyObject *)descr, f_float64))) {
+            return Miss;
+        }
+        if (PyArray_NDIM(array) == 0) {
+            return f_scalar;
+        }
+        own = (long long)PyArray_DIM(array, PyArray_NDIM(array) - 1);
+        if (own == 1 && wanted != 1) {
+            return f_scalar;
+        }
+        return own == wanted ? f_vector : Miss; /* An array's lengths are all known. */
+    }
+    return Miss;
+}
+
+/* `_Finder._is_inner(node, shape)`: what is noted of the node when it may be computed inside an expression of
+ * that shape, and NULL when it may not. */
+static Taken *
+inner_of(Finder *finder, PyObject *node, PyObject *shape)
+{
+    if (SLOT(node, node_at[N_OPERATION]) == Py_None) {
+        return NULL;
+    }
+    Taken *taken = taken_of(finder, node);
+    if (taken == NULL || taken->uses != 1 || taken->held) {
+        return NULL;
+    }
+    PyObject *has = SLOT(node, node_at[N_SHAPE]);
+    if (has != shape) {
+        int same = PyObject_RichCompareBool(has, shape, Py_EQ);
+        if (same != 1) {
+            PyErr_Clear();
+            return NULL;
+        }
+    }
+    return taken;
+}
+
+/* `Leaf(kind, place)`. */
+static PyObject *
+new_leaf(PyObject *kind, Py_ssize_t place)
+{
+    PyObject *number = PyLong_FromSsize_t(place);
+    PyObject *leaf = number ? FLeaf->tp_alloc(FLeaf, 0) : NULL;
+    if (leaf == NULL) {
+        Py_XDECREF(number);
+        return NULL;
+    }
+    SLOT(leaf, leaf_at[LEAF_KIND]) = Py_NewRef(kind);
+    SLOT(leaf, leaf_at[LEAF_PLACE]) = number;
+    return leaf;
+}
+
+/* `Term(op, operands, node)`. Steals the reference to `operands`. */
+static PyObject *
+new_term(PyObject *op, PyObject *operands, PyObject *node)
+{
+    PyObject *term = FTerm->tp_alloc(FTerm, 0);
+    if (term == NULL) {
+        Py_DECREF(operands);
+        return NULL;
+    }
+    SLOT(term, term_at[T_OP]) = Py_NewRef(op);
+    SLOT(term, term_at[T_OPERANDS]) = operands;
+    SLOT(term, term_at[T_NODE]) = Py_NewRef(node);
+    return term;
+}
+
+/* `ViewOf(old, steps)`. */
+static PyObject *
+new_viewof(PyObject *old, PyObject *steps)
+{
+    PyObject *view = FViewOf->tp_alloc(FViewOf, 0);
+    if (view != NULL) {
+        SLOT(view, viewof_at[V_OLD]) = Py_NewRef(old);
+        SLOT(view, viewof_at[V_STEPS]) = Py_NewRef(steps);
+    }
+    return view;
+}
+
+/* `Expression(root, term, operands, result, shape, target)`. Steals the reference to `term`. */
+static PyObject *
+new_expression(PyObject *root, PyObject *term, PyObject *operands, PyObject *result, PyObject *shape, PyObject *target)
+{
+    PyObject *expression = FExpression->tp_alloc(FExpression, 0);
+    if (expression == NULL) {
+        Py_DECREF(term);
+        return NULL;
+    }
+    SLOT(expression, expression_at[E_ROOT]) = Py_NewRef(root);
+    SLOT(expression, expression_at[E_TERM]) = term;
+    SLOT(expression, expression_at[E_OPERANDS]) = Py_NewRef(operands);
+    SLOT(expression, expression_at[E_RESULT]) = Py_NewRef(result);
+    SLOT(expression, expression_at[E_SHAPE]) = Py_NewRef(shape);
+    SLOT(expression, expression_at[E_TARGET]) = Py_NewRef(target);
+    return expression;
+}
+
+static PyObject *read_operation(Finder *finder, PyObject *node, PyObject *name, PyObject **written, Py_ssize_t count,
+                                PyObject *shape, PyObject *operands);
+
+/* `_Finder._operand`: a term, a leaf, `Miss` for None, or NULL with an error set. */
+static PyObject *
+read_operand(Finder *finder, PyObject *arg, PyObject *shape, PyObject *operands, int mask)
+{
+    if (Py_TYPE(arg) == Node && finder->depth < f_most_depth) {
+        Taken *taken = inner_of(finder, arg, shape);
+        if (taken != NULL) {
+            PyObject *name, **items;
+            Py_ssize_t count;
+            int read = operation_of(arg, &name, &items, &count);
+            if (read < 0) {
+                return NULL;
+            }
+            if (read) {
+                int is_mask = PySet_Contains(f_masks, name);
+                if (is_mask < 0) {
+                    return NULL;
+                }
+                if (is_mask == mask && dtype_is(SLOT(arg, node_at[N_DTYPE]), mask ? f_boolean : f_float64)) {
+                    finder->depth++;
+                    PyObject *term = read_operation(finder, arg, name, items, count, shape, operands);
+                    finder->depth--;
+                    if (term == NULL) {
+                        return NULL;
+                    }
+                    if (term != Miss) {
+                        if (put_inside(finder, taken) < 0) {
+                            Py_DECREF(term);
+                            return NULL;
+                        }
+                        return term;
+                    }
+                }
+            }
+        }
+    }
+    if (mask) {
+        return Miss;
+    }
+    PyObject *kind = Py_TYPE(arg) == FViewOf ? f_vector : leaf_kind(arg, shape);
+    if (kind == Miss) {
+        return Miss;
+    }
+    if (kind == f_vector) {
+        for (Py_ssize_t place = 0; place < PyList_GET_SIZE(operands); place++) {
+            if (PyList_GET_ITEM(operands, place) == arg) {
+                return new_leaf(kind, place);
+            }
+        }
+    }
+    if (PyList_Append(operands, arg) < 0) {
+        return NULL;
+    }
+    return new_leaf(kind, PyList_GET_SIZE(operands) - 1);
+}
+
+/* `_Finder._operation`: a term, `Miss` for None with nothing added to `operands`, or NULL with an error set. */
+static PyObject *
+read_operation(Finder *finder, PyObject *node, PyObject *name, PyObject **written, Py_ssize_t count, PyObject *shape,
+               PyObject *operands)
+{
+    Py_ssize_t mark = PyList_GET_SIZE(operands), inside = finder->journal_count;
+    int is_where = same_text(name, f_where);
+    PyObject *parts = PyTuple_New(count);
+    if (parts == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *part = read_operand(finder, written[place], shape, operands, is_where && place == 0);
+        if (part == NULL || part == Miss) {
+            Py_DECREF(parts);
+            if (part == NULL || PyList_SetSlice(operands, mark, PyList_GET_SIZE(operands), NULL) < 0) {
+                return NULL;
+            }
+            give_up(finder, inside);
+            return Miss;
+        }
+        PyTuple_SET_ITEM(parts, place, part);
+    }
+    if (count == 2 && same_text(name, f_mul)) {
+        /* `x * x` of one operand read twice is one multiplication of a value by itself. */
+        PyObject *first = PyTuple_GET_ITEM(parts, 0), *second = PyTuple_GET_ITEM(parts, 1);
+        if (Py_TYPE(first) == FLeaf && Py_TYPE(second) == FLeaf
+            && same_text(SLOT(first, leaf_at[LEAF_KIND]), SLOT(second, leaf_at[LEAF_KIND]))
+            && PyObject_RichCompareBool(SLOT(first, leaf_at[LEAF_PLACE]), SLOT(second, leaf_at[LEAF_PLACE]), Py_EQ) == 1) {
+            PyObject *one = PyTuple_Pack(1, first);
+            Py_DECREF(parts);
+            return one ? new_term(f_square, one, node) : NULL;
+        }
+    }
+    return new_term(name, parts, node);
+}
+
+/* `_Finder._term`. */
+static PyObject *
+read_term(Finder *finder, PyObject *node, PyObject *shape, PyObject *operands, int inner)
+{
+    PyObject *name, **items;
+    Py_ssize_t count;
+    int read = operation_of(node, &name, &items, &count);
+    if (read <= 0) {
+        return read < 0 ? NULL : Miss;
+    }
+    PyObject *term = read_operation(finder, node, name, items, count, shape, operands);
+    if (term != NULL && term != Miss && inner) {
+        Taken *taken = taken_of(finder, node);
+        if (taken == NULL || put_inside(finder, taken) < 0) {
+            Py_DECREF(term);
+            if (taken == NULL) {
+                PyErr_SetString(PyExc_RuntimeError, "a node inside an expression is not one the computation takes");
+            }
+            return NULL;
+        }
+    }
+    return term;
+}
+
+/* `_Finder._reduction`. */
+static PyObject *
+read_reduction(Finder *finder, PyObject *root, PyObject *operands)
+{
+    PyObject *name = SLOT(root, node_at[N_NAME]), *args = SLOT(root, node_at[N_ARGS]), *kwargs = SLOT(root, node_at[N_KWARGS]);
+    int listed = PySet_Contains(f_reductions, name);
+    if (listed < 0) {
+        return NULL;
+    }
+    if (!listed || PyTuple_GET_SIZE(args) != 1 || !PyDict_Check(kwargs) || PyDict_GET_SIZE(kwargs) != 0
+        || !dtype_is(SLOT(root, node_at[N_DTYPE]), f_float64)) {
+        return Miss;
+    }
+    PyObject *reduced = PyTuple_GET_ITEM(args, 0);
+    if (Py_TYPE(reduced) != Node) {
+        return Miss;
+    }
+    PyObject *shape = SLOT(reduced, node_at[N_SHAPE]);
+    if (PyTuple_GET_SIZE(shape) == 0 || inner_of(finder, reduced, shape) == NULL || !has_elements(shape, finder->fewest)) {
+        return Miss;
+    }
+    PyObject *inner = read_term(finder, reduced, shape, operands, 1);
+    if (inner == NULL || inner == Miss) {
+        return inner;
+    }
+    PyObject *one = PyTuple_Pack(1, inner);
+    Py_DECREF(inner);
+    PyObject *term = one ? new_term(name, one, root) : NULL;
+    return term ? new_expression(root, term, operands, name, shape, Py_None) : NULL;
+}
+
+/* The most operands a write is read with on the C stack; one of more has them in memory of its own. */
+#define MOST_WRITTEN 16
+
+/* `_Finder._store`. */
+static PyObject *
+read_store(Finder *finder, PyObject *root, PyObject *operands)
+{
+    PyObject *write = SLOT(root, node_at[N_OPERATION]), *args = SLOT(root, node_at[N_ARGS]);
+    Py_ssize_t given = PyTuple_GET_SIZE(args);
+    PyObject *old = given ? PyTuple_GET_ITEM(args, 0) : NULL;
+    if (old == NULL || Py_TYPE(old) != Node || !dtype_is(SLOT(old, node_at[N_DTYPE]), f_float64)
+        || !shape_known(SLOT(old, node_at[N_SHAPE]))) {
+        return Miss;
+    }
+    PyObject *steps = SLOT(write, write_at[W_STEPS]), *perform = SLOT(write, write_at[W_PERFORM]);
+    Py_ssize_t views = PyTuple_GET_SIZE(steps);
+    if (!has_elements(SLOT(old, node_at[N_SHAPE]), finder->fewest)) {
+        return Miss; /* The part is no larger than the array. */
+    }
+    PyObject *result = Miss, *part = NULL, *target = NULL, *term = NULL;
+    if (Py_TYPE(perform) == Assign) {
+        PyObject *index = SLOT(perform, assign_at[A_INDEX]);
+        PyObject *basic = PyObject_CallOneArg(f_is_basic_index, index);
+        int is_basic = basic ? PyObject_IsTrue(basic) : -1;
+        Py_XDECREF(basic);
+        if (is_basic <= 0) {
+            return is_basic < 0 ? NULL : Miss;
+        }
+        PyObject *whole = views ? SLOT(PyTuple_GET_ITEM(steps, views - 1), step_at[S_SHAPE]) : SLOT(old, node_at[N_SHAPE]);
+        part = basic_shape(whole, index);
+        if (part == NULL || part == Miss) {
+            return part;
+        }
+        PyObject *stored = given >= 2 ? PyTuple_GET_ITEM(args, 1) : NULL;
+        if (PyTuple_GET_SIZE(part) == 0 || stored == NULL || Py_TYPE(stored) != Node || inner_of(finder, stored, part) == NULL) {
+            goto done;
+        }
+        term = read_term(finder, stored, part, operands, 1);
+        if (term == NULL) {
+            goto fail;
+        }
+        if (term == Miss) {
+            term = NULL;
+            goto done;
+        }
+        PyObject *tail = PyTuple_Pack(1, index);
+        PyObject *kwargs = tail ? PyDict_New() : NULL;
+        PyObject *step = kwargs ? new_step(getitem, s_getitem, tail, kwargs, part, f_float64, SLOT(root, node_at[N_ORIGIN]), 0) : NULL;
+        PyObject *all = step ? steps_with(steps, step) : NULL;
+        target = all ? new_viewof(old, all) : NULL;
+        Py_XDECREF(tail);
+        Py_XDECREF(kwargs);
+        Py_XDECREF(step);
+        Py_XDECREF(all);
+        if (target == NULL) {
+            goto fail;
+        }
+        result = new_expression(root, term, operands, f_store, part, target);
+        term = NULL; /* Stolen. */
+        goto done;
+    }
+    if (views == 0) {
+        return Miss;
+    }
+    PyObject *last = PyTuple_GET_ITEM(steps, views - 1);
+    part = Py_NewRef(SLOT(last, step_at[S_SHAPE]));
+    if (PyTuple_GET_SIZE(part) == 0 || !shape_known(part) || !dtype_is(SLOT(last, step_at[S_DTYPE]), f_float64)) {
+        goto done;
+    }
+    target = new_viewof(old, steps);
+    if (target == NULL) {
+        goto fail;
+    }
+    PyObject *name = NULL, *kept[MOST_WRITTEN], **written = kept;
+    Py_ssize_t count;
+    if (given > MOST_WRITTEN) {
+        written = PyMem_Malloc((size_t)given * sizeof(PyObject *));
+        if (written == NULL) {
+            PyErr_NoMemory();
+            goto fail;
+        }
+    }
+    if (Py_TYPE(perform) == Into) {
+        /* A ufunc with `out=x[index]` stores the operation on its own operands. */
+        PyObject *function = SLOT(perform, into_function_at);
+        name = PyDict_GetItemWithError(f_arithmetic, function);
+        if (name == NULL && !PyErr_Occurred()) {
+            name = PyDict_GetItemWithError(f_unary, function);
+        }
+        count = given - 1;
+        for (Py_ssize_t place = 0; place < count; place++) {
+            written[place] = PyTuple_GET_ITEM(args, place + 1);
+        }
+    } else {
+        /* `x[index] += e` stores the operation, which reads what the part held. */
+        PyObject *ufunc = PyDict_GetItemWithError(f_in_place, SLOT(root, node_at[N_NAME]));
+        name = ufunc ? PyDict_GetItemWithError(f_arithmetic, ufunc) : NULL;
+        count = given;
+        written[0] = target;
+        for (Py_ssize_t place = 1; place < count; place++) {
+            written[place] = PyTuple_GET_ITEM(args, place);
+        }
+    }
+    if (name != NULL) {
+        term = read_operation(finder, root, name, written, count, part, operands);
+    }
+    if (written != kept) {
+        PyMem_Free(written);
+    }
+    if (name == NULL || term == NULL) {
+        if (PyErr_Occurred()) {
+            term = NULL;
+            goto fail;
+        }
+        goto done;
+    }
+    if (term == Miss) {
+        term = NULL;
+        goto done;
+    }
+    result = new_expression(root, term, operands, f_store, part, target);
+    term = NULL; /* Stolen. */
+done:
+    Py_XDECREF(part);
+    Py_XDECREF(target);
+    Py_XDECREF(term);
+    return result;
+fail:
+    Py_XDECREF(part);
+    Py_XDECREF(target);
+    Py_XDECREF(term);
+    return NULL;
+}
+
+/* `_Finder.expression`: an `Expression`, `Miss` for None, or NULL with an error set. */
+static PyObject *
+read_expression(Finder *finder, PyObject *root)
+{
+    PyObject *shape = SLOT(root, node_at[N_SHAPE]), *kind = SLOT(root, node_at[N_KIND]);
+    if (!shape_known(shape)) {
+        return Miss;
+    }
+    PyObject *operands = PyList_New(0);
+    if (operands == NULL) {
+        return NULL;
+    }
+    PyObject *result = Miss;
+    PyObject *made = SLOT(root, node_at[N_OPERATION]);
+    if (same_text(kind, reduction_kind)) {
+        result = read_reduction(finder, root, operands);
+    } else if (same_text(kind, write_kind) && Py_TYPE(made) == Write
+               && (PyTuple_GET_SIZE(SLOT(made, write_at[W_STEPS])) != 0 || Py_TYPE(SLOT(made, write_at[W_PERFORM])) == Assign)) {
+        result = read_store(finder, root, operands);
+    } else if (PyTuple_GET_SIZE(shape) != 0 && dtype_is(SLOT(root, node_at[N_DTYPE]), f_float64)
+               && has_elements(shape, finder->fewest)) {
+        PyObject *term = read_term(finder, root, shape, operands, 0);
+        result = term == NULL || term == Miss ? term : new_expression(root, term, operands, f_array, shape, Py_None);
+    }
+    Py_DECREF(operands);
+    return result;
+}
+
+/* `fuse.count_operations(part)`. */
+static Py_ssize_t
+count_terms(PyObject *part)
+{
+    if (Py_TYPE(part) != FTerm) {
+        return 0;
+    }
+    PyObject *operands = SLOT(part, term_at[T_OPERANDS]);
+    Py_ssize_t count = 1;
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(operands); place++) {
+        count += count_terms(PyTuple_GET_ITEM(operands, place));
+    }
+    return count;
+}
+
+/* `find(todo, fewest, alone)`: `fuse.find`. Returns (the expressions, the numbers of the nodes inside them). */
+static PyObject *
+module_find(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 3 || !PyList_CheckExact(args[0]) || FExpression == NULL) {
+        PyErr_SetString(PyExc_TypeError, "find(todo, fewest, alone) takes a list of nodes, after find_setup()");
+        return NULL;
+    }
+    PyObject *todo = args[0];
+    Py_ssize_t nodes = PyList_GET_SIZE(todo);
+    Finder finder = {NULL, 0, PyLong_AsSsize_t(args[1]), NULL, 0, 0, 0};
+    int alone = PyObject_IsTrue(args[2]);
+    if (alone < 0 || (finder.fewest == -1 && PyErr_Occurred())) {
+        return NULL;
+    }
+    size_t size = 16;
+    while (size < (size_t)nodes * 2) {
+        size *= 2;
+    }
+    finder.table = PyMem_Calloc(size, sizeof(Taken));
+    if (finder.table == NULL) {
+        return PyErr_NoMemory();
+    }
+    finder.mask = size - 1;
+    PyObject *found = NULL, *inside = NULL, *result = NULL;
+    for (Py_ssize_t place = 0; place < nodes; place++) {
+        PyObject *node = PyList_GET_ITEM(todo, place);
+        if (Py_TYPE(node) != Node) {
+            PyErr_SetString(PyExc_TypeError, "find() takes nodes");
+            goto done;
+        }
+        taken_place(&finder, node)->node = node;
+    }
+    /* `fuse.count_uses`. */
+    for (Py_ssize_t place = 0; place < nodes; place++) {
+        PyObject *node = PyList_GET_ITEM(todo, place);
+        PyObject *read = SLOT(node, node_at[N_ARGS]), *made = SLOT(node, node_at[N_OPERATION]);
+        if (!PyTuple_CheckExact(read)) {
+            continue;
+        }
+        Py_ssize_t first = 0;
+        if (Py_TYPE(made) == FWholeCall && SLOT(made, wholecall_at[WC_READS_OLD]) != Py_True && PyTuple_GET_SIZE(read) > 0) {
+            Taken *old = taken_of(&finder, PyTuple_GET_ITEM(read, 0));
+            if (old != NULL) {
+                old->unread++;
+            }
+            first = 1;
+        }
+        for (Py_ssize_t each = first; each < PyTuple_GET_SIZE(read); each++) {
+            PyObject *arg = PyTuple_GET_ITEM(read, each);
+            Taken *taken = Py_TYPE(arg) == Node ? taken_of(&finder, arg) : NULL;
+            if (taken != NULL) {
+                taken->uses++;
+            }
+        }
+    }
+    /* `fuse.held_among`: a reference that the computation's nodes and the list do not account for. Nothing here
+     * holds one of its own. */
+    for (size_t place = 0; place < size; place++) {
+        Taken *taken = &finder.table[place];
+        if (taken->node != NULL) {
+            taken->held = Py_REFCNT(taken->node) - 1 > (Py_ssize_t)taken->uses + taken->unread;
+        }
+    }
+    found = PyList_New(0);
+    if (found == NULL) {
+        goto done;
+    }
+    for (Py_ssize_t place = 0; place < nodes; place++) {
+        PyObject *node = PyList_GET_ITEM(todo, place);
+        if (taken_of(&finder, node)->inside) {
+            continue;
+        }
+        Py_ssize_t mark = finder.journal_count;
+        PyObject *expression = read_expression(&finder, node);
+        if (expression == NULL) {
+            goto done;
+        }
+        int kept = 0;
+        if (expression != Miss) {
+            kept = alone || count_terms(SLOT(expression, expression_at[E_TERM])) > 1
+                || same_text(SLOT(expression, expression_at[E_RESULT]), f_store);
+            if (kept && PyList_Append(found, expression) < 0) {
+                Py_DECREF(expression);
+                goto done;
+            }
+            Py_DECREF(expression);
+        }
+        if (!kept) {
+            give_up(&finder, mark);
+        }
+    }
+    inside = PySet_New(NULL);
+    for (Py_ssize_t place = 0; inside != NULL && place < finder.journal_count; place++) {
+        if (PySet_Add(inside, SLOT(finder.journal[place]->node, node_at[N_NUMBER])) < 0) {
+            Py_CLEAR(inside);
+        }
+    }
+    if (inside != NULL) {
+        result = PyTuple_Pack(2, found, inside);
+    }
+done:
+    PyMem_Free(finder.table);
+    PyMem_Free(finder.journal);
+    Py_XDECREF(found);
+    Py_XDECREF(inside);
+    return result;
+}
+
+static int offsets(PyTypeObject *type, const char *const *names, Py_ssize_t count, Py_ssize_t *at);
+static int take(PyObject *given, const char *name, PyTypeObject *type, PyObject **into);
+
+/* `find_setup(**given)`: be told the classes, tables and names of fuse.py. */
+static PyObject *
+module_find_setup(PyObject *module, PyObject *args, PyObject *given)
+{
+    if (given == NULL || PyTuple_GET_SIZE(args) != 0 || Node == NULL) {
+        PyErr_SetString(PyExc_TypeError, "find_setup() takes keywords only, after setup()");
+        return NULL;
+    }
+    PyObject *expression = NULL, *term = NULL, *leaf = NULL, *viewof = NULL, *wholecall = NULL;
+    if (take(given, "Expression", &PyType_Type, &expression) || take(given, "Term", &PyType_Type, &term)
+        || take(given, "Leaf", &PyType_Type, &leaf) || take(given, "ViewOf", &PyType_Type, &viewof)
+        || take(given, "WholeCall", &PyType_Type, &wholecall)
+        || offsets((PyTypeObject *)expression, EXPRESSION_FIELDS, E_FIELDS, expression_at)
+        || offsets((PyTypeObject *)term, TERM_FIELDS, T_FIELDS, term_at)
+        || offsets((PyTypeObject *)leaf, LEAF_FIELD_NAMES, LEAF_FIELDS, leaf_at)
+        || offsets((PyTypeObject *)viewof, VIEWOF_FIELDS, V_FIELDS, viewof_at)
+        || offsets((PyTypeObject *)wholecall, WHOLECALL_FIELDS, WC_FIELDS, wholecall_at)
+        || take(given, "operations", &PyDict_Type, &f_operations) || take(given, "in_place", &PyDict_Type, &f_in_place)
+        || take(given, "arithmetic", &PyDict_Type, &f_arithmetic) || take(given, "unary", &PyDict_Type, &f_unary)
+        || take(given, "masks", &PyFrozenSet_Type, &f_masks) || take(given, "reductions", &PyFrozenSet_Type, &f_reductions)
+        || take(given, "square_exponents", &PyTuple_Type, &f_square_exponents)
+        || take(given, "square", &PyUnicode_Type, &f_square) || take(given, "where", &PyUnicode_Type, &f_where)
+        || take(given, "vector", &PyUnicode_Type, &f_vector) || take(given, "scalar", &PyUnicode_Type, &f_scalar)
+        || take(given, "array", &PyUnicode_Type, &f_array) || take(given, "store", &PyUnicode_Type, &f_store)
+        || take(given, "mul", &PyUnicode_Type, &f_mul) || take(given, "float64", NULL, &f_float64)
+        || take(given, "boolean", NULL, &f_boolean) || take(given, "power", NULL, &f_power) || take(given, "pow", NULL, &f_pow)
+        || take(given, "is_basic_index", NULL, &f_is_basic_index)) {
+        Py_XDECREF(expression);
+        Py_XDECREF(term);
+        Py_XDECREF(leaf);
+        Py_XDECREF(viewof);
+        Py_XDECREF(wholecall);
+        return NULL;
+    }
+    PyObject *exact = PyDict_GetItemString(given, "exact_integer"), *depth = PyDict_GetItemString(given, "most_depth");
+    if (exact == NULL || depth == NULL) {
+        PyErr_SetString(PyExc_KeyError, "find_setup() was not given 'exact_integer' and 'most_depth'");
+        return NULL;
+    }
+    f_exact_integer = PyLong_AsLongLong(exact);
+    f_most_depth = PyLong_AsSsize_t(depth);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_XSETREF(FTerm, (PyTypeObject *)term);
+    Py_XSETREF(FLeaf, (PyTypeObject *)leaf);
+    Py_XSETREF(FViewOf, (PyTypeObject *)viewof);
+    Py_XSETREF(FWholeCall, (PyTypeObject *)wholecall);
+    Py_XSETREF(FExpression, (PyTypeObject *)expression);
+    Py_RETURN_NONE;
+}
+
 /* What stands as `tp_getattro` of `namespace.LazyNumPy` while the core is in use: `np.tanh` on the stand-in. A name
  * that `LazyNumPy.__getattr__` answered before, while the module still has under that name what it had then, is
  * answered here with the same object; that is the whole of what that method does for such a name, and the
@@ -4732,6 +5637,10 @@ module_track(PyObject *module, PyObject *lazy)
 }
 
 static PyMethodDef methods[] = {
+    {"find", (PyCFunction)(void (*)(void))module_find, METH_FASTCALL,
+     "fuse.find, in C: (the expressions of a computation's nodes, the numbers of the nodes inside them)."},
+    {"find_setup", (PyCFunction)(void (*)(void))module_find_setup, METH_VARARGS | METH_KEYWORDS,
+     "Be told the classes, tables and names of fuse.py, for find()."},
     {"track", module_track, METH_O, "Make a lazy array that has just been given its cell known to the garbage collector."},
     {"at_once_below", module_at_once_below, METH_O,
      "Have a call that gives fewer elements than this, on operands that have their values, made at once. Returns the limit it replaces."},
@@ -4807,10 +5716,11 @@ PyInit__core(void)
     no_keywords = PyDict_New();
     empty_string = PyUnicode_InternFromString("");
     s_transpose = PyUnicode_InternFromString("transpose");
+    s_isnative = PyUnicode_InternFromString("isnative");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
-        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !no_keywords || !empty_string || !s_transpose) {
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !no_keywords || !empty_string || !s_transpose || !s_isnative) {
         Py_DECREF(module);
         return NULL;
     }
