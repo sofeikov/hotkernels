@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 32
+#define CORE_VERSION 33
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -3602,9 +3602,10 @@ lazy_for(PyObject *node)
     return new_lazy(node);
 }
 
-/* A ufunc called now on small operands that have their values (`small_limit`): NumPy's own call, with no rule asked
- * and nothing made but the lazy array that holds the result. Taken when every operand is a lazy array with a value of
- * fewer than `small_limit` elements or a Python number, and one at least is an array. `operator` says that the
+/* A ufunc called now on operands that have their values (`small_limit`): NumPy's own call, with no rule asked
+ * and nothing made but the lazy array that holds the result. Taken when every operand is a lazy array with a value
+ * or a Python number, one at least is an array, and either all have fewer than `small_limit` elements or the call is
+ * one no kernel could make. `operator` says that the
  * callable is what an operator's road calls, which is a ufunc or `operator.pow`. Returns a new lazy array,
  * `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's at that line. */
 static PyObject *
@@ -3616,6 +3617,7 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
     PyObject *values[3], *held[3] = {NULL, NULL, NULL};
     PyObject *result = Miss;
     int strict = 0, arrays = 0;
+    int large = 0, other_type = 0; /* Whether an operand has `small_limit` elements or more; is of another type. */
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *operand = operands[place];
         if (Py_TYPE(operand) == Lazy) {
@@ -3629,9 +3631,11 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
             }
             held[place] = value; /* Kept for the length of the call, whatever the call does to the lazy array. */
             Py_ssize_t size = count_of(value);
-            if (size < 0 || size >= small_limit) {
+            if (size < 0) {
                 goto done;
             }
+            large = large || size >= small_limit;
+            other_type = other_type || (Py_TYPE(value) == Ndarray && (PyObject *)PyArray_DESCR((PyArrayObject *)value) != fusible_dtype);
             values[place] = value;
             arrays++;
         } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
@@ -3643,6 +3647,21 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
     }
     if (arrays == 0) {
         goto done;
+    }
+    if (large) {
+        /* A large operand. The call is still made now if no kernel could make it, as `ready_now` has it for a
+         * node: a comparison, a call into a mathematics library, anything on another element type. One a kernel
+         * can make waits, so that what is written on top of it can be computed with it. */
+        if (fusible_calls == NULL) {
+            goto done;
+        }
+        if (!other_type) {
+            int waits = PySet_Contains(fusible_calls, ufunc);
+            if (waits != 0) {
+                PyErr_Clear(); /* A callable that cannot be looked up is none of them, but is left to its node. */
+                goto done;
+            }
+        }
     }
     PyObject *value = PyObject_Vectorcall(ufunc, values, (size_t)count, NULL);
     if (value == NULL) {
@@ -4419,12 +4438,105 @@ with_own_slot(size_t at, void *quick, void *before, PyObject *left, PyObject *ri
 
 static const binaryfunc QUICK_BINARY_SLOTS[];
 
+/* ---- An operator on numbers. `x.max() * i / n` in a loop is arithmetic on NumPy scalars: the eager program has
+ * `np.float64` objects there, whose own operators make the arithmetic in 40 to 80 ns. A lazy array that holds
+ * such a scalar gave it to the operator's ufunc, which is a call of 600 ns for one element. So where every
+ * operand is a number, the scalar's own operator is called on the values: what the eager program calls, with its
+ * result, its type and its warning's words. ---- */
+
+/* The interpreter's function for each binary operator, by the same numbers as `QUICK_BINARY`. */
+static const binaryfunc NUMBER_BINARY[Q_BINARY] = {PyNumber_Add, PyNumber_Subtract, PyNumber_Multiply, PyNumber_TrueDivide,
+                                                   PyNumber_FloorDivide, PyNumber_Remainder, PyNumber_MatrixMultiply,
+                                                   PyNumber_And, PyNumber_Or, PyNumber_Xor};
+/* And for each unary operator, by the numbers of `QUICK_UNARY`. */
+static const unaryfunc NUMBER_UNARY[Q_UNARY] = {PyNumber_Negative, PyNumber_Positive, PyNumber_Absolute, PyNumber_Invert};
+
+/* The values of an operator's operands when every one is a number: a lazy array whose value is a NumPy scalar,
+ * or a number written in the program, with one at least of the first kind. Returns 1 with `values`
+ * filled, borrowed from `held`, whose references the caller drops; 0 when the operands are anything else, with
+ * nothing to drop; -1 with an error. `*strict` is set when one of the arrays is strict. */
+static int
+numbers_of(PyObject *const *operands, Py_ssize_t count, PyObject **values, PyObject **held, int *strict)
+{
+    int lazies = 0;
+    for (Py_ssize_t place = 0; place < count; place++) {
+        held[place] = NULL;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *operand = operands[place];
+        if (Py_TYPE(operand) == Lazy) {
+            /* Looked at before it is asked for: a scalar the array holds alone, or the value of its cell's node. */
+            PyObject *peek = SLOT(operand, lazy_at[L_HELD]);
+            if (peek != NULL && Py_TYPE(peek) == Cell) {
+                PyObject *node = SLOT(peek, cell_at[C_NODE]);
+                peek = node != NULL ? SLOT(node, node_at[N_VALUE]) : NULL;
+            }
+            if (peek == NULL || !PyObject_TypeCheck(peek, Generic)) {
+                goto other;
+            }
+            PyObject *value = value_of(operand, strict);
+            if (value == NULL) {
+                for (Py_ssize_t each = 0; each < place; each++) {
+                    Py_CLEAR(held[each]);
+                }
+                return -1;
+            }
+            if (value == Miss) {
+                goto other;
+            }
+            if (!PyObject_TypeCheck(value, Generic)) {
+                Py_DECREF(value);
+                goto other;
+            }
+            held[place] = value;
+            values[place] = value;
+            lazies++;
+        } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
+                   || PyComplex_CheckExact(operand)) {
+            values[place] = operand;
+        } else {
+            goto other;
+        }
+    }
+    if (lazies) {
+        return 1;
+    }
+other:
+    for (Py_ssize_t place = 0; place < count; place++) {
+        Py_CLEAR(held[place]);
+    }
+    return 0;
+}
+
+/* What an operator on numbers gives, as the layer hands it on: a lazy array that holds the scalar NumPy answered
+ * with, or whatever else it answered. Steals `value`, which may be NULL with the error set. */
+static PyObject *
+number_made(PyObject *value, int strict)
+{
+    if (value == NULL || !is_arraylike(value)) {
+        return value;
+    }
+    made_at_once++;
+    return lazy_of_value(value, s_array, at_once_kind, strict ? Py_True : Py_False);
+}
+
 static PyObject *
 quick_binary(int which, PyObject *left, PyObject *right)
 {
     if (enabled && small_limit != 0 && binary_calls[which] != NULL) {
-        PyObject *pair[2] = {left, right};
+        PyObject *pair[2] = {left, right}, *values[2], *held[2];
+        int strict = 0;
         forget_declined();
+        int numbers = numbers_of(pair, 2, values, held, &strict);
+        if (numbers < 0) {
+            return NULL;
+        }
+        if (numbers) {
+            PyObject *value = NUMBER_BINARY[which](values[0], values[1]);
+            Py_XDECREF(held[0]);
+            Py_XDECREF(held[1]);
+            return number_made(value, strict);
+        }
         PyObject *result = ufunc_now(binary_calls[which], pair, 2, 1);
         if (result != Miss) {
             return result;
@@ -4437,7 +4549,18 @@ static PyObject *
 quick_unary(int which, PyObject *operand)
 {
     if (enabled && small_limit != 0 && unary_calls[which] != NULL) {
+        PyObject *value, *held;
+        int strict = 0;
         forget_declined();
+        int numbers = numbers_of(&operand, 1, &value, &held, &strict);
+        if (numbers < 0) {
+            return NULL;
+        }
+        if (numbers) {
+            PyObject *made = NUMBER_UNARY[which](value);
+            Py_XDECREF(held);
+            return number_made(made, strict);
+        }
         PyObject *result = ufunc_now(unary_calls[which], &operand, 1, 1);
         if (result != Miss) {
             return result;
@@ -4497,8 +4620,19 @@ static PyObject *
 quick_power(PyObject *base, PyObject *exponent, PyObject *modulus)
 {
     if (enabled && small_limit != 0 && modulus == Py_None && power_call != NULL) {
-        PyObject *pair[2] = {base, exponent};
+        PyObject *pair[2] = {base, exponent}, *values[2], *held[2];
+        int strict = 0;
         forget_declined();
+        int numbers = numbers_of(pair, 2, values, held, &strict);
+        if (numbers < 0) {
+            return NULL;
+        }
+        if (numbers) {
+            PyObject *value = PyNumber_Power(values[0], values[1], Py_None);
+            Py_XDECREF(held[0]);
+            Py_XDECREF(held[1]);
+            return number_made(value, strict);
+        }
         PyObject *result = ufunc_now(power_call, pair, 2, 1);
         if (result != Miss) {
             return result;
@@ -4512,8 +4646,19 @@ static PyObject *
 quick_compare(PyObject *left, PyObject *right, int operation)
 {
     if (enabled && small_limit != 0 && operation >= 0 && operation < Q_COMPARISONS && comparison_calls[operation] != NULL) {
-        PyObject *pair[2] = {left, right};
+        PyObject *pair[2] = {left, right}, *values[2], *held[2];
+        int strict = 0;
         forget_declined();
+        int numbers = numbers_of(pair, 2, values, held, &strict);
+        if (numbers < 0) {
+            return NULL;
+        }
+        if (numbers) {
+            PyObject *value = PyObject_RichCompare(values[0], values[1], operation);
+            Py_XDECREF(held[0]);
+            Py_XDECREF(held[1]);
+            return number_made(value, strict);
+        }
         PyObject *result = ufunc_now(comparison_calls[operation], pair, 2, 1);
         if (result != Miss) {
             return result;
