@@ -226,7 +226,7 @@ For more than a dozen operations there is a recording mode and a page. `hotkerne
 
 ## What the graph is for
 
-None of this is part of the first build, and no gain is claimed here. It is why the first build is shaped the way it is. The third way of the second point has a first build in the prototype, with fourteen kernels and its gain measured on twelve programs: [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md).
+None of this is part of the first build, and no gain is claimed here. It is why the first build is shaped the way it is. The third way of the second point is built in the prototype, with seventy-eight kernels and its gain measured on twenty-six programs: [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md).
 
 - **A fusible group can be read off the graph:** connected element-by-element nodes of one output shape, perhaps ending in a reduction. The eight operations of GELU are one; in the regression, `(X @ w - y) ** 2` and its `mean` are one after the matrix product. [Figure 1](#one-call-at-a-time) counts what computing such a group in one pass would save.
 - **A group can be computed three ways, and the graph does not care which:** node by node with NumPy, as now; with NumPy's own calls a cache-sized block at a time, which removes the passes over main memory and keeps NumPy's bits; or with one kernel for the whole expression.
@@ -238,7 +238,7 @@ None of this is part of the first build, and no gain is claimed here. It is why 
 The design lists its open questions, and the prototype picks one answer for each so that it is defined. Among them:
 
 - **Should an `ndarray` be copied when a pending expression first reads it?** Holding it by reference costs nothing and leaves the one rule above to remember; copying removes the rule at the price of a copy per use.
-- **What should a deferred write cost?** Today it is computed as a copy with the write made into it. Writing into the old contents when nothing else reads them is left to whatever computes a graph faster.
+- **What should a deferred write cost?** It is defined as a copy with the write made into it, and the prototype computes it into the array's own memory whenever nothing still reads what the array held, which reference counts say. Whether a design can promise that, and not only do it, is open.
 - **What carries a length that is not known?** The prototype uses an integer larger than any array can be, so that NumPy's own shape arithmetic works on it unchanged. A type of its own is the sound form.
 - **Should the C core ship in the package**, built with the binding's C and in the wheels, with the Python as its definition and fallback?
 

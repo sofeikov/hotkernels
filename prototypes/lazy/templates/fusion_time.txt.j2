@@ -19,18 +19,21 @@ The lazy and the fused run under hotkernels.install() as well, against the same 
 {{ table(rows, "installed") }}
 {% endif %}
 
-What the graphs were
+What the graphs were, lazily; and what the fused run did
 
-{{ "%-17s %8s %7s %8s %11s  %6s %6s %7s %6s %6s %6s %6s  %9s %9s"|format("program", "deferred", "graphs", "largest", "largest node", "expr.", "tiled", "kernel", "fused", "given", "whole", "part", "lazy MB", "fused MB") }}
-{{ "%-17s %8s %7s %8s %11s  %6s %6s %7s %6s %6s %6s %6s  %9s %9s"|format("", "ops", "", "graph", "elements", "", "", "calls", "nodes", "up", "writes", "writes", "written", "written") }}
+{{ "%-18s %8s %7s %8s %11s  %8s %7s %6s %6s %7s %6s %6s %7s %7s  %9s %9s"|format("program", "deferred", "graphs", "largest", "largest node", "deferred", "at once", "expr.", "tiled", "kernel", "fused", "given", "writes", "writes", "lazy MB", "fused MB") }}
+{{ "%-18s %8s %7s %8s %11s  %8s %7s %6s %6s %7s %6s %6s %7s %7s  %9s %9s"|format("", "ops", "", "graph", "elements", "fused", "fused", "", "", "calls", "nodes", "up", "in place", "copied", "written", "written") }}
 {% for row in rows %}
-{{ "%-17s %8d %7d %8d %12d  %6d %6d %7d %6d %6d %6d %6d  %9.1f %9.1f"|format(row.name, row.lazy.deferred, row.lazy.graphs, row.lazy.largest_graph, row.lazy.largest_node, row.stats.expressions, row.stats.tiled, row.stats.calls.values()|sum, row.stats.fused_nodes, row.stats.declined + row.stats.flagged, row.stats.whole_writes, row.stats.part_writes, row.lazy.written / bytes_per_mb, row.fused.written / bytes_per_mb) }}
+{{ "%-18s %8d %7d %8d %12d  %8d %7d %6d %6d %7d %6d %6d %7d %7d  %9.1f %9.1f"|format(row.name, row.lazy.deferred, row.lazy.graphs, row.lazy.largest_graph, row.lazy.largest_node, row.fused.deferred, row.fused.at_once + row.fused.written_at_once, row.stats.expressions, row.stats.tiled, row.stats.calls.values()|sum, row.stats.fused_nodes, row.stats.declined + row.stats.flagged, row.fused.in_place, row.fused.copied, row.lazy.written / bytes_per_mb, row.fused.written / bytes_per_mb) }}
 {% endfor %}
 
-`expr.`: expressions of two operations or more found in the graphs. `tiled`: those a kernel was planned for.
-`fused nodes`: nodes computed inside a kernel call instead of by a call of their own. `given up`: kernel calls not
-made, or dropped, because of the arrays' layout or a floating-point exception NumPy reports. `whole writes`,
-`part writes`: writes computed by one NumPy call instead of a copy and a call. `MB written`: results the calls wrote.
+The first four columns are of the lazy run, where every operation the layer defers is a node. `deferred fused`, `at once
+fused`: in the fused run, the operations still written as nodes, and the calls and writes made as the program wrote them
+because they were small. `expr.`: expressions of two operations or more found in the fused run's graphs. `tiled`: those
+a program of kernel calls was planned for. `fused nodes`: nodes computed inside a program instead of by a call of their
+own. `given up`: programs not run, or dropped, because of the arrays' layout or a floating-point exception NumPy reports.
+`writes in place`, `copied`: deferred writes of the fused run made into the array's own memory, and into a copy of it.
+`MB written`: the new arrays the calls wrote; a write into an array that exists is not counted.
 
 Kernel calls over the corpus
 

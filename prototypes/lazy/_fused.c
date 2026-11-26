@@ -8,10 +8,16 @@
  * decides nothing about what is fused: `fuse.py` does, and hands over a
  * kernel's place in the table with the operands in the kernel's order.
  *
- * Two entry points:
+ * Three entry points:
  *
- *   elementwise(kernel, operands, out) -> flags, or DECLINED
- *   reduce(kernel, operands)           -> (value, flags), or DECLINED
+ *   program(steps, arrays, operands, out, block) -> flags, or DECLINED
+ *   elementwise(kernel, operands, out)           -> flags, or DECLINED
+ *   reduce(kernel, operands)                     -> (value, flags), or DECLINED
+ *
+ * `program` is what `fuse.py` calls for an expression: several kernels, each
+ * a step, all made on one block of elements before any is made on the next,
+ * so that what one step gives another is a buffer that stays in the cache.
+ * `elementwise` is one kernel by itself on whole runs.
  *
  * An operand is a float64 array, or a Python float for a number. `flags`
  * are the floating-point exceptions the kernel raised, as the FE_* bits of

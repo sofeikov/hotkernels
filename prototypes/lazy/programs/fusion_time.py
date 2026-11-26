@@ -26,7 +26,9 @@ under `hotkernels.install()`, the single-operation kernels.
 
 A second table says what the graphs were: how many, how large, how many
 expressions were found in them, how many nodes a kernel computed in place of
-a NumPy call, and how many bytes of results were written to memory each way.
+a NumPy call, how many calls and writes the fused run made at once instead
+of writing a node, how many deferred writes it made in place, and how many
+bytes of results were written to memory each way.
 
 Timings are only meaningful on a machine that is doing nothing else.
 """
@@ -44,7 +46,7 @@ import numpy
 import typer
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from prototypes.lazy import array, evaluate, fuse, get_lazy, graph
+from prototypes.lazy import array, evaluate, fuse, get_lazy, graph, rules
 from prototypes.lazy.graph import Node
 from prototypes.lazy.programs import corpus
 
@@ -90,8 +92,15 @@ class Shape:
     largest_graph: int = 0
     # The elements of the largest array a node gave.
     largest_node: int = 0
-    # Bytes of results written by the nodes' calls: arrays that own their memory.
+    # Bytes of new arrays the nodes' calls wrote: results that own their memory. A write into an array that
+    # exists is not counted: its node holds that array, whether it was written in place or copied first.
     written: int = 0
+    # Calls and writes made as the program wrote them, without a node (`array.at_once_below`).
+    at_once: int = 0
+    written_at_once: int = 0
+    # Deferred writes computed into the array's own memory, and into a copy of it.
+    in_place: int = 0
+    copied: int = 0
 
 
 @dataclass
@@ -234,17 +243,21 @@ def shape_of(program: corpus.Program, inputs: tuple, way: str) -> tuple[Shape, f
         value = node.value
         if isinstance(value, numpy.ndarray):
             shape.largest_node = max(shape.largest_node, value.size)
-            if value.flags.owndata:
+            if value.flags.owndata and node.kind != rules.WRITE:
                 shape.written += value.nbytes
 
     evaluate.CLOCK.reset()
     fuse.STATS.reset()
+    evaluate.WRITES.update(in_place=0, copied=0)
+    made, wrote = array.at_once_counts()
     before, evaluate.meter = graph.COUNTS.deferred, note
     try:
         values = _run(program, inputs, way)
     finally:
         evaluate.meter = None
     shape.deferred = graph.COUNTS.deferred - before
+    shape.at_once, shape.written_at_once = array.at_once_counts()[0] - made, array.at_once_counts()[1] - wrote
+    shape.in_place, shape.copied = evaluate.WRITES["in_place"], evaluate.WRITES["copied"]
     shape.graphs, shape.largest_graph = evaluate.CLOCK.computations, evaluate.CLOCK.largest
     stats = fuse.Stats(**vars(fuse.STATS))
     stats.calls = dict(stats.calls)

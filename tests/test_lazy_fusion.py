@@ -439,13 +439,15 @@ def test_a_kernel_written_from_its_shape_is_called_for_it_and_gives_numpys_bits(
 
 
 def test_the_kernels_in_the_repository_are_what_the_tool_writes(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
-    """Every written kernel's four files are the tool's, unchanged: a tuned one says so in its log, not in silence."""
+    """Every written kernel's spec and reference are the tool's, and so is its assembly until its log has a second attempt."""
     kept = make_kernel.KERNELS
     monkeypatch.setattr(make_kernel, "KERNELS", tmp_path)
     for shape in make_kernel.SHAPES:
         written = make_kernel.write(shape)
+        theirs = kept / written.name
+        tuned = "\n## 2." in (theirs / make_kernel.ARCH / "attempts.md").read_text()
         for path in sorted(written.rglob("*")):
-            if path.is_file() and path.name != "attempts.md":
+            if path.is_file() and path.name != "attempts.md" and not (tuned and path.name == "kernel.s"):
                 assert path.read_text() == (kept / path.relative_to(tmp_path)).read_text(), path.name
     assert make_kernel.name_of("sub(V0,mul(S0,V1))") == "fuse_sub_v_mul_s_v_f64"
     with pytest.raises(make_kernel.CannotWrite):

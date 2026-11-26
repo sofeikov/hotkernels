@@ -1,10 +1,13 @@
-"""Fusion by pattern: finding expressions in the pending graph, and the kernels that compute one in a single pass.
+"""Fusion by pattern: finding expressions in the pending graph, and the kernel calls that compute one in a single pass.
 
 An expression is a tree of element-by-element operations on float64 arrays
 whose intermediate results nobody else reads: `a * b + c` is two
 operations and one intermediate. NumPy computes it in two passes over
 memory and allocates the intermediate; a kernel written for the shape of
-that tree computes it in one pass and allocates nothing but the result.
+that tree computes it in one pass and allocates nothing but the result. A
+longer expression is covered with several shapes, and their kernels are
+called block by block as one program, so that what one gives the next
+stays in the cache and the whole expression is still one pass over memory.
 
 This module has the three parts of that, each usable alone:
 
@@ -15,8 +18,12 @@ This module has the three parts of that, each usable alone:
   shape have one name.
 - `tile` covers an expression with the shapes of a library, each tile one
   kernel call, by the fewest calls, and `plan` does that for every
-  expression of a computation: it is what `enable` gives `evaluate` as its
-  planner.
+  expression of a computation and joins the tiles that feed one another
+  into programs: it is what `enable` gives `evaluate` as its planner.
+
+`enable` also has small calls made as the graph is built instead of written
+as nodes (`array.at_once_below`): below `MIN_ELEMENTS` nothing is fused, so
+a node would cost its writing and its computing for nothing.
 
 What a fused kernel may contain is decided by one rule: every operation in
 it is a single IEEE operation that NumPy makes with the same instruction,
@@ -1272,7 +1279,7 @@ def load_library(module: Any) -> dict[str, Kernel]:
 # The fewest elements an expression has for its operations to be fused. Below it the calls are left to NumPy:
 # reading an expression off the graph costs about two microseconds a node, and a pass of NumPy's over fewer
 # elements than this costs no more than that, so there is nothing to win back.
-MIN_ELEMENTS = 16_384
+MIN_ELEMENTS = 32_768
 # The elements of a block of a program (`_fused.program`): what the kernels of an expression pass from one to
 # the next is this long, so that it stays in the first-level cache whatever the arrays' size.
 BLOCK_ELEMENTS = 4096
