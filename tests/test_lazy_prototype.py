@@ -550,6 +550,27 @@ def test_arrays_from_a_random_generator_are_lazy():
     assert same(plain.permutation(5), rng.permutation(5).gather()) and rng.bit_generator is not None
 
 
+def test_arrays_from_numpys_index_objects_are_lazy():
+    """`np.mgrid[...]`, `np.ogrid[...]`, `np.r_[...]` and `np.c_[...]` through the stand-in give lazy arrays with NumPy's values."""
+    grid, expected = lazy.mgrid[0:4, 0:3], numpy.mgrid[0:4, 0:3]
+    assert type(grid) is LazyArray and same(expected, grid.gather())
+    rows, columns = lazy.mgrid[0:4, 0:3]
+    assert type(rows) is LazyArray and same(expected[0], rows.gather()) and same(expected[1], columns.gather())
+    open_rows, open_columns = lazy.ogrid[0:4, 0:3]
+    assert type(open_rows) is LazyArray and same(numpy.ogrid[0:4, 0:3][1], open_columns.gather())
+    data = numpy.random.default_rng(SEED).standard_normal(5)
+    x = lazy.asarray(data)
+    assert same(numpy.r_[1:4, 0.5, data], lazy.r_[1:4, 0.5, data].gather())
+    assert same(numpy.r_[data, data * 2], lazy.r_[x, x * 2].gather())
+    assert same(numpy.c_[data, data], lazy.c_[x, x].gather())
+    assert lazy.mgrid.sparse is numpy.mgrid.sparse
+    # What the grids are for: a grid indexed by a lazy mask is the layer's indexing, with NumPy's result.
+    keep = lazy.asarray(expected[0].ravel() > 1)
+    flat = lazy.mgrid[0:4, 0:3][0]
+    flat.shape = 12
+    assert same(expected[0].ravel()[expected[0].ravel() > 1], flat[keep].gather())
+
+
 def test_other_numpy_calls_are_made_at_once_and_stay_lazy():
     """A call outside the deferred set is NumPy's, on gathered operands, and its result is a computed lazy array."""
     data = numpy.random.default_rng(SEED).standard_normal(50)
