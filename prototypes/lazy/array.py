@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 21
+CORE_VERSION = 23
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -57,6 +57,11 @@ WRITING_UFUNC_METHOD = "at"
 # In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
 OUT_FUNCTIONS = frozenset({np.clip, np.round, np.around})
 # What a recording calls an element read from an array that has its values, where it is an input of a later graph.
+# Functions that give one new array or number, which never shares memory with an argument, whatever they are
+# given. With small calls made at once (`at_once_below`) the C core calls one of these on small arrays that have
+# their values without asking the rules: the result is an array of its own either way.
+FRESH_FUNCTIONS = frozenset({np.dot, np.matmul, np.sum, np.mean, np.max, np.min, np.prod, np.std, np.var, np.argmax,
+                             np.argmin, np.copy, np.cumsum, np.any, np.all, np.outer})
 ELEMENT_SOURCE = "x[index]"
 # The layout a write's copy of an array is given: the array's own, as far as NumPy can keep it. A write that
 # NumPy makes in place leaves the array laid out as it was, and a later sum over it adds in that order.
@@ -2047,7 +2052,8 @@ def _set_up(core: Any) -> None:
                matmul=np.matmul, matrix_product=rules.MATRIX_PRODUCT,
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
-               at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE)
+               at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE,
+               fresh_functions=FRESH_FUNCTIONS)
 
 
 def use_core(core: Any) -> None:
@@ -2100,7 +2106,7 @@ def use_core(core: Any) -> None:
     _core = core
 
 
-def at_once_below(limit: int) -> int:
+def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype | None = None) -> int:
     """Have small calls made as the program writes them, instead of written as nodes; or stop doing so.
 
     With a limit, a call that gives fewer elements than it is made at
@@ -2117,8 +2123,18 @@ def at_once_below(limit: int) -> int:
     the computation and come back to it. Only the C core does this; without
     it the limit is not kept.
 
+    With `fusible` given, a call of any size is made at once as well when
+    no kernel could make it: its callable is not one of `fusible`, or its
+    result is not of `dtype`. A comparison, a selection by a mask, a matrix
+    product, `np.exp`, anything complex or float32. Nothing written on top
+    of such a call could be computed together with it, so its node would
+    cost its writing, its planning and its turn in the computing loop, and
+    buy nothing. A call a kernel can make still waits, whatever its size.
+
     Args:
         limit: A count of elements, or 0 for no call made at once.
+        fusible: The callables a fused kernel can make, as a node has them; None for no such rule.
+        dtype: The element type the kernels make them on.
 
     Returns:
         The limit this one replaces; 0 without the C core.
@@ -2127,6 +2143,7 @@ def at_once_below(limit: int) -> int:
     if _core is None:
         return 0
     _at_once_limit = limit
+    _core.fusible(fusible if limit else None, dtype if limit else None)
     return _core.at_once_below(limit)
 
 

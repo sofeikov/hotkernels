@@ -2013,7 +2013,9 @@ def enable() -> bool:
         LIBRARY_VECTORS.update({kernel.index: len(kernel.vectors) for kernel in LIBRARY.values()})
         _BY_TOP.update(index(LIBRARY))
     evaluate.planner = plan
-    array.at_once_below(AT_ONCE_BELOW)
+    # What may wait for a kernel: the arithmetic a kernel makes, on float64. Everything else on arrays that have
+    # their values is made at once, whatever its size.
+    array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | {operator.pow, np.power}, FLOAT64)
     return True
 
 

@@ -34,7 +34,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 21
+#define CORE_VERSION 23
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -140,11 +140,18 @@ static int enabled = 0;
 static Py_ssize_t small_limit = 0;
 /* How many calls and writes were made at once that way, for the tools that measure a program. */
 static long long made_at_once = 0, written_at_once = 0;
+/* The callables a fused kernel can make, and the element type it makes them on: `array.at_once_below` is given
+ * both. A call of any size that is not one of these on that type is made at once when its operands have their
+ * values: nothing above it could be computed together with it, so its node would only cost. NULL for none given,
+ * where only small calls and views are made at once. */
+static PyObject *fusible_calls = NULL, *fusible_dtype = NULL;
 static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
 static PyObject *handled_apart;      /* `array.HANDLED_APART`: the functions `__array_function__` has a way of its own for */
 static PyObject *shaped_like;        /* `array.SHAPED_LIKE`: `np.zeros_like` and its kind */
+static PyObject *fresh_functions;    /* `array.FRESH_FUNCTIONS`: functions whose one result never shares memory with an argument */
 static PyObject *empty_string;       /* "", the kind of a node for an array that came from outside or was just made */
 static PyObject *s_array;            /* "array", what a node with a value is called */
+static PyObject *no_keywords;        /* The one empty dictionary the nodes made with a value have for their keywords */
 static PyObject *s_transpose;        /* "transpose", the method behind `x.T` */
 /* Returned by a quick road that does not apply: the caller then takes the Python road. Never seen from Python
  * except as the result of `try_defer`. */
@@ -388,27 +395,49 @@ has_value(PyObject *node)
  * NumPy makes such a call in less time than the layer needs to write its node, plan it and come back to it, and
  * there is nothing to fuse in it. A write is not asked about here; see `write_now`. */
 static int
-ready_now(PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *kind)
+ready_now(PyObject *operation, PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *dtype, PyObject *kind)
 {
     if (small_limit == 0 || kind == write_kind || !PyTuple_CheckExact(args) || !PyTuple_CheckExact(shape)) {
         return 0;
     }
     if (kind != view_kind) {
+        int small = 1;
         Py_ssize_t size = 1;
-        for (Py_ssize_t axis = 0; axis < PyTuple_GET_SIZE(shape); axis++) {
+        for (Py_ssize_t axis = 0; small && axis < PyTuple_GET_SIZE(shape); axis++) {
             PyObject *length = PyTuple_GET_ITEM(shape, axis);
             if (!PyLong_CheckExact(length)) {
-                return 0; /* A length that is not known yet. */
+                small = 0; /* A length that is not known yet. */
+                break;
             }
             Py_ssize_t count = PyLong_AsSsize_t(length);
             if (count < 0 || (count != 0 && size > small_limit / count)) {
                 PyErr_Clear();
-                return 0;
+                small = 0;
+                break;
             }
             size *= count;
         }
-        if (size >= small_limit) {
-            return 0;
+        if (!small || size >= small_limit) {
+            /* A large result. It is still made now if no kernel could make this call: a comparison, a selection, a
+             * matrix product, a call into a mathematics library, anything on another element type. What reads it
+             * later reads an array either way. A call a kernel can make waits, so that what is written on top of
+             * it can be computed with it. */
+            if (fusible_calls == NULL) {
+                return 0;
+            }
+            int same_type = dtype == fusible_dtype;
+            for (Py_ssize_t place = 0; same_type && place < PyTuple_GET_SIZE(args); place++) {
+                /* `abs(z)` of a complex array gives float64 and is no kernel's: every array read has to be of the type. */
+                PyObject *arg = PyTuple_GET_ITEM(args, place);
+                same_type = Py_TYPE(arg) != Node || SLOT(arg, node_at[N_DTYPE]) == fusible_dtype;
+            }
+            if (same_type) {
+                int waits = PySet_Contains(fusible_calls, operation);
+                if (waits != 0) {
+                    PyErr_Clear(); /* A callable that cannot be looked up is none of them, but is left to its node. */
+                    return 0;
+                }
+            }
         }
     }
     for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(args); place++) {
@@ -448,6 +477,7 @@ ready_now(PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *kind)
  * node that has the value (new reference), `Miss` when NumPy answered with something that is no array, or NULL. */
 static PyObject *value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, PyObject *strict,
                             PyObject *spec, PyObject *origin, PyObject *kind);
+static Py_ssize_t size_of(PyObject *shape);
 
 static PyObject *
 made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, PyObject *shape, PyObject *dtype,
@@ -472,6 +502,18 @@ made_now(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, 
         return Miss;
     }
     made_at_once++;
+    if (size_of(shape) < 0) {
+        /* A length that depended on values, such as how many elements a mask selects: the value has it now. */
+        PyObject *settled = PyObject_GetAttr(value, s_shape);
+        if (settled == NULL || !PyTuple_CheckExact(settled)) {
+            Py_XDECREF(settled);
+            Py_DECREF(value);
+            return NULL;
+        }
+        PyObject *node = value_node(value, name, settled, dtype, strict, zero, origin, at_once_kind);
+        Py_DECREF(settled);
+        return node;
+    }
     return value_node(value, name, shape, dtype, strict, spec, origin, at_once_kind);
 }
 
@@ -483,11 +525,13 @@ value_node(PyObject *value, PyObject *name, PyObject *shape, PyObject *dtype, Py
            PyObject *origin, PyObject *kind)
 {
     PyObject *number = Py_TYPE(numbers)->tp_iternext(numbers);
-    PyObject *none = PyDict_New();
-    PyObject *node = number && none ? Node->tp_alloc(Node, 0) : NULL;
+    /* A node that has its value has no keywords and never gains any: every such node made here holds the same
+     * empty dictionary, where one each would be an object made and freed for every call made at once. */
+    PyObject *none = Py_NewRef(no_keywords);
+    PyObject *node = number ? Node->tp_alloc(Node, 0) : NULL;
     if (node == NULL) {
         Py_XDECREF(number);
-        Py_XDECREF(none);
+        Py_DECREF(none);
         Py_DECREF(value);
         return NULL;
     }
@@ -530,7 +574,7 @@ deferred(PyObject *operation, PyObject *name, PyObject *args, PyObject *kwargs, 
          PyObject *kind, PyObject *strict, PyObject *origin, PyObject *spec, PyFrameObject *frame)
 {
     PyObject *number = NULL, *line = NULL, *settings = NULL, *node = NULL, *reference = NULL;
-    if (ready_now(args, kwargs, shape, kind)) {
+    if (ready_now(operation, args, kwargs, shape, dtype, kind)) {
         /* A view keeps the line it was written at: its step is read again whenever the array is written into. */
         if (kind == view_kind) {
             line = (origin != NULL && origin != Py_None) ? Py_NewRef(origin) : origin_of(frame);
@@ -3143,6 +3187,57 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                 Py_DECREF(node);
             }
         }
+        if (!owned && small_limit != 0 && Py_TYPE(function) != Ufunc && count + named <= 9) {
+            /* `np.dot(a, b)`, `np.sum(x)` and the like on small arrays that have their values: NumPy's own call,
+             * there and then, with no rule asked. Only for the functions listed as giving one new array that
+             * shares no memory with an argument, so the result is an array of its own like any call's. */
+            int fresh = PySet_Contains(fresh_functions, function);
+            if (fresh < 0) {
+                PyErr_Clear();
+            } else if (fresh) {
+                PyObject *stack[8], *nodes[8];
+                Py_ssize_t held = 0;
+                int ready = 1, strict = SLOT(args[0], callable_at[F_STRICT]) == Py_True;
+                for (Py_ssize_t place = 1; ready && place < count + named; place++) {
+                    PyObject *arg = args[place];
+                    if (Py_TYPE(arg) != Lazy) {
+                        stack[place - 1] = arg; /* A plain value: the loop above saw to that. */
+                        continue;
+                    }
+                    PyObject *node = node_of(arg);
+                    if (node == NULL) {
+                        while (held > 0) {
+                            Py_DECREF(nodes[--held]);
+                        }
+                        return NULL;
+                    }
+                    nodes[held++] = node;
+                    Py_ssize_t size = Py_TYPE(node) == Node && has_value(node) ? size_of(SLOT(node, node_at[N_SHAPE])) : -1;
+                    ready = size >= 0 && size < small_limit;
+                    if (ready) {
+                        strict = strict || SLOT(node, node_at[N_STRICT]) == Py_True;
+                        stack[place - 1] = SLOT(node, node_at[N_VALUE]);
+                    }
+                }
+                PyObject *made = ready ? PyObject_Vectorcall(function, stack, (size_t)(count - 1), kwnames) : Miss;
+                while (held > 0) {
+                    Py_DECREF(nodes[--held]);
+                }
+                if (made == NULL) {
+                    return NULL;
+                }
+                if (made != Miss) {
+                    if (Py_TYPE(made) == Ndarray || PyObject_HasAttr(made, s_dtype)) {
+                        made_at_once++;
+                        return lazy_of_value(made, s_array, at_once_kind, strict ? Py_True : Py_False);
+                    }
+                    PyObject *lazy = PyObject_CallFunctionObjArgs(road->operation, made, SLOT(args[0], callable_at[F_SOURCE]),
+                                                                  strict ? Py_True : Py_False, Py_True, NULL);
+                    Py_DECREF(made);
+                    return lazy;
+                }
+            }
+        }
         if (!owned && Py_TYPE(function) != Ufunc && PyFunction_Check(function) == 0 && Py_TYPE(args[1]) == Lazy) {
             /* A function of NumPy's on a lazy array. NumPy would look through the arguments, find the lazy array
              * and call its `__array_function__`, which asks the rules. They are asked here, with the same
@@ -3673,7 +3768,7 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "count_nonzero", NULL, &count_nonzero) || take(given, "Write", &PyType_Type, &write)
         || take(given, "Assign", &PyType_Type, &assign) || take(given, "fitting", &PySet_Type, &fitting)
         || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "at_once", &PyUnicode_Type, &at_once_kind) || take(given, "handled_apart", NULL, &handled_apart)
-        || take(given, "shaped_like", NULL, &shaped_like) || take(given, "LazyCallable", &PyType_Type, &standin_call)
+        || take(given, "shaped_like", NULL, &shaped_like) || take(given, "fresh_functions", NULL, &fresh_functions) || take(given, "LazyCallable", &PyType_Type, &standin_call)
         || take(given, "LazyNumPy", &PyType_Type, &standin_module) || take(given, "slots", &PyTuple_Type, &slots)) {
         return NULL;
     }
@@ -3819,6 +3914,20 @@ module_at_once_below(PyObject *module, PyObject *limit)
     return PyLong_FromSsize_t(before);
 }
 
+/* `fusible(calls, dtype)`: the callables a kernel can make and the element type it makes them on, or None twice
+ * for none; see `fusible_calls`. */
+static PyObject *
+module_fusible(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 2 || (args[0] != Py_None && !PyFrozenSet_CheckExact(args[0]))) {
+        PyErr_SetString(PyExc_TypeError, "fusible(calls, dtype) takes a frozenset and an element type, or None twice");
+        return NULL;
+    }
+    Py_XSETREF(fusible_calls, args[0] == Py_None ? NULL : Py_NewRef(args[0]));
+    Py_XSETREF(fusible_dtype, args[0] == Py_None ? NULL : Py_NewRef(args[1]));
+    Py_RETURN_NONE;
+}
+
 /* `at_once_counts()`: (calls made at once because they were small, writes made at once in place), since the module
  * was loaded. */
 static PyObject *
@@ -3832,6 +3941,8 @@ static PyMethodDef methods[] = {
      "Have a call that gives fewer elements than this, on operands that have their values, made at once. Returns the limit it replaces."},
     {"write_now", (PyCFunction)(void (*)(void))module_write_now, METH_FASTCALL,
      "Make a write at once, in place, when nothing is pending and at_once_below is set. True when it was made."},
+    {"fusible", (PyCFunction)(void (*)(void))module_fusible, METH_FASTCALL,
+     "Name the callables a kernel can make and their element type: a large call that is none of them is made at once."},
     {"at_once_counts", module_at_once_counts, METH_NOARGS, "(calls, writes) made at once since the module was loaded."},
     {"setup", (PyCFunction)(void (*)(void))module_setup, METH_VARARGS | METH_KEYWORDS,
      "Be told the layer's classes, memories and constants."},
@@ -3896,12 +4007,13 @@ PyInit__core(void)
     own_dtypes = PyDict_New();
     s_origin_limit = PyUnicode_InternFromString("ORIGIN_MEMORY_LIMIT");
     s_array = PyUnicode_InternFromString("array");
+    no_keywords = PyDict_New();
     empty_string = PyUnicode_InternFromString("");
     s_transpose = PyUnicode_InternFromString("transpose");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
-        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !empty_string || !s_transpose) {
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !no_keywords || !empty_string || !s_transpose) {
         Py_DECREF(module);
         return NULL;
     }
