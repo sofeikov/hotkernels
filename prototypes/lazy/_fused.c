@@ -171,7 +171,9 @@ read_operand(PyObject *object, int dimensions, const npy_intp *shape, int vector
     }
     npy_intp inner = read->strides[dimensions - 1];
     if (vector) {
-        read->stepped = inner != ELEMENT && shape[dimensions - 1] != 1;
+        /* One value for the whole row is not an array that steps: it is one element over and over, which the walks
+         * read from a buffer (`period`), and the walk that gathers fills in. */
+        read->stepped = inner != ELEMENT && inner != 0 && shape[dimensions - 1] != 1;
         return 1;
     }
     return inner == 0;
@@ -571,15 +573,26 @@ program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, i
         }
     }
     int scattered = !direct[arrays] || in_place;
-    /* The rows of what is gathered, and of the result where it is copied out. */
-    int inner = joined_from(gathered, gathered_count, dimensions, shape);
-    int inner_out = joined_from(&target, 1, dimensions, shape);
-    npy_intp width = 1, width_out = 1;
+    /* The rows of each array gathered, and of the result where it is copied out. Each walks its own: a grid taken
+     * at one time level is thousands of elements at one step, and one value for each row beside it is a row. */
+    int inner_of[MOST_OPERANDS], inner_out = joined_from(&target, 1, dimensions, shape);
+    npy_intp width_of[MOST_OPERANDS], width_out = 1;
     for (int axis = last; axis >= 0; axis--) {
-        width *= axis >= inner ? shape[axis] : 1;
         width_out *= axis >= inner_out ? shape[axis] : 1;
     }
-    if ((gathered_count && width < SHORTEST_RUN) || (!direct[arrays] && width_out < SHORTEST_RUN)) {
+    for (int each = 0; each < gathered_count; each++) {
+        inner_of[each] = joined_from(&gathered[each], 1, dimensions, shape);
+        width_of[each] = 1;
+        for (int axis = last; axis >= inner_of[each]; axis--) {
+            width_of[each] *= shape[axis];
+        }
+        /* A value for each row is filled in, which costs little for a row of any length. Elements copied from
+         * where they lie are not worth it for rows of a few. */
+        if (gathered[each]->strides[last] != 0 && width_of[each] < SHORTEST_RUN) {
+            return 0;
+        }
+    }
+    if (!direct[arrays] && width_out < SHORTEST_RUN) {
         return 0;
     }
     if (block > total) {
@@ -597,21 +610,23 @@ program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, i
     for (int each = 0; each < gathered_count; each++) {
         rows[each] = gathered[each]->data;
     }
-    row_walk reading = {{0}, 0, 0}, writing = {{0}, 0, 0};
+    row_walk reading[MOST_OPERANDS], writing = {{0}, 0, 0};
+    memset(reading, 0, sizeof reading);
     for (npy_intp start = 0; start < total; start += block) {
         npy_intp length = total - start < block ? total - start : block;
-        while (gathered_count && !reading.done && reading.start < start + length) {
-            npy_intp from = reading.start > start ? reading.start : start;
-            npy_intp upto = reading.start + width < start + length ? reading.start + width : start + length;
-            for (int each = 0; each < gathered_count; each++) {
-                npy_intp step = gathered[each]->strides[last];
-                gather_run(copies + (size_t)each * (size_t)block + (from - start), rows[each] + (from - reading.start) * step,
-                           upto - from, step);
+        for (int each = 0; each < gathered_count; each++) {
+            row_walk *walk = &reading[each];
+            npy_intp step = gathered[each]->strides[last], width = width_of[each];
+            double *copy = copies + (size_t)each * (size_t)block;
+            while (!walk->done && walk->start < start + length) {
+                npy_intp from = walk->start > start ? walk->start : start;
+                npy_intp upto = walk->start + width < start + length ? walk->start + width : start + length;
+                gather_run(copy + (from - start), rows[each] + (from - walk->start) * step, upto - from, step);
+                if (walk->start + width > start + length) {
+                    break; /* The rest of this row is in the next block. */
+                }
+                next_row(walk, &gathered[each], &rows[each], 1, inner_of[each], width, shape);
             }
-            if (reading.start + width > start + length) {
-                break; /* The rest of this row is in the next block. */
-            }
-            next_row(&reading, gathered, rows, gathered_count, inner, width, shape);
         }
         for (Py_ssize_t each = 0; each < step_count; each++) {
             const program_step *step = &steps[each];
@@ -990,6 +1005,23 @@ program_rows(const row_kernel *made, const program_step *step, operand *reads, i
     const operand *second = step->kernel->vectors > 1 ? &reads[step->reads[1]] : first;
     const operand *number = step->kernel->scalars ? &numbers[step->numbers[0]] : NULL;
     int last = dimensions - 1, along = dimensions - 2;
+    /* One value for each row that the planner had read as an array (`weights[:, None]` beside rows this short) is
+     * the operation's number here: the kernel of two arrays is made as its like of an array and a number. */
+    row_kernel as_made = *made;
+    if (step->kernel->vectors > 1 && first->strides[last] == 0) {
+        as_made.left = 1;
+        number = first;
+        first = second;
+    } else if (step->kernel->vectors > 1 && second->strides[last] == 0) {
+        if (as_made.operation == '+' || as_made.operation == '*') {
+            as_made.left = 1; /* Either order gives the same sum and the same product. */
+        } else {
+            as_made.right = 1;
+        }
+        number = second;
+        second = first;
+    }
+    made = &as_made;
     double same = number != NULL && !number->is_array ? number->number : 0.0;
     npy_intp position[MOST_DIMENSIONS] = {0};
     for (;;) {
@@ -1292,6 +1324,14 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
     npy_intp run = shape[outer];
     npy_intp period[MOST_OPERANDS] = {0}; /* For an array that repeats: the elements of its stretch. Else 0. */
     npy_intp longest = 0;
+    for (int place = 0; place < arrays; place++) {
+        if (reads[place].strides[outer] == 0 && shape[outer] != 1) {
+            /* One value for each row (`dx[:, :, None]`): a stretch of one element. The rows it differs between do
+             * not join, so each row is a run, and its value is put into the array's buffer when the run begins. */
+            period[place] = 1;
+            longest = 1;
+        }
+    }
     while (outer > 0) {
         int axis = outer - 1, joined = 1;
         npy_intp repeats[MOST_OPERANDS] = {0};
@@ -1328,7 +1368,18 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
     for (int place = 0; place < arrays; place++) {
         stepped = stepped || reads[place].stepped;
     }
-    if (!stepped && run < SHORTEST_ROW && outer > 0 && step_count == 1 && row_kernel_of(steps[0].kernel) != NULL) {
+    int by_rows = run < SHORTEST_ROW && outer > 0 && step_count == 1 && !target->stepped && row_kernel_of(steps[0].kernel) != NULL;
+    if (by_rows) {
+        /* Every array the kernel reads is a row where it lies, but that one of two may be a value for each row. */
+        int values = 0;
+        for (int place = 0; place < steps[0].kernel->vectors; place++) {
+            npy_intp inner = reads[steps[0].reads[place]].strides[dimensions - 1];
+            values += inner == 0;
+            by_rows = by_rows && (inner == ELEMENT || inner == 0);
+        }
+        by_rows = by_rows && values < steps[0].kernel->vectors;
+    }
+    if (by_rows) {
         /* One operation of arithmetic on rows of a few elements: the module's own loop; see `program_rows`. */
         feclearexcept(FE_ALL_EXCEPT);
         program_rows(row_kernel_of(steps[0].kernel), &steps[0], reads, (int)arrays, numbers_given, dimensions, shape);

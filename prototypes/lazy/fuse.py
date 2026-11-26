@@ -247,6 +247,16 @@ def _is_number(arg: Any) -> bool:
     return kind is float or kind is np.float64 or (kind is int and -EXACT_INTEGER <= arg <= EXACT_INTEGER)
 
 
+# The innermost dimension below which an expression with one value for each row (`dx[:, :, None]` beside a grid)
+# is planned a second way, with the value read as an array: `SHORTEST_RUN` of `_fused.c`. A kernel takes one
+# value for a number in a call, so a number that is another for each row makes every row a run of its own, which
+# is how such an expression is planned and how it is quickest where a kernel can read the other arrays where they
+# lie. Where one of them steps over elements and has to be gathered, a block is many rows, and the module gives
+# the program up. The second program is for then: the module fills a block with each value as often as its row is
+# long, and the kernels read that as they read any array (`_Group.otherwise`).
+ROW_VALUES_BELOW = 32
+
+
 def _leaf_kind(arg: Any, shape: tuple[int, ...]) -> str | None:
     """Classify an operand that is read, not computed, by an expression.
 
@@ -1561,7 +1571,14 @@ def assign_rows(part: np.ndarray, values: np.ndarray) -> None:
     part[...] = values
 
 
-def _copies(operands: tuple) -> int:
+# How many operations a program has to have for each array the module copies or fills before a kernel reads it,
+# when one of them is a value for each row that it fills in. Timed on the kinetic energy routine, whose arrays step
+# over a time level: five operations on two such arrays and a value for each row took 3.99 ms for NumPy's 2.43 ms,
+# and seventeen on three and one took 3.94 ms for 7.2 ms.
+OPERATIONS_A_COPY = 3
+
+
+def _copies(operands: tuple) -> tuple[int, int]:
     """Count the arrays among a program's operands that the module would have to copy before a kernel can read them.
 
     An array that steps over elements, `tke[:, :, :, tau]` of a grid with
@@ -1577,15 +1594,23 @@ def _copies(operands: tuple) -> int:
         operands: What the program reads: arrays and numbers.
 
     Returns:
-        How many different arrays among them step over elements. One value
-        for each row, `weights[:, None]`, is a number to a kernel and no
-        array to copy.
+        (how many different arrays among them step over elements, how many
+        are one value for each row). The second is counted only when there
+        is one of the first: the module then fills a block with each value,
+        and with no array that steps a value for each row is a number to a
+        kernel and nothing to copy.
     """
-    seen = set()
+    seen, filled = set(), set()
     for operand in operands:
-        if type(operand) is np.ndarray and operand.ndim and operand.shape[-1] != 1 and operand.strides[-1] != operand.itemsize:
-            seen.add((operand.__array_interface__["data"][0], operand.strides))
-    return len(seen)
+        if type(operand) is not np.ndarray or not operand.ndim:
+            continue
+        where = (operand.__array_interface__["data"][0], operand.strides)
+        if operand.shape[-1] == 1:
+            if operand.size > 1:
+                filled.add(where)
+        elif operand.strides[-1] != operand.itemsize:
+            seen.add(where)
+    return (len(seen), len(filled)) if seen else (0, 0)
 
 
 class _Group:
@@ -1597,7 +1622,8 @@ class _Group:
     cache and only the group's own result is written to memory (`_fused.program`).
     """
 
-    __slots__ = ("kernel", "steps", "arrays", "names", "sources", "members", "watched", "result", "target", "shape")
+    __slots__ = ("kernel", "steps", "arrays", "names", "sources", "members", "watched", "result", "target", "shape",
+                 "otherwise")
 
     def __init__(self, kernel: Kernel | None, steps: tuple, arrays: int, names: tuple[str, ...], sources: list,
                  members: list[Node], watched: int, result: str, target: ViewOf | None, shape: tuple[int, ...]) -> None:
@@ -1618,6 +1644,11 @@ class _Group:
         self.kernel, self.steps, self.arrays, self.names = kernel, steps, arrays, names
         self.sources, self.members, self.watched = sources, members, watched
         self.result, self.target, self.shape = result, target, shape
+        # A second program for the same nodes, run when the module gives this one up: the expression with one
+        # value for each row read as an array (`_plan_expression`). It is its steps, how many arrays it reads, its
+        # kernels' names, and where each thing it reads is among `sources`: no reference to a node or an array, since
+        # one more would be taken for a reader of them (`_held`). None for nearly every group.
+        self.otherwise: tuple | None = None
 
     def operands(self) -> tuple | None:
         """Collect the values the kernel reads.
@@ -1807,7 +1838,9 @@ class _Group:
         operands = self.operands()
         if operands is None:
             return False
-        if self.steps is not None and _copies(operands) >= len(self.members) + 1:
+        stepped, filled = _copies(operands) if self.steps else (0, 0)
+        operations = len(self.members) + (0 if self.result == STORE else 1)
+        if stepped and (operations <= stepped if not filled else operations < OPERATIONS_A_COPY * (stepped + filled)):
             # As many arrays to copy as passes the program saves: NumPy's own calls are as quick.
             STATS.declined += 1
             return False
@@ -1825,6 +1858,16 @@ class _Group:
         else:
             raised, value = self._elementwise(write, operands, how, node.origin)
             if raised == _fused.DECLINED:
+                if self.otherwise is not None:
+                    # Given up, perhaps for a value that differs from row to row: the program that reads it as an array.
+                    steps, arrays, names, places = self.otherwise
+                    second = _Group(None, steps, arrays, names, [self.sources[place] for place in places], self.members,
+                                    self.watched, self.result, self.target, self.shape)
+                    if not second.run(node):
+                        return False
+                    # As after a program of this group's own: nothing here may keep the nodes alive past the call.
+                    self.sources, self.members = (), ()
+                    return True
                 STATS.declined += 1
                 return False
         if raised & self.watched:
@@ -2128,7 +2171,113 @@ def _replayed(expression: Expression, key: tuple, planned: Plan) -> bool:
     return True
 
 
+# The second programs written so far, by the shape of their expression: `_Group.otherwise`, or None for a shape
+# that has none. And how many are kept before the memory is emptied.
+_seconds: dict[tuple, tuple | None] = {}
+SECONDS_LIMIT = 512
+
+
+def _with_row_values(part: Term | Leaf, operands: list, changed: list[int]) -> Term | Leaf:
+    """Write one part of a tree again with each number that is one value for each row read as an array.
+
+    A function of the module and not one made inside its caller: one that
+    calls itself by a name of the function it was made in is a cycle of
+    references, which keeps the expression's nodes alive until the
+    collector next runs, and their arrays with them.
+
+    Args:
+        part: A term or a leaf of an expression.
+        operands: The expression's operands.
+        changed: Gains the place of each leaf that was a number and is an array now.
+
+    Returns:
+        The part, written again.
+    """
+    if type(part) is Leaf:
+        shape = getattr(operands[part.place], "shape", None)
+        if part.kind == SCALAR and shape and shape[-1] == 1 and any(length != 1 for length in shape):
+            changed.append(part.place)
+            return Leaf(VECTOR, part.place)
+        return part
+    return Term(part.op, tuple(_with_row_values(each, operands, changed) for each in part.operands), part.node)
+
+
+def _row_values_as_arrays(expression: Expression) -> Expression | None:
+    """Write an expression again with each number that is one value for each row read as an array.
+
+    Args:
+        expression: An expression as it was read.
+
+    Returns:
+        The same expression with those leaves VECTOR, or None when it has
+        none: an operand of length one along the innermost axis that has
+        more than one element.
+    """
+    changed: list[int] = []
+    term = _with_row_values(expression.term, expression.operands, changed)
+    if not changed:
+        return None
+    return Expression(expression.root, term, expression.operands, expression.result, expression.shape, expression.target,
+                      None, expression.nodes, expression.errstates)
+
+
 def _plan_expression(expression: Expression, planned: Plan) -> None:
+    """Plan the kernel calls of one expression, and a second program for one whose first may be given up.
+
+    The second is for an expression on rows shorter than `ROW_VALUES_BELOW`
+    that reads one value for each row, when its first plan is one program
+    for the whole of it: the same expression with the value read as an
+    array, planned the same way, and kept beside the first only when it is
+    one program for the same nodes.
+
+    Args:
+        expression: The expression.
+        planned: The computation's plan, which gains the expression's groups.
+    """
+    _plan_as_read(expression, planned)
+    group = planned.groups.get(expression.root.number)
+    if group is None or not group.steps or not expression.shape or expression.shape[-1] >= ROW_VALUES_BELOW:
+        return
+    top = expression.term
+    whole = count_operations(top) - (0 if expression.result == STORE else 1)
+    if len(group.members) != whole:
+        return  # Not one program for the whole expression.
+    values = tuple(index for index, operand in enumerate(expression.operands)
+                   if getattr(operand, "shape", None) and operand.shape[-1] == 1 and any(length != 1 for length in operand.shape))
+    if not values:
+        return
+    # Remembered by what the first program is remembered by, and which of its operands are a value for each row.
+    key = (expression.result, expression.signature if expression.signature is not None else _signature(top), values)
+    if key in _seconds:
+        group.otherwise = _seconds[key]
+        return
+    if len(_seconds) >= SECONDS_LIMIT:
+        _seconds.clear()
+    _seconds[key] = None
+    other = _row_values_as_arrays(expression)
+    if other is None:
+        return
+    # Written out here and not planned as an expression is: planning one notes what it found and may rewrite a
+    # write, and this program is only kept in case the first is given up.
+    _, tiles = tile(other.term, _BY_TOP)
+    placed = tiles.get(other.term.node.number)
+    if placed is None or placed.kernel.reduces:
+        return
+    program = _Program(other, tiles)
+    program.add(placed, RESULT)
+    if len(program.covered) != count_operations(top) or len(program.steps) > MOST_STEPS \
+            or len(program.arrays) > MOST_OPERANDS or len(program.numbers) > MOST_OPERANDS or program.buffers > MOST_BUFFERS:
+        return
+    places = []
+    for source in program.arrays + program.numbers:
+        place = next((index for index, known in enumerate(group.sources) if known is source), None)
+        if place is None:
+            return  # Something the first program does not read: there is no saying where it is.
+        places.append(place)
+    group.otherwise = _seconds[key] = (program.finished(), len(program.arrays), tuple(program.names), tuple(places))
+
+
+def _plan_as_read(expression: Expression, planned: Plan) -> None:
     """Plan the kernel calls of one expression.
 
     The tiles that feed one another become one group, a program: the

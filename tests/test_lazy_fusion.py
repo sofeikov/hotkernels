@@ -919,6 +919,42 @@ def test_nothing_planned_outlives_the_computation():
     assert same((a + b * c) * (c - a) + 0.5 * (b + a), value) and pending == 0 and calls() >= 2
 
 
+@pytest.mark.parametrize("shape", ((12, 9, 26, 3), (5, 40, 12, 2), (4, 7, 31, 3)))
+def test_a_program_given_up_for_a_value_of_each_row_has_a_second_that_reads_it_as_an_array(shape: tuple[int, ...]):
+    """Grids taken at one time level beside one value for each row: as numbers the values cannot be gathered with the
+    grids, so the expression's second program runs, with NumPy's bits, and leaves no node behind it."""
+    a, b = arrays(2, shape)
+    grid = shape[:-1]
+    c = arrays(1, grid)[0]
+    per_row, per_plane = arrays(1, (grid[1], 1))[0], arrays(1, (grid[0], 1, 1))[0]
+
+    def program(np: Any) -> Any:
+        """A flux of many operations on two such grids, scaled by a value for each row and one for each plane."""
+        vel, var = np.asarray(a)[..., 1], np.asarray(b)[..., 0]
+        cr, dx, dy = np.asarray(c), np.asarray(per_row), np.asarray(per_plane)
+        speed = np.abs(dy * vel * 0.5 / dx)
+        flux = dy * vel * (var + cr) * 0.5 - np.abs(dy * vel) * ((1.0 - cr) + speed * cr) * (var - cr) * 0.5
+        into = np.zeros(grid)
+        into[1:-1] = (dy * vel * (var + cr) * 0.5 - np.abs(dy * vel) * ((1.0 - cr) + cr * cr) * (var - cr) / dx)[1:-1]
+        return flux, into
+
+    expected = program(numpy)
+    gc.collect()
+    gc.disable()
+    try:
+        got = [each.gather() for each in program(lazy)]
+        pending = graph.pending_count()
+    finally:
+        gc.enable()
+    for theirs, ours in zip(expected, got):
+        assert same(theirs, ours)
+    assert pending == 0 and fuse.STATS.fused_nodes >= 12
+    # A few operations on as many arrays to copy are not worth the copies, as a second program or as a first.
+    declined = fuse.STATS.declined
+    few = gathered(lambda: (lazy.asarray(a)[..., 1] - lazy.asarray(b)[..., 0]) / lazy.asarray(per_row))
+    assert same((a[..., 1] - b[..., 0]) / per_row, few) and fuse.STATS.declined > declined
+
+
 def test_a_line_whose_kernel_was_flagged_is_left_to_numpy_afterwards():
     """A loop whose arithmetic overflows computes the expression twice on its first turn and once on every other."""
     huge = lazy.asarray(numpy.full(64, 1e308))
