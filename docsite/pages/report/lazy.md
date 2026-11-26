@@ -199,10 +199,10 @@ For whole programs, written down and dropped without a gather, so that the time 
 
 | Program | Operations | In Python | With the C core | NumPy computing it, on small arrays |
 |---|---|---|---|---|
-| The regression, 50 gradient steps | 954 | 1.67 ms | 0.52 ms | 0.43 ms |
-| A transformer block, 10 in a row | 550 | 1.35 ms | 0.50 ms | 1.17 ms |
+| The regression, 50 gradient steps | 954 | 1.67 ms | 0.42 ms | 0.43 ms |
+| A transformer block, 10 in a row | 550 | 1.35 ms | 0.37 ms | 1.17 ms |
 
-With the core, a node costs what NumPy's own work costs on a little under a thousand elements. On small arrays the first build is therefore slower than NumPy, and close to it on large ones. That is accepted: the first build is there to get the graph right. Computing it faster is what [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md) takes up.
+With the core, a node costs what NumPy's own work costs on about five hundred elements. On small arrays the first build is therefore slower than NumPy, and close to it on large ones. That is accepted: the first build is there to get the graph right. Computing it faster is what [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md) takes up.
 
 ## Looking at the graph
 

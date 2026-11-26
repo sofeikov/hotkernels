@@ -481,13 +481,21 @@ steps_now(PyObject *before, PyObject *operation, PyObject *name, PyObject *tail,
     Py_DECREF(code);
     PyArrayObject *array = (PyArrayObject *)value;
     PyObject *dtype = (PyObject *)PyArray_DESCR(array);
+    /* The line, asked for as for any node: the module's name and its record of warnings are looked at each time,
+     * and a step is the line's only while they are what they were. */
+    PyObject *origin = origin_of(frame);
+    if (origin == NULL) {
+        return NULL;
+    }
     if (current && line->steps != NULL) {
         PyObject *step = PyTuple_GET_ITEM(line->steps, 0);
         PyObject *kept = SLOT(step, step_at[S_TAIL]);
         int same = SLOT(step, step_at[S_OPERATION]) == operation && SLOT(step, step_at[S_DTYPE]) == dtype
+            && SLOT(step, step_at[S_ORIGIN]) == origin
             && PyTuple_GET_SIZE(kept) == PyTuple_GET_SIZE(tail) && is_shape_of(SLOT(step, step_at[S_SHAPE]), array)
             && (PyTuple_GET_SIZE(tail) == 0 || same_plain_index(PyTuple_GET_ITEM(kept, 0), PyTuple_GET_ITEM(tail, 0)));
         if (same) {
+            Py_DECREF(origin);
             return PyTuple_GET_SIZE(before) == 0 ? Py_NewRef(line->steps) : steps_with(before, step);
         }
     }
@@ -500,13 +508,12 @@ steps_now(PyObject *before, PyObject *operation, PyObject *name, PyObject *tail,
         }
         PyTuple_SET_ITEM(shape, axis, length);
     }
-    PyObject *origin = shape ? origin_of(frame) : NULL;
     /* A step that was written with no keyword has the one empty dictionary every such step has: nothing adds to
      * a step's keywords, and a node made from the step is given them to read. */
-    PyObject *step = origin ? new_step(operation, name, tail, no_keywords, shape, dtype, origin, plain) : NULL;
+    PyObject *step = shape ? new_step(operation, name, tail, no_keywords, shape, dtype, origin, plain) : NULL;
     PyObject *alone = step ? PyTuple_Pack(1, step) : NULL;
     Py_XDECREF(shape);
-    Py_XDECREF(origin);
+    Py_DECREF(origin);
     if (alone == NULL) {
         Py_XDECREF(step);
         return NULL;
@@ -4641,7 +4648,11 @@ module_quick_slots(PyObject *module, PyObject *ignored)
         PyErr_SetString(PyExc_RuntimeError, "quick_slots() comes after setup()");
         return NULL;
     }
+#if PY_VERSION_HEX >= 0x030C0000
     PyObject *names = PyType_GetDict(Lazy);
+#else
+    PyObject *names = Py_XNewRef(Lazy->tp_dict); /* Before Python 3.12 a class's names are read from the class. */
+#endif
     if (names == NULL) {
         return NULL;
     }

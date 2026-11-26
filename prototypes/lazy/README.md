@@ -35,7 +35,7 @@ Try it from the repository's root with `uv run python`.
 | [evaluate.py](evaluate.py) | Computing nodes |
 | [array.py](array.py) | `LazyArray`: operators, NumPy's two protocols, the refusals, `gather()` |
 | [namespace.py](namespace.py) | The stand-in for the `numpy` module |
-| [_core.c](_core.c), [build_core.py](build_core.py) | The quick road for writing a node, in C, and the command that builds it. Optional |
+| [_core.c](_core.c), [build_core.py](build_core.py) | The layer's hot path in C: writing a node, making a small call where the program wrote it, reading the expressions for fusion; and the command that builds it. Optional |
 | [explain.py](explain.py) | The text of a pending graph |
 | [record.py](record.py) | The graph as an object, and the mode that records the graphs a block of code produced |
 | [report.py](report.py) | What was computed without being asked, ranked: `lazy_report()` |
@@ -76,7 +76,7 @@ The design of the two is in [docs/lazy-recording-design.md](../../docs/lazy-reco
 uv run python -m prototypes.lazy.build_core
 ```
 
-Compiles `_core.c` with clang into this directory. The layer takes the core when it is there and is the same without it, only slower to write a graph; `prototypes.lazy.array.core_in_use()` says which. Build it again after changing `_core.c`.
+Compiles `_core.c` with clang into this directory; it needs NumPy's headers, which the installed NumPy brings. The layer takes the core when it is there and gives the same results without it, only slower: every graph is then written and read by Python, and no call is made at once. `prototypes.lazy.array.core_in_use()` says which. Build it again after changing `_core.c`.
 
 ## Timing it
 
@@ -109,7 +109,7 @@ fuse.disable()
 - **An expression is a program of kernel calls,** run a block of 4,096 elements at a time, so that what one kernel gives the next stays in the cache and only the result is written to memory.
 - **Seventy-eight kernels**, NEON for ARM64, in [kernels/](kernels/README.md): fourteen written by hand, and sixty-four that `make_kernel.py` wrote from the names of their shapes, the single operations among them. On another architecture each is built from its C reference.
 - **A write is part of its expression:** `u[1:-1, 1:-1] = e` is computed straight into that part of `u`.
-- **Small arrays are not planned for, and not written down either.** With fusion on, a call that gives fewer than 32,768 elements on arrays that have their values is made at once, and so is a call of any size that no kernel could make (a comparison, a matrix product, `np.exp`, anything complex or float32), and a write when nothing is pending. `fuse.MIN_ELEMENTS` and `fuse.AT_ONCE_BELOW` are the two limits; `array.at_once_below(n)` is the second by itself.
+- **Small arrays are not planned for, and not written down either.** With fusion on, a call that gives fewer than 32,768 elements on arrays that have their values is made at once, and so is a call of any size that no kernel could make (a comparison, a matrix product, `np.exp`, anything complex or float32), and a write when nothing is pending. `fuse.MIN_ELEMENTS` and `fuse.AT_ONCE_BELOW` are the two limits; `array.at_once_below(n)` is the second by itself. A call made at once costs 15 to 110 ns over NumPy's own, and needs the C core.
 
 Three tools, needing `--group apps --group workloads` for the programs that call a library:
 

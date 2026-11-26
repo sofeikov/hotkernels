@@ -21,7 +21,8 @@ The modules, in the order to read them:
     rules.py      which calls are deferred, and their shape and element type
     evaluate.py   computing nodes
     array.py      LazyArray: what the user holds
-    _core.c       the quick road for writing a node, in C; optional, built by build_core.py
+    _core.c       the hot path in C: writing a node, a small call made at once, reading
+                  expressions for fusion; optional, built by build_core.py
     namespace.py  the stand-in for the numpy module
     explain.py    the text of a pending graph
     record.py     the graph as an object, and the mode that records a block's graphs

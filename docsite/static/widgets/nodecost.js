@@ -34,9 +34,9 @@ const ROADS = {
     parts: [["the operator's method and its arguments", 0.35, 0.35], ["the key, and the answer looked up", 0.25, 0.25], ["the node", 0.25, 0.25], ["the pending set, the count, the error settings", 0.25, 0.25], ["finding the line again", 0.2, 0.2], ["the lazy array and its cell", 0.17, 0.17]],
   },
   core: {
-    label: "The C core", lo: 0.41, hi: 0.43,
+    label: "The C core", lo: 0.32, hi: 0.35,
     what: "The same work and the same memories, done in C: a * b goes from Python's operator straight into the core, with no Python frame between.",
-    parts: [["the whole node, in C", 0.41, 0.43]],
+    parts: [["the whole node, in C", 0.32, 0.35]],
   },
 };
 
