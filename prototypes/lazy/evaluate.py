@@ -59,6 +59,10 @@ planner: Callable[[list[Node]], Plan | None] | None = None
 # Told what each call took: called with the node, after it has its value, and the nanoseconds. None unless a
 # measuring tool has set it.
 meter: Callable[[Node, int], None] | None = None
+# The C core's way of computing one node whose call is plain, or None: `array.use_core` sets it. It does what
+# `_compute_one` does for a node that is no write, has no keyword and reads values that are there, and says
+# False, having done nothing, for any other.
+compute_plain: Callable[[Node], bool] | None = None
 
 
 @dataclass
@@ -572,6 +576,18 @@ def _compute_one(node: Node, quiet: _Quiet) -> None:
         Exception: The failure of an operand, or what the NumPy call raised,
             with a note naming the line that wrote the operation.
     """
+    if compute_plain is not None and node.errstate is quiet.active:
+        origin = node.origin
+        try:
+            done = compute_plain(node)
+        except Exception as error:
+            error.add_note(f"in the lazy operation '{node.name}' written at {origin.filename}:{origin.lineno}")
+            _fail(node, error)
+            raise
+        if done:
+            if quiet.caught:
+                quiet.note(origin)
+            return
     operation, moved = node.operation, None
     if node.kind == rules.WRITE:
         in_place = getattr(operation, "in_place", None)

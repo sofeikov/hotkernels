@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 25
+CORE_VERSION = 26
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -2136,6 +2136,7 @@ def use_core(core: Any) -> None:
         setattr(owner, name, method)
     _stood_in_for_elsewhere.clear()
     graph.deferred = _python_deferred
+    evaluate.compute_plain = None
     if _core is not None:
         at_once_below(0)
         _core.enable(False)
@@ -2161,6 +2162,7 @@ def use_core(core: Any) -> None:
     _stood_in_for["T"] = transposed = vars(LazyArray)["T"]
     LazyArray.T = core.Road("attribute", transposed.fget, np.transpose, "transpose")
     graph.deferred = core.deferred
+    evaluate.compute_plain = core.compute_plain
     _core = core
 
 

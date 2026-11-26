@@ -154,6 +154,12 @@ class Expression:
     shape: tuple[int, ...]
     # For STORE: where the result goes, as the part of a copy of an array. None otherwise.
     target: ViewOf | None = None
+    # What planning reads off the tree, where the reader has written it down already, as the C core's does:
+    # `_signature` of the tree; the nodes of its terms in ascending number; and the different error settings
+    # those nodes were written under. None where it has not, and planning works each out.
+    signature: tuple | None = None
+    nodes: list | None = None
+    errstates: tuple | None = None
 
     @property
     def elements(self) -> int:
@@ -1979,11 +1985,16 @@ def _replayed(expression: Expression, key: tuple, planned: Plan) -> bool:
         return False
     steps, arrays, names, places = recipe
     operands = expression.operands
-    covered = [term.node for term in terms_of(top)]
     watched = _watched_under(own.errstate)
-    for node in covered:
-        watched |= _watched_under(node.errstate)
-    members = sorted((node for node in covered if node is not own), key=_number)
+    if expression.nodes is not None:
+        for settings in expression.errstates:
+            watched |= _watched_under(settings)
+        members = [node for node in expression.nodes if node is not own]
+    else:
+        covered = [term.node for term in terms_of(top)]
+        for node in covered:
+            watched |= _watched_under(node.errstate)
+        members = sorted((node for node in covered if node is not own), key=_number)
     planned.groups[own.number] = _Group(None, steps, arrays, names, [operands[place] for place in places], members,
                                         watched, expression.result,
                                         expression.target if expression.result == STORE else None, expression.shape)
@@ -2007,7 +2018,7 @@ def _plan_expression(expression: Expression, planned: Plan) -> None:
     """
     top, root = expression.term, expression.root
     stores = expression.result == STORE
-    key = (expression.result, _signature(top))
+    key = (expression.result, expression.signature if expression.signature is not None else _signature(top))
     if _replayed(expression, key, planned):
         return
     _, tiles = tile(top, _BY_TOP)

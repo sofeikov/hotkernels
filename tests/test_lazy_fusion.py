@@ -762,6 +762,12 @@ def test_the_core_reads_the_expressions_python_reads(name: str, lazy_core: str, 
         del found, inside
         found, inside = find(todo, fewest, alone)
         assert (_described(found), sorted(inside)) == theirs
+        for expression in found:
+            # What the core's reader writes down for planning is what planning works out from the tree.
+            terms = list(fuse.terms_of(expression.term))
+            assert expression.signature == fuse._signature(expression.term)
+            assert [node.number for node in expression.nodes] == sorted(term.node.number for term in terms)
+            assert {id(settings) for settings in expression.errstates} == {id(term.node.errstate) for term in terms}
         compared.append(len(found))
         return found, inside
 

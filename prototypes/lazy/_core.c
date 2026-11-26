@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 25
+#define CORE_VERSION 26
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -189,6 +189,7 @@ static PyObject *s_node, *s_made, *s_deferred, *s_observer, *s_limit, *s_setting
 typedef struct {
     PyTypeObject *type;          /* The class. */
     destructor before;           /* The class's own way of freeing an instance: put back when the core is put away. */
+    traverseproc walked;         /* The class's own way of showing an instance to the collector, put back likewise. */
     PyObject *spare[MOST_SPARE]; /* Freed instances: memory of the class's size, with every slot empty. */
     int count;                   /* How many of them there are. */
 } Pool;
@@ -249,6 +250,30 @@ pooled_dealloc(PyObject *self)
     Py_DECREF(type);
 }
 
+/* What stands as `tp_traverse` of the four classes while the core is in use: every slot, and the class, which an
+ * instance of a class written in Python refers to. The classes' own walks their slots by the descriptors, once
+ * per object the collector looks at, and a computation of a few thousand nodes is looked at often. An instance of
+ * a subclass has more slots than the base, and goes the subclass's way, which ends here for the base's. */
+static int
+pooled_traverse(PyObject *self, visitproc visit, void *arg)
+{
+    PyTypeObject *type = Py_TYPE(self);
+    PyTypeObject *base = type == Lazy || type == Node || type == Cell || type == Step ? type
+        : PyType_IsSubtype(type, Lazy) ? Lazy : PyType_IsSubtype(type, Node) ? Node : PyType_IsSubtype(type, Cell) ? Cell : Step;
+    PyObject **slot = (PyObject **)((char *)self + sizeof(PyObject));
+    PyObject **end = (PyObject **)((char *)self + base->tp_basicsize);
+    PyObject **weak = base->tp_weaklistoffset > 0 ? (PyObject **)((char *)self + base->tp_weaklistoffset) : NULL;
+    for (; slot < end; slot++) {
+        if (slot != weak) {
+            Py_VISIT(*slot);
+        }
+    }
+    if (type == base) {
+        Py_VISIT((PyObject *)type);
+    }
+    return 0;
+}
+
 /* Take the making and freeing of the four classes' instances, or give it back. */
 static void
 pools_in_use(int on)
@@ -266,9 +291,12 @@ pools_in_use(int on)
                 pool->type = types[each];
             }
             pool->before = types[each]->tp_dealloc;
+            pool->walked = types[each]->tp_traverse;
             types[each]->tp_dealloc = pooled_dealloc;
+            types[each]->tp_traverse = pooled_traverse;
         } else if (!on && pool->type != NULL && pool->type->tp_dealloc == pooled_dealloc) {
             pool->type->tp_dealloc = pool->before;
+            pool->type->tp_traverse = pool->walked;
         }
     }
 }
@@ -4045,7 +4073,9 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         operands = road->kind == UNARY ? PyTuple_Pack(1, args[0])
                    : road->reflected ? PyTuple_Pack(2, args[1], args[0]) : PyTuple_Pack(2, args[0], args[1]);
-        kwargs = PyDict_New();
+        /* A call written with no keyword has the one empty dictionary every such node has: nothing adds to a
+         * node's keywords, and one each would be an object made, freed and counted by the collector per node. */
+        kwargs = Py_NewRef(no_keywords);
         if (operands == NULL || kwargs == NULL) {
             goto fail;
         }
@@ -4071,7 +4101,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             break;
         }
         operands = PyTuple_New(count - 3);
-        kwargs = PyDict_New();
+        kwargs = Py_NewRef(no_keywords);
         name = PyObject_GetAttr(args[1], s_dunder_name);
         if (operands == NULL || kwargs == NULL || name == NULL) {
             goto fail;
@@ -4116,7 +4146,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             break;
         }
         operands = PyTuple_New(count);
-        kwargs = PyDict_New();
+        kwargs = named ? PyDict_New() : Py_NewRef(no_keywords);
         if (operands == NULL || kwargs == NULL) {
             goto fail;
         }
@@ -4173,7 +4203,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
             operands = rest ? PyTuple_Pack(2, args[0], rest) : NULL;
             Py_XDECREF(rest);
         }
-        kwargs = PyDict_New();
+        kwargs = Py_NewRef(no_keywords);
         if (operands == NULL || kwargs == NULL) {
             goto fail;
         }
@@ -4329,8 +4359,9 @@ static PyTypeObject RoadType = {
 
 /* What `find_setup()` was given: the classes of fuse.py, their slots, its tables and its names. */
 static PyTypeObject *FExpression, *FTerm, *FLeaf, *FViewOf, *FWholeCall;
-enum { E_ROOT, E_TERM, E_OPERANDS, E_RESULT, E_SHAPE, E_TARGET, E_FIELDS };
-static const char *const EXPRESSION_FIELDS[E_FIELDS] = {"root", "term", "operands", "result", "shape", "target"};
+enum { E_ROOT, E_TERM, E_OPERANDS, E_RESULT, E_SHAPE, E_TARGET, E_SIGNATURE, E_NODES, E_ERRSTATES, E_FIELDS };
+static const char *const EXPRESSION_FIELDS[E_FIELDS] = {"root", "term", "operands", "result", "shape", "target",
+                                                        "signature", "nodes", "errstates"};
 enum { T_OP, T_OPERANDS, T_NODE, T_FIELDS };
 static const char *const TERM_FIELDS[T_FIELDS] = {"op", "operands", "node"};
 enum { LEAF_KIND, LEAF_PLACE, LEAF_FIELDS };
@@ -4729,7 +4760,131 @@ new_expression(PyObject *root, PyObject *term, PyObject *operands, PyObject *res
     SLOT(expression, expression_at[E_RESULT]) = Py_NewRef(result);
     SLOT(expression, expression_at[E_SHAPE]) = Py_NewRef(shape);
     SLOT(expression, expression_at[E_TARGET]) = Py_NewRef(target);
+    SLOT(expression, expression_at[E_SIGNATURE]) = Py_NewRef(Py_None);
+    SLOT(expression, expression_at[E_NODES]) = Py_NewRef(Py_None);
+    SLOT(expression, expression_at[E_ERRSTATES]) = Py_NewRef(Py_None);
     return expression;
+}
+
+/* `fuse._signature(part)`: the shape of a tree as nested tuples. A new reference. */
+static PyObject *
+signature_of(PyObject *part)
+{
+    if (Py_TYPE(part) != FTerm) {
+        return PyTuple_Pack(2, SLOT(part, leaf_at[LEAF_KIND]), SLOT(part, leaf_at[LEAF_PLACE]));
+    }
+    PyObject *operands = SLOT(part, term_at[T_OPERANDS]);
+    Py_ssize_t count = PyTuple_GET_SIZE(operands);
+    PyObject *written = PyTuple_New(count + 1);
+    if (written == NULL) {
+        return NULL;
+    }
+    PyTuple_SET_ITEM(written, 0, Py_NewRef(SLOT(part, term_at[T_OP])));
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *below = signature_of(PyTuple_GET_ITEM(operands, place));
+        if (below == NULL) {
+            Py_DECREF(written);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(written, place + 1, below);
+    }
+    return written;
+}
+
+/* Add the nodes of a tree's terms to a list. 0, or -1 with an error set. */
+static int
+nodes_of(PyObject *part, PyObject *nodes)
+{
+    if (Py_TYPE(part) != FTerm) {
+        return 0;
+    }
+    if (PyList_Append(nodes, SLOT(part, term_at[T_NODE])) < 0) {
+        return -1;
+    }
+    PyObject *operands = SLOT(part, term_at[T_OPERANDS]);
+    for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(operands); place++) {
+        if (nodes_of(PyTuple_GET_ITEM(operands, place), nodes) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* One node and its number, to sort by. */
+typedef struct {
+    long long number;
+    PyObject *node;
+} Numbered;
+
+static int
+by_number(const void *first, const void *second)
+{
+    long long one = ((const Numbered *)first)->number, other = ((const Numbered *)second)->number;
+    return (one > other) - (one < other);
+}
+
+/* Write down, on an expression that is kept, what planning it reads off its tree every time: the tree's
+ * signature, the nodes of its terms in ascending number, and the different error settings those nodes were
+ * written under. `fuse._plan_expression` and `fuse._replayed` work the same things out where they are not
+ * written. 0, or -1 with an error set. */
+static int
+note_tree(PyObject *expression)
+{
+    PyObject *term = SLOT(expression, expression_at[E_TERM]);
+    PyObject *signature = signature_of(term);
+    PyObject *nodes = signature ? PyList_New(0) : NULL;
+    PyObject *errstates = NULL;
+    Numbered *sorted = NULL;
+    int done = -1;
+    if (nodes == NULL || nodes_of(term, nodes) < 0) {
+        goto out;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(nodes);
+    sorted = PyMem_Malloc((size_t)(count ? count : 1) * sizeof(Numbered));
+    errstates = PyList_New(0);
+    if (sorted == NULL || errstates == NULL) {
+        PyErr_NoMemory();
+        goto out;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *node = PyList_GET_ITEM(nodes, place);
+        sorted[place].node = node;
+        sorted[place].number = PyLong_AsLongLong(SLOT(node, node_at[N_NUMBER]));
+        PyObject *settings = SLOT(node, node_at[N_ERRSTATE]);
+        int known = 0;
+        for (Py_ssize_t each = 0; !known && each < PyList_GET_SIZE(errstates); each++) {
+            known = PyList_GET_ITEM(errstates, each) == settings;
+        }
+        if (!known && PyList_Append(errstates, settings) < 0) {
+            goto out;
+        }
+    }
+    if (PyErr_Occurred()) {
+        goto out;
+    }
+    qsort(sorted, (size_t)count, sizeof(Numbered), by_number);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        Py_INCREF(sorted[place].node);
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *before = PyList_GET_ITEM(nodes, place);
+        PyList_SET_ITEM(nodes, place, sorted[place].node);
+        Py_DECREF(before);
+    }
+    PyObject *settings = PyList_AsTuple(errstates);
+    if (settings == NULL) {
+        goto out;
+    }
+    Py_SETREF(SLOT(expression, expression_at[E_SIGNATURE]), Py_NewRef(signature));
+    Py_SETREF(SLOT(expression, expression_at[E_NODES]), Py_NewRef(nodes));
+    Py_SETREF(SLOT(expression, expression_at[E_ERRSTATES]), settings);
+    done = 0;
+out:
+    PyMem_Free(sorted);
+    Py_XDECREF(signature);
+    Py_XDECREF(nodes);
+    Py_XDECREF(errstates);
+    return done;
 }
 
 static PyObject *read_operation(Finder *finder, PyObject *node, PyObject *name, PyObject **written, Py_ssize_t count,
@@ -5142,7 +5297,7 @@ module_find(PyObject *module, PyObject *const *args, Py_ssize_t count)
         if (expression != Miss) {
             kept = alone || count_terms(SLOT(expression, expression_at[E_TERM])) > 1
                 || same_text(SLOT(expression, expression_at[E_RESULT]), f_store);
-            if (kept && PyList_Append(found, expression) < 0) {
+            if (kept && (note_tree(expression) < 0 || PyList_Append(found, expression) < 0)) {
                 Py_DECREF(expression);
                 goto done;
             }
@@ -5625,6 +5780,63 @@ module_at_once_counts(PyObject *module, PyObject *ignored)
     return Py_BuildValue("(LL)", made_at_once, written_at_once);
 }
 
+/* The most operands a node is computed with on the C stack; one of more is left to Python. */
+#define MOST_COMPUTED 8
+
+/* `compute_plain(node)`: compute one pending node whose call is plain, as `evaluate._compute_one` does: the
+ * operation on its operands' values, the value kept, the operands let go (`graph.settle`). A plain call is one
+ * that is no write, has no keyword, gives a shape that is known, and reads only values that are there; the
+ * caller sees to the error settings and to what is caught. True when the node was computed; False, with nothing
+ * done, for any other node, which Python computes; NULL with NumPy's error, the node untouched. */
+static PyObject *
+module_compute_plain(PyObject *module, PyObject *node)
+{
+    if (!enabled || Py_TYPE(node) != Node) {
+        Py_RETURN_FALSE;
+    }
+    PyObject *operation = SLOT(node, node_at[N_OPERATION]), *args = SLOT(node, node_at[N_ARGS]);
+    PyObject *kwargs = SLOT(node, node_at[N_KWARGS]), *kind = SLOT(node, node_at[N_KIND]);
+    if (operation == Py_None || !PyTuple_CheckExact(args) || PyTuple_GET_SIZE(args) > MOST_COMPUTED || !PyDict_CheckExact(kwargs)
+        || PyDict_GET_SIZE(kwargs) != 0 || kind == write_kind || !PyUnicode_CheckExact(kind)
+        || PyUnicode_Compare(kind, write_kind) == 0 || !PyTuple_CheckExact(SLOT(node, node_at[N_SHAPE]))
+        || !shape_known(SLOT(node, node_at[N_SHAPE]))) {
+        Py_RETURN_FALSE;
+    }
+    PyObject *values[MOST_COMPUTED];
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        if (Py_TYPE(arg) == Node) {
+            if (!has_value(arg)) {
+                Py_RETURN_FALSE; /* Failed, or its memory taken by a write: Python says what follows. */
+            }
+            arg = SLOT(arg, node_at[N_VALUE]);
+        }
+        values[place] = Py_NewRef(arg);
+    }
+    Py_INCREF(operation);
+    PyObject *value = PyObject_Vectorcall(operation, values, (size_t)count, NULL);
+    Py_DECREF(operation);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        Py_DECREF(values[place]);
+    }
+    if (value == NULL) {
+        return NULL;
+    }
+    /* `node.value = value`, then `graph.settle(node)`. */
+    Py_SETREF(SLOT(node, node_at[N_VALUE]), value);
+    Py_SETREF(SLOT(node, node_at[N_OPERATION]), Py_NewRef(Py_None));
+    Py_SETREF(SLOT(node, node_at[N_ARGS]), Py_NewRef(empty_tuple));
+    Py_SETREF(SLOT(node, node_at[N_KWARGS]), Py_NewRef(no_keywords));
+    PyObject *reference = PyWeakref_NewRef(node, NULL);
+    if (reference == NULL || PySet_Discard(pending, reference) < 0) {
+        Py_XDECREF(reference);
+        return NULL;
+    }
+    Py_DECREF(reference);
+    Py_RETURN_TRUE;
+}
+
 /* `track(lazy)`: make a lazy array known to the garbage collector, for one that held its value alone and was given
  * its cell by the Python property. */
 static PyObject *
@@ -5641,6 +5853,8 @@ static PyMethodDef methods[] = {
      "fuse.find, in C: (the expressions of a computation's nodes, the numbers of the nodes inside them)."},
     {"find_setup", (PyCFunction)(void (*)(void))module_find_setup, METH_VARARGS | METH_KEYWORDS,
      "Be told the classes, tables and names of fuse.py, for find()."},
+    {"compute_plain", module_compute_plain, METH_O,
+     "Compute one pending node whose call is plain, as evaluate._compute_one does. True when it was computed."},
     {"track", module_track, METH_O, "Make a lazy array that has just been given its cell known to the garbage collector."},
     {"at_once_below", module_at_once_below, METH_O,
      "Have a call that gives fewer elements than this, on operands that have their values, made at once. Returns the limit it replaces."},
