@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 28
+CORE_VERSION = 30
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -83,9 +83,6 @@ VALUED = tuple((kind, strict) for kind in ("", graph.AT_ONCE) for strict in (Fal
 # `s += v` is for a number, into which nothing is written.
 IN_PLACE_UFUNCS = {operator.iadd: np.add, operator.isub: np.subtract, operator.imul: np.multiply,
                    operator.itruediv: np.true_divide}
-# How many things a view keeps of what it has seen when it holds NumPy's view and no node: the cell's contents,
-# the view's array, and whether it is strict. A view with a node keeps two, the contents and the node.
-HOLDS_ARRAY = 3
 
 # The element-by-element writes that `_fits_elementwise` found to fit, by what
 # `_fit_key` writes down of each. Only those: one that does not fit is made at
@@ -969,8 +966,69 @@ def _may_defer_write(target: "LazyArray") -> bool:
     cell = target._cell
     node = cell.node
     # `rules.is_admissible`: no length of zero and an element type the layer defers, remembered by the node's number.
-    return (not node.exposed and node.failure is None and not cell.doubted and not cell.shared_in_doubt()
-            and node.shape != () and rules.is_admissible(node))
+    if not (not node.exposed and node.failure is None and not cell.doubted and not cell.shared_in_doubt()
+            and node.shape != () and rules.is_admissible(node)):
+        return False
+    return not (_views_stand_alone and node.operation is None and _seen_by_a_view(node))
+
+
+class _Held:
+    """Stands where a node stands when `_seen_by_a_view` is tried on an array nothing else refers to."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        """Hold a value as a node holds its own."""
+        self.value = value
+
+
+def _references(node: Any) -> int:
+    """Count the references to a node's value, this function's own among them.
+
+    Args:
+        node: A computed node, or what stands in for one.
+
+    Returns:
+        `sys.getrefcount` of the value.
+    """
+    return sys.getrefcount(node.value)
+
+
+# What `_references` reports for a value that its node alone refers to. Measured, not assumed, as in `evaluate`.
+_VALUE_ALONE = _references(_Held(np.zeros(1)))
+# Whether a view taken at once may be alive that the layer keeps no record of. The C core takes such views once
+# `at_once_below` has been given a limit, and they outlive the limit, so this is not cleared with it.
+_views_stand_alone = False
+
+
+def _seen_by_a_view(node: Node) -> bool:
+    """Say whether a view the layer keeps no record of may be looking at a computed node's memory.
+
+    A view the C core took at once holds NumPy's view and nothing that
+    leads back to the array it is a view of. A write that waits could not
+    be shown to it: when the write is computed the view's array still
+    refers to the memory, so the write goes to a copy, and the view goes on
+    showing what the array held. NumPy's view refers to the array it is a
+    view of, and CPython counts references exactly. So a write is made at
+    once, where every view sees it, when the array's memory is another
+    array's (it is such a view itself) or when anything but the node refers
+    to the array. A view the layer does keep a record of, and an `ndarray`
+    the program holds, count too; the write is then made at once where it
+    could have waited, which costs time and changes no value.
+
+    Args:
+        node: A computed node.
+
+    Returns:
+        True when a write into the node's array may not wait.
+    """
+    memory = node.value
+    if type(memory) is not np.ndarray:
+        return False
+    if memory.base is not None:
+        return True
+    del memory
+    return _references(node) > _VALUE_ALONE
 
 
 def _defer_write(target: "LazyArray", name: str, perform: Callable[..., Any], operands: tuple,
@@ -1548,7 +1606,9 @@ class LazyArray:
         array holds the value NumPy gave and nothing else, with one of
         `VALUED` in `_seen`. Such an array has no node and no cell, because
         most are read by the next small call and dropped, and the three
-        objects cost more than the call. The first thing that asks for the
+        objects cost more than the call. A view taken at once is such an
+        array too, holding NumPy's view: see `_may_defer_write` for what
+        that asks of a write. The first thing that asks for the
         cell or the node gets them made here, as `graph.leaf` makes a node
         for any array that has its values, and from then on the array is
         like every other.
@@ -1575,19 +1635,13 @@ class LazyArray:
         """
         if not self._steps:
             return self._cell.node
-        seen = self._seen
-        contents, node = seen[0], seen[1]
+        contents, node = self._seen
         if contents is not self._cell.node:
             node = self._cell.node
             for step in self._steps:
                 node = graph.deferred(step.operation, step.name, (node,) + step.tail, step.kwargs, step.shape, step.dtype,
                                       rules.VIEW, node.strict, step.origin)
             self._seen = (self._cell.node, node)
-        elif len(seen) == HOLDS_ARRAY:
-            # A view the C core took at once holds NumPy's view where the node would be, and whether it is strict:
-            # most such views are read once by the next small call. The node is made now, on the line of the step.
-            node = graph.leaf(node, kind=graph.AT_ONCE, strict=seen[2], origin=self._steps[-1].origin)
-            self._seen = (contents, node)
         return node
 
     def _expose(self) -> None:
@@ -2203,12 +2257,31 @@ def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype 
     Returns:
         The limit this one replaces; 0 without the C core.
     """
-    global _at_once_limit
+    global _at_once_limit, _views_stand_alone
     if _core is None:
         return 0
     _at_once_limit = limit
+    if limit:
+        _views_stand_alone = True
     _core.fusible(fusible if limit else None, dtype if limit else None)
     return _core.at_once_below(limit)
+
+
+def views_stand_alone(alive: bool) -> None:
+    """Say whether a view taken at once, which the layer keeps no record of, may be alive.
+
+    `at_once_below` says yes by itself, and nothing says no: such a view
+    outlives the limit it was taken under. This is for a caller that knows
+    every lazy array made so far is gone, as a test does between two
+    programs, and wants writes to wait again wherever they can.
+
+    Args:
+        alive: False to have `_may_defer_write` ask nothing about views.
+    """
+    global _views_stand_alone
+    _views_stand_alone = alive
+    if _core is not None:
+        _core.views_alone(alive)
 
 
 def at_once_counts() -> tuple[int, int]:

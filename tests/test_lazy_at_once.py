@@ -341,45 +341,67 @@ def test_a_deferred_operation_on_an_array_that_holds_its_value_gives_it_a_node(a
 
 
 def test_a_view_taken_at_once_holds_numpys_view(at_once: None):
-    """A slice and a transpose of an array that has its values: the cell is the array's, the node comes when asked."""
+    """A slice and a transpose of an array that has its values are NumPy's views, held alone like any small result."""
     whole = lazy.zeros((4, 5)) + 1.0
     row, turned = whole[1], whole.T
-    assert len(row._seen) == array.HOLDS_ARRAY and len(turned._seen) == array.HOLDS_ARRAY
-    assert row._held is whole._held and type(whole._held) is array._Cell
+    assert type(row._held) is numpy.ndarray and row._held.base is whole._held and turned._held.base is whole._held
+    assert type(whole._held) is numpy.ndarray  # The array viewed needed no node and no cell for it.
     whole[1, 2] = 7.0  # Made at once, in the memory all three look at.
     assert row.gather()[2] == 7.0 and turned.gather()[2, 1] == 7.0
+    inner = whole[1:][0][2:]  # A view of a view of a view: each is NumPy's view of the one array.
+    row[3] = 8.0  # Through a view, into the array.
+    assert same(numpy.array([7.0, 8.0, 1.0]), inner.gather()) and whole.gather()[1, 3] == 8.0
     node = row._node
-    assert len(row._seen) == 2 and row._node is node
-    assert node.kind == graph.AT_ONCE and node.origin is row._steps[-1].origin and not node.pending
-    assert same(numpy.array([1.0, 1.0, 7.0, 1.0, 1.0]), (row * 1.0).gather())
+    assert node.kind == graph.AT_ONCE and not node.pending and row._node is node
+    assert same(numpy.array([1.0, 1.0, 7.0, 8.0, 1.0]), (row * 1.0).gather())
 
 
-def test_a_view_that_holds_its_array_is_made_again_after_a_deferred_write(at_once: None):
-    """A write that waits gives the cell new contents; the view then reads those, not the array it held."""
+def test_a_view_of_a_strict_array_is_strict(at_once: None):
+    """What is taken of a strict array refuses its values without `gather()`."""
+    data = numpy.arange(12.0).reshape(3, 4)
+    strict = get_lazy(strict=True).asarray(data) + 0.0
+    row = strict[1]
+    assert row._seen == (graph.AT_ONCE, True)
+    with pytest.raises(graph.NotGathered):
+        float(row[0])
+    assert row._node.strict and same(data[1], row.gather())
+
+
+def test_a_write_does_not_wait_while_a_view_taken_at_once_may_see_the_array(at_once: None):
+    """Such a view shows what the memory holds. A write that waited would go to a copy, and the view would not see it."""
+    def program(np: Any) -> Any:
+        """Take views, keep something large waiting, and write into the array and through a view."""
+        whole = np.zeros(10) + 0.0
+        part, other = whole[2:6], whole[::2]
+        waiting = np.asarray(numpy.arange(200.0)) * 1.0
+        whole[3] = 9.0
+        part[0] = 4.0
+        whole += 1.0
+        return part, other, whole, waiting, part * 2.0
+
     array.at_once_below(100)
+    expected = program(numpy)
+    got = program(lazy)
+    assert not got[2]._node.pending  # Each write was made where it was written, after what was waiting.
+    for theirs, ours in zip(expected, got):
+        assert same(theirs, ours.gather())
+    alone = lazy.zeros(10) + 0.0
+    waiting = lazy.asarray(numpy.arange(200.0)) * 1.0
+    alone[3] = 7.0  # No view of this array: the write waits, as it always did.
+    assert alone._node.pending and waiting._node.pending
+    in_place, copied, value = writes(alone.gather)
+    assert (in_place, copied) == (1, 0) and value[3] == 7.0
+
+
+def test_a_view_taken_at_once_outlives_the_limit_it_was_taken_under(at_once: None):
+    """With calls no longer made at once, a write into an array such a view looks at still does not wait."""
     whole = lazy.zeros(10) + 0.0
     part = whole[2:6]
-    assert len(part._seen) == array.HOLDS_ARRAY
+    array.at_once_below(NOTHING)
     waiting = lazy.asarray(numpy.arange(200.0)) * 1.0
-    whole[3] = 9.0  # Deferred: something is pending.
-    assert whole._node.pending and part._node.pending
-    assert same(numpy.array([0.0, 9.0, 0.0, 0.0]), part.gather())
-    assert same(numpy.arange(200.0), waiting.gather())
-
-
-def test_a_line_that_takes_the_same_view_again_makes_its_step_once(at_once: None):
-    """The step of a view says nothing of the array it was taken of, so a loop's views share the one of their line."""
-    arrays = [lazy.zeros(8) + float(turn) for turn in range(6)]
-    views = [each[1:-1] for each in arrays]
-    assert views[-1]._steps[0] is views[-2]._steps[0]
-    for turn, view in enumerate(views):
-        assert same(numpy.zeros(6) + float(turn), view.gather())
-    moving = [arrays[0][start:start + 2] for start in range(5)]
-    assert len({id(view._steps[0]) for view in moving}) == len(moving)
-    for start, view in enumerate(moving):
-        assert view._steps[0].tail == (slice(start, start + 2),) and same(numpy.zeros(2), view.gather())
-    shapes = [(lazy.zeros((2, width)) + 1.0).T for width in (3, 3, 3, 4, 4)]
-    assert [view.shape for view in shapes] == [(3, 2), (3, 2), (3, 2), (4, 2), (4, 2)]
+    assert waiting._node.pending
+    whole[3] = 9.0
+    assert not whole._node.pending and same(numpy.array([0.0, 9.0, 0.0, 0.0]), part.gather())
 
 
 def test_an_in_place_operator_is_made_at_once_in_the_memory(at_once: None):
@@ -401,7 +423,8 @@ def test_an_in_place_operator_is_made_at_once_in_the_memory(at_once: None):
     _, written_before = array.at_once_counts()
     deferred_before = graph.COUNTS.deferred
     got = program(lazy)
-    assert array.at_once_counts()[1] - written_before == 4 and graph.COUNTS.deferred == deferred_before
+    # Four updates, and the two views written back to where they are, which NumPy sees is nothing to do.
+    assert array.at_once_counts()[1] - written_before == 6 and graph.COUNTS.deferred == deferred_before
     assert same(expected[0], got[0].gather()) and same(expected[1], got[1].gather())
 
 
