@@ -1340,11 +1340,10 @@ class Stats:
 
 # The one set of counters of the process.
 STATS = Stats()
-# The lines of the program whose expressions are left to NumPy: a kernel call of theirs raised a floating-point
-# exception that NumPy reports, or was declined for the layout of its arrays. A flagged call's result is dropped and
-# NumPy's calls are made, so the expression is computed twice; a declined one may have copied an array for nothing.
-# A line that did either once is not planned for again, which is what a loop needs: over data with an infinity
-# or a division by zero, or over slices the module does not walk.
+# The lines of the program whose kernel call raised a floating-point exception that NumPy reports. Such a call's
+# result is dropped and NumPy's calls are made, so the expression is computed twice; a line that did it once is
+# left to NumPy from then on, which is what a loop over data with an infinity or a division by zero needs. A
+# line whose program was declined for the layout of its arrays is not remembered: its next turn may have others.
 _flagged: set[graph.Origin] = set()
 
 
@@ -1579,24 +1578,27 @@ class _Group:
         if type(old) is not Node or old.operation is not None or old.failure is not None:
             return _fused.DECLINED, None
         memory = old.value
-        part = None
+        through = self.result == STORE and how != INTO_ARRAY
         if self.result != STORE:
             # The whole array is written: where it is, or into new memory laid out as it is. Never a copy.
             value = out = memory if how == INTO_ARRAY else np.empty_like(memory)
         elif how == INTO_ARRAY:
             value, out = memory, self.target.of(memory)
-        elif how == THROUGH:
-            # `x[i] += e` where an exception may be reported: computed into a temporary of the part, and
-            # assigned from it once the result is known to be kept. A pass more, and no copy of the array.
-            value, part = memory, self.target.of(memory)
-            out = np.empty(part.shape)
         else:
-            value, out = _copy_for(self.target, memory)
-            if out.size != value.size:
-                evaluate.WRITES["copied"] += 1  # The array was copied for the part to be written into the copy.
+            # Computed into a temporary of the part, and assigned from it once the result is known to be kept:
+            # into the array itself (`x[i] += e` where an exception may be reported), or into a copy of it when
+            # something else still reads what it held. A pass more; and no array is copied for a result that
+            # is dropped or a program that is declined.
+            value, out = None, np.empty(self.target.of(memory).shape)
         raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
         kept = raised != _fused.DECLINED and not raised & self.watched
-        if kept and part is not None:
+        if kept and through:
+            if how == THROUGH:
+                value, part = memory, self.target.of(memory)
+            else:
+                value, part = _copy_for(self.target, memory)
+                if part.size != value.size:
+                    evaluate.WRITES["copied"] += 1
             part[...] = out
         if kept and value is memory:
             # The old node's memory is this node's now.
@@ -1618,7 +1620,7 @@ class _Group:
             case NumPy's own calls are what report it.
         """
         if node.origin in _flagged:
-            # The line was given up after this plan was made: an earlier group of it, in this same computation.
+            # The line's kernel raised a reported exception after this plan was made, in this same computation.
             return False
         # Asked before the operands are collected: a view of the array among them would count as a reader of it.
         write = self._written(node) if node.kind == rules.WRITE else None
@@ -1641,9 +1643,6 @@ class _Group:
             raised, value = self._elementwise(write, operands, how)
             if raised == _fused.DECLINED:
                 STATS.declined += 1
-                # Arrays laid out in a way the module does not walk. The line will hand it the same arrays at
-                # its next turn, and a write into part of an array may have copied the array for nothing.
-                _leave_to_numpy(node.origin)
                 return False
         if raised & self.watched:
             STATS.flagged += 1
