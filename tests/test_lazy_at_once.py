@@ -483,6 +483,60 @@ def test_a_value_leaves_an_array_that_has_it_without_a_word(at_once: None):
         float(x)  # NumPy's own refusal for an array of six.
 
 
+def test_an_operator_on_numbers_is_the_numpy_scalars_own(at_once: None):
+    """`x.max() * i / n`: arithmetic on what a reduction or an element gave is NumPy's scalar arithmetic, with its type,
+    its bits and its warning, and writes no node."""
+    data = numpy.random.default_rng(SEED).standard_normal(50)
+    whole = numpy.arange(1, 9)
+
+    def program(np: Any) -> list:
+        """Operators of every kind on float, integer and boolean numbers taken out of arrays."""
+        x, k = np.asarray(data), np.asarray(whole)
+        top, low, first, count = x.max(), x.min(), x[3], k.sum()
+        return [top * 3 / 7, 2.5 - top, top - low, top ** 2, -top, abs(low), top // 0.25, top % 0.5, first + count,
+                count // 3, count % 5, count * 2 - 1, count & 6, count | 1, count ^ 3, ~count, top < low, top >= 0.5,
+                top == top, first != low, (top > 0) & (low < 0), 1.0 / (top - top + 2.0)]
+
+    expected = program(numpy)
+    deferred = graph.COUNTS.deferred
+    got = program(lazy)
+    assert graph.COUNTS.deferred == deferred
+    for theirs, ours in zip(expected, got):
+        value = ours.gather() if type(ours) is LazyArray else ours
+        assert type(value) is type(theirs) and same(theirs, value)
+    x = lazy.asarray(data)
+    nothing = x.max() - x.max()
+    with warnings.catch_warnings(record=True) as lazily:
+        warnings.simplefilter("always")
+        (x.max() / nothing).gather()
+    with warnings.catch_warnings(record=True) as eagerly:
+        warnings.simplefilter("always")
+        data.max() / (data.max() - data.max())
+    assert [str(warning.message) for warning in lazily] == [str(warning.message) for warning in eagerly] != []
+    strict = get_lazy(strict=True).asarray(data)
+    with pytest.raises(graph.NotGathered):
+        float(strict.max() * 2.0)
+
+
+def test_a_large_call_no_kernel_could_make_is_made_at_once_by_the_core():
+    """A comparison, `np.exp` and `np.logical_and` on arrays past the limit, with fusion on: NumPy's call at that line."""
+    if not array.core_in_use() or not fuse.enable():
+        pytest.skip("needs the C core and the fused kernels")
+    try:
+        data = numpy.random.default_rng(SEED).standard_normal(2 * fuse.AT_ONCE_BELOW)
+        x = lazy.asarray(data)
+        made, deferred = array.at_once_counts()[0], graph.COUNTS.deferred
+        low, high = x < 0.25, x >= -0.25
+        both = lazy.logical_and(low, high)
+        grown = lazy.exp(x)
+        assert array.at_once_counts()[0] - made == 4 and graph.COUNTS.deferred == deferred
+        assert same(numpy.logical_and(data < 0.25, data >= -0.25), both.gather()) and same(numpy.exp(data), grown.gather())
+        waits = x * 2.0 + 1.0
+        assert graph.COUNTS.deferred == deferred + 2 and same(data * 2.0 + 1.0, waits.gather())
+    finally:
+        fuse.disable()
+
+
 def test_a_whole_number_of_numpys_is_an_index_like_pythons(at_once: None):
     """`x[k]` and `x[k] = v` with what `np.argmax` or a random choice gives, made at once like any other."""
     def program(np: Any) -> Any:
