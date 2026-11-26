@@ -1,0 +1,702 @@
+{
+  "meta": {
+    "cpu": "Apple M1 Pro",
+    "pinned_cpu": null,
+    "os": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+    "numpy": "2.5.5",
+    "python": "3.13.18",
+    "git": "6376b32",
+    "load_average": 2.09,
+    "libraries": {
+      "numpy": "2.5.5",
+      "pandas": "3.1.1",
+      "scikit-image": "0.26.0",
+      "scipy": "1.18.1"
+    },
+    "commit": "6376b324587fa2020afe2bb45ce3afb476fa1712",
+    "commit_date": "2026-11-25T11:22:52Z",
+    "recorded_at": "2026-11-26T10:54:06+00:00",
+    "dirty": false,
+    "sizes": [
+      "M",
+      "L"
+    ],
+    "hotkernels": "0.3.1",
+    "source": "nightly",
+    "load_average_end": 3.65
+  },
+  "rows": [
+    {
+      "workload": "flame",
+      "title": "Fractal flame: chaos game over four transforms, log-density tone mapping",
+      "ours": true,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 140917166,
+      "hotkernels_ns": 88371542,
+      "rounds": 6,
+      "counts": [
+        {
+          "numpy_call": "np.clip",
+          "elements": "float64",
+          "calls": 2,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 557,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 481
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float64",
+          "calls": 320,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.cumsum",
+          "elements": "int64",
+          "calls": 0,
+          "left_to_numpy": 40
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 53
+        },
+        {
+          "numpy_call": "np.sum",
+          "elements": "float64",
+          "calls": 40,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.bincount",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 50
+        },
+        {
+          "numpy_call": "  side='right'",
+          "elements": "float64",
+          "calls": 40,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.interp",
+          "elements": "float64",
+          "calls": 3,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x += y",
+          "elements": "float64",
+          "calls": 25,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 5416,
+          "left_to_numpy": 757
+        }
+      ],
+      "requires": [],
+      "speedup": 1.5945989264281482
+    },
+    {
+      "workload": "flame",
+      "title": "Fractal flame: chaos game over four transforms, log-density tone mapping",
+      "ours": true,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1467079042,
+      "hotkernels_ns": 953027250,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "np.clip",
+          "elements": "float64",
+          "calls": 2,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 557,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 481
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float64",
+          "calls": 320,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.cumsum",
+          "elements": "int64",
+          "calls": 0,
+          "left_to_numpy": 40
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 53
+        },
+        {
+          "numpy_call": "np.sum",
+          "elements": "float64",
+          "calls": 40,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.bincount",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 50
+        },
+        {
+          "numpy_call": "  side='right'",
+          "elements": "float64",
+          "calls": 40,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.interp",
+          "elements": "float64",
+          "calls": 3,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x += y",
+          "elements": "float64",
+          "calls": 305,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 136,
+          "left_to_numpy": 6037
+        }
+      ],
+      "requires": [],
+      "speedup": 1.5393883459261002
+    },
+    {
+      "workload": "azimint_naive",
+      "title": "NPBench azimint_naive: mean intensity per radial bin, one mask per bin",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 172052542,
+      "hotkernels_ns": 155741833,
+      "rounds": 6,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 1000,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 0,
+          "left_to_numpy": 3000
+        }
+      ],
+      "requires": [],
+      "speedup": 1.1047291449305081
+    },
+    {
+      "workload": "azimint_naive",
+      "title": "NPBench azimint_naive: mean intensity per radial bin, one mask per bin",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1890830750,
+      "hotkernels_ns": 1775838083,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 1000,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 0,
+          "left_to_numpy": 3000
+        }
+      ],
+      "requires": [],
+      "speedup": 1.0647540269018998
+    },
+    {
+      "workload": "azimint_hist",
+      "title": "NPBench azimint_hist: mean intensity per radial bin, by two histograms",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 122097125,
+      "hotkernels_ns": 71079042,
+      "rounds": 8,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 459,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 459
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 461
+        },
+        {
+          "numpy_call": "np.histogram",
+          "elements": "float64",
+          "calls": 1,
+          "left_to_numpy": 1
+        },
+        {
+          "numpy_call": "np.bincount",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 153
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 157,
+          "left_to_numpy": 2302
+        }
+      ],
+      "requires": [],
+      "speedup": 1.717765484233735
+    },
+    {
+      "workload": "azimint_hist",
+      "title": "NPBench azimint_hist: mean intensity per radial bin, by two histograms",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1220651166,
+      "hotkernels_ns": 711670291,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 4578,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 4578
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 4580
+        },
+        {
+          "numpy_call": "np.histogram",
+          "elements": "float64",
+          "calls": 1,
+          "left_to_numpy": 1
+        },
+        {
+          "numpy_call": "np.bincount",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 1526
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 1530,
+          "left_to_numpy": 22897
+        }
+      ],
+      "requires": [],
+      "speedup": 1.715191966612528
+    },
+    {
+      "workload": "mandelbrot1",
+      "title": "NPBench mandelbrot1: escape-time Mandelbrot set, masks over the whole grid",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 149027625,
+      "hotkernels_ns": 141647333,
+      "rounds": 7,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 300
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 150
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float64",
+          "calls": 151,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 2
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 2,
+          "left_to_numpy": 607
+        }
+      ],
+      "requires": [],
+      "speedup": 1.0521032895126943
+    },
+    {
+      "workload": "mandelbrot1",
+      "title": "NPBench mandelbrot1: escape-time Mandelbrot set, masks over the whole grid",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1623787208,
+      "hotkernels_ns": 1553705875,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 300
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 150
+        },
+        {
+          "numpy_call": "x[mask] = v",
+          "elements": "float64",
+          "calls": 151,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 2
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 2,
+          "left_to_numpy": 607
+        }
+      ],
+      "requires": [],
+      "speedup": 1.0451059200635384
+    },
+    {
+      "workload": "mandelbrot2",
+      "title": "NPBench mandelbrot2: escape-time Mandelbrot set, escaped points dropped",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 161822791,
+      "hotkernels_ns": 146744000,
+      "rounds": 6,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 240
+        },
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 480,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 2
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 2,
+          "left_to_numpy": 410
+        }
+      ],
+      "requires": [],
+      "speedup": 1.1027557583274274
+    },
+    {
+      "workload": "mandelbrot2",
+      "title": "NPBench mandelbrot2: escape-time Mandelbrot set, escaped points dropped",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1670536375,
+      "hotkernels_ns": 1615567750,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float32",
+          "calls": 0,
+          "left_to_numpy": 240
+        },
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 480,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 2
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 2,
+          "left_to_numpy": 410
+        }
+      ],
+      "requires": [],
+      "speedup": 1.0340243391216493
+    },
+    {
+      "workload": "make_decision",
+      "title": "numpy-benchmarks make_decision: nearest of 32 symbols for each sample, by np.argmin",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 143365625,
+      "hotkernels_ns": 84736708,
+      "rounds": 7,
+      "counts": [
+        {
+          "numpy_call": "np.argmin",
+          "elements": "float64",
+          "calls": 81920,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 81920,
+          "left_to_numpy": 163840
+        }
+      ],
+      "requires": [],
+      "speedup": 1.6918951465520704
+    },
+    {
+      "workload": "make_decision",
+      "title": "numpy-benchmarks make_decision: nearest of 32 symbols for each sample, by np.argmin",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1448188208,
+      "hotkernels_ns": 850815166,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "np.argmin",
+          "elements": "float64",
+          "calls": 819200,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 819200,
+          "left_to_numpy": 1638400
+        }
+      ],
+      "requires": [],
+      "speedup": 1.702118469289251
+    },
+    {
+      "workload": "pandas_filter",
+      "title": "pandas: s[s > 0] on a float64 Series",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 174591666,
+      "hotkernels_ns": 33944417,
+      "rounds": 6,
+      "counts": [
+        {
+          "numpy_call": "x[mask]",
+          "elements": "float64",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.nonzero",
+          "elements": "bool",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 1
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 0,
+          "left_to_numpy": 1
+        }
+      ],
+      "requires": [
+        "pandas"
+      ],
+      "speedup": 5.1434574940556494
+    },
+    {
+      "workload": "equalize_hist",
+      "title": "scikit-image: exposure.equalize_hist on a float64 image",
+      "ours": false,
+      "size": "M",
+      "identical": true,
+      "numpy_ns": 141909917,
+      "hotkernels_ns": 126792334,
+      "rounds": 7,
+      "counts": [
+        {
+          "numpy_call": "np.cumsum",
+          "elements": "int64",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 3
+        },
+        {
+          "numpy_call": "np.histogram",
+          "elements": "float64",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.interp",
+          "elements": "float64",
+          "calls": 0,
+          "left_to_numpy": 1
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 3,
+          "left_to_numpy": 3
+        }
+      ],
+      "requires": [
+        "scikit-image"
+      ],
+      "speedup": 1.1192310490948136
+    },
+    {
+      "workload": "equalize_hist",
+      "title": "scikit-image: exposure.equalize_hist on a float64 image",
+      "ours": false,
+      "size": "L",
+      "identical": true,
+      "numpy_ns": 1480345083,
+      "hotkernels_ns": 1320767125,
+      "rounds": 3,
+      "counts": [
+        {
+          "numpy_call": "np.cumsum",
+          "elements": "int64",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "x.astype(float32)",
+          "elements": "uint8",
+          "calls": 0,
+          "left_to_numpy": 3
+        },
+        {
+          "numpy_call": "np.histogram",
+          "elements": "float64",
+          "calls": 1,
+          "left_to_numpy": 0
+        },
+        {
+          "numpy_call": "np.interp",
+          "elements": "float64",
+          "calls": 0,
+          "left_to_numpy": 1
+        },
+        {
+          "numpy_call": "elementwise ufuncs",
+          "elements": "numeric",
+          "calls": 3,
+          "left_to_numpy": 3
+        }
+      ],
+      "requires": [
+        "scikit-image"
+      ],
+      "speedup": 1.1208221759759502
+    }
+  ]
+}
