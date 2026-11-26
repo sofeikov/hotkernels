@@ -301,7 +301,8 @@ def operation_of(node: Node) -> tuple[str, tuple] | None:
     name = OPERATIONS.get(operation)
     if name is not None:
         return name, args
-    if operation is np.power and type(args[1]) in (int, float) and args[1] in SQUARE_EXPONENTS:
+    if (operation is np.power or operation is operator.pow) and type(args[1]) in (int, float) \
+            and args[1] in SQUARE_EXPONENTS:
         return SQUARE, args[:1]
     return None
 

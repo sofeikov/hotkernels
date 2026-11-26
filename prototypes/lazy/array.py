@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 20
+CORE_VERSION = 21
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -809,26 +809,32 @@ def _as_array(value: Any, dtype: Any = None, copy: bool | None = None) -> np.nda
     return np.array(value, dtype=dtype, copy=True) if copy else np.asarray(value, dtype=dtype)
 
 
-def _binary(ufunc: np.ufunc, reflected: bool = False) -> Callable[..., Any]:
+def _binary(ufunc: np.ufunc, reflected: bool = False, written: Callable[..., Any] | None = None) -> Callable[..., Any]:
     """Build the method for a binary operator.
 
     Args:
         ufunc: The ufunc the operator stands for.
         reflected: True for the method Python calls when the lazy array is on the right.
+        written: What the node calls, when that is not the ufunc: the function of the `operator` module for
+            an operator that NumPy does not compute by its ufunc alone. `x ** 2` is `ndarray.__pow__`, which
+            squares, and takes a reciprocal for -1 and a square root for 0.5; `np.power(x, 2)` runs the
+            general loop, ten times slower, and for a complex root gives other bits. The node makes the
+            call the program wrote. The ufunc still gives the rule: the shape and the element type are its.
 
     Returns:
-        A method that defers the ufunc, or makes the call at once when it cannot be deferred.
+        A method that defers the call, or makes it at once when it cannot be deferred.
     """
     name = ufunc.__name__
     call = f"np.{name}"
+    operation, ruled_as = (ufunc, None) if written is None else (written, ufunc)
 
     def apply(self, other):
-        """Defer the operator's ufunc on the two operands, in the order written."""
+        """Defer the operator's call on the two operands, in the order written."""
         args = (other, self) if reflected else (self, other)
-        deferred = _try_defer(ufunc, name, args, {}, None, sys._getframe(1))
+        deferred = _try_defer(operation, name, args, {}, ruled_as, sys._getframe(1))
         # Not `deferred or ...`: a truth test of a lazy array would compute it.
-        return deferred if deferred is not None else _at_once(ufunc, call, args, {})
-    apply.road = ("binary", ufunc, name, None, reflected)
+        return deferred if deferred is not None else _at_once(operation, call, args, {})
+    apply.road = ("binary", operation, name, ruled_as, reflected)
     return apply
 
 
@@ -1982,7 +1988,8 @@ class LazyArray:
     __truediv__, __rtruediv__ = _binary(np.true_divide), _binary(np.true_divide, reflected=True)
     __floordiv__, __rfloordiv__ = _binary(np.floor_divide), _binary(np.floor_divide, reflected=True)
     __mod__, __rmod__ = _binary(np.remainder), _binary(np.remainder, reflected=True)
-    __pow__, __rpow__ = _binary(np.power), _binary(np.power, reflected=True)
+    __pow__ = _binary(np.power, written=operator.pow)
+    __rpow__ = _binary(np.power, reflected=True, written=operator.pow)
     __matmul__, __rmatmul__ = _binary(np.matmul), _binary(np.matmul, reflected=True)
     __and__, __rand__ = _binary(np.bitwise_and), _binary(np.bitwise_and, reflected=True)
     __or__, __ror__ = _binary(np.bitwise_or), _binary(np.bitwise_or, reflected=True)

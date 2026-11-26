@@ -34,7 +34,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 20
+#define CORE_VERSION 21
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -2956,12 +2956,13 @@ lazy_of_value(PyObject *value, PyObject *source, PyObject *kind, PyObject *stric
 
 /* A ufunc called now on small operands that have their values (`small_limit`): NumPy's own call, with no rule asked
  * and no node written but the one that holds the result. Taken when every operand is a lazy array with a value of
- * fewer than `small_limit` elements or a Python number, and one at least is an array. Returns a new lazy array,
+ * fewer than `small_limit` elements or a Python number, and one at least is an array. `operator` says that the
+ * callable is what an operator's road calls, which is a ufunc or `operator.pow`. Returns a new lazy array,
  * `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's at that line. */
 static PyObject *
-ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count)
+ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator)
 {
-    if (small_limit == 0 || count < 1 || count > 3 || Py_TYPE(ufunc) != Ufunc) {
+    if (small_limit == 0 || count < 1 || count > 3 || (!operator && Py_TYPE(ufunc) != Ufunc)) {
         return Miss;
     }
     PyObject *values[3], *nodes[3] = {NULL, NULL, NULL};
@@ -3097,7 +3098,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (!owned && !named && !with_tuple) {
             /* A ufunc on small arrays that have their values: made here, without NumPy's way round through
              * `__array_ufunc__`. */
-            PyObject *quick = ufunc_now(function, args + 1, count - 1);
+            PyObject *quick = ufunc_now(function, args + 1, count - 1, 0);
             if (quick != Miss) {
                 return quick;
             }
@@ -3222,7 +3223,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         if (small_limit != 0) {
             PyObject *pair[2] = {road->reflected ? args[count - 1] : args[0], road->reflected ? args[0] : args[count - 1]};
-            result = ufunc_now(road->operation, pair, count);
+            result = ufunc_now(road->operation, pair, count, 1);
             if (result != Miss) {
                 break;
             }
@@ -3233,7 +3234,9 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (operands == NULL || kwargs == NULL) {
             goto fail;
         }
-        result = try_defer(road->operation, road->name, operands, kwargs, NULL, frame);
+        /* `ruled_as` is the ufunc whose rule the call has, for an operator that is not its ufunc alone: `x ** e`. */
+        result = try_defer(road->operation, road->name, operands, kwargs,
+                           road->ruled_as == Py_None ? NULL : road->ruled_as, frame);
         break;
     case ARRAY_UFUNC:
         /* (self, ufunc, method, *inputs). `out=` alone is a write; any other keyword sends it to Python. */
@@ -3248,7 +3251,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         if (named) {
             goto python;
         }
-        result = ufunc_now(args[1], args + 3, count - 3);
+        result = ufunc_now(args[1], args + 3, count - 3, 0);
         if (result != Miss) {
             break;
         }
