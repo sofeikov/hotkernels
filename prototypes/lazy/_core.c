@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 33
+#define CORE_VERSION 34
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -4827,6 +4827,7 @@ static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
 static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
 static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
 static Py_ssize_t f_short_row, f_slight_row; /* `fuse.SHORT_ROW`, `fuse.SLIGHT_ROW` */
+static PyObject *f_row_operations;           /* `fuse.ROW_OPERATIONS` */
 static PyObject *s_isnative;
 static PyObject *s_active, *s_caught, *s_found, *s_note, *s_issue; /* The names of `evaluate._Quiet` */
 
@@ -5660,13 +5661,15 @@ count_terms(PyObject *part)
 }
 
 /* `fuse.worth_alone`: whether one operation by itself is worth a kernel. It gives an array of two dimensions or
- * more whose innermost is shorter than `fuse.SHORT_ROW`, and one of the arrays it reads along that dimension is
- * the same along an outer one, or the innermost is `fuse.SLIGHT_ROW` at most and one of them has its value and
- * does not lie in one run, or is a view still pending. */
+ * more whose innermost is shorter than `fuse.SHORT_ROW`, and an array it reads along that dimension is the same
+ * along an outer one; or the operation is one of `fuse.ROW_OPERATIONS` and an operand is one value for each row or
+ * does not lie in one run; or the innermost is `fuse.SLIGHT_ROW` at most and an operand does not lie in one run.
+ * An operand with its value is asked how it lies, and of those still pending a view counts as cutting its rows. */
 static int
 worth_alone(PyObject *expression)
 {
     PyObject *shape = SLOT(expression, expression_at[E_SHAPE]), *operands = SLOT(expression, expression_at[E_OPERANDS]);
+    PyObject *term = SLOT(expression, expression_at[E_TERM]);
     if (!same_text(SLOT(expression, expression_at[E_RESULT]), f_array) || !PyTuple_CheckExact(shape)
         || PyTuple_GET_SIZE(shape) < 2 || !PyList_CheckExact(operands)) {
         return 0;
@@ -5684,56 +5687,89 @@ worth_alone(PyObject *expression)
     if (length <= 0 || length >= f_short_row) {
         return 0;
     }
+    int by_rows = Py_TYPE(term) == FTerm ? PySequence_Contains(f_row_operations, SLOT(term, term_at[T_OP])) : 0;
+    if (by_rows < 0) {
+        PyErr_Clear();
+        by_rows = 0;
+    }
     for (Py_ssize_t place = 0; place < PyList_GET_SIZE(operands); place++) {
         PyObject *operand = PyList_GET_ITEM(operands, place);
+        PyObject *value = NULL;
+        Py_ssize_t laid = 0, along = 0;
+        int same = 1, many = 0, pending_view = 0;
         if (Py_TYPE(operand) == Node) {
-            PyObject *laid = SLOT(operand, node_at[N_SHAPE]);
-            if (laid == NULL || !PyTuple_CheckExact(laid) || PyTuple_GET_SIZE(laid) == 0) {
+            PyObject *written = SLOT(operand, node_at[N_SHAPE]);
+            if (written == NULL || !PyTuple_CheckExact(written) || PyTuple_GET_SIZE(written) == 0) {
                 continue;
             }
-            int along = PyObject_RichCompareBool(PyTuple_GET_ITEM(laid, PyTuple_GET_SIZE(laid) - 1), last, Py_EQ);
-            int same = along > 0 ? PyObject_RichCompareBool(laid, shape, Py_EQ) : 1;
-            if (along < 0 || same < 0) {
-                PyErr_Clear();
-                continue;
-            }
-            if (along && !same) {
-                return 1;
-            }
-            if (!along || length > f_slight_row) {
-                continue;
-            }
-            if (SLOT(operand, node_at[N_OPERATION]) != Py_None) {
-                PyObject *kind = SLOT(operand, node_at[N_KIND]);
-                int view = kind == view_kind ? 1 : PyObject_RichCompareBool(kind, view_kind, Py_EQ);
-                if (view < 0) {
+            laid = PyTuple_GET_SIZE(written);
+            same = laid == dimensions;
+            for (Py_ssize_t axis = 0; axis < laid; axis++) {
+                Py_ssize_t count = PyLong_AsSsize_t(PyTuple_GET_ITEM(written, axis));
+                if (count == -1 && PyErr_Occurred()) {
                     PyErr_Clear();
-                } else if (view) {
-                    return 1;
+                    count = -1;
                 }
-                continue;
-            }
-            PyObject *value = SLOT(operand, node_at[N_VALUE]);
-            if (value != NULL && Py_TYPE(value) == Ndarray && !PyArray_IS_C_CONTIGUOUS((PyArrayObject *)value)) {
-                return 1;
-            }
-        } else if (Py_TYPE(operand) == Ndarray) {
-            PyArrayObject *array = (PyArrayObject *)operand;
-            int laid = PyArray_NDIM(array);
-            if (laid == 0 || PyArray_DIM(array, laid - 1) != length) {
-                continue; /* A number, or one value for each row. */
-            }
-            int same = laid == dimensions;
-            for (int axis = 0; same && axis < laid; axis++) {
-                same = PyArray_DIM(array, axis) == PyLong_AsSsize_t(PyTuple_GET_ITEM(shape, axis));
+                many = many || count != 1;
+                along = count;
+                if (same && count != PyLong_AsSsize_t(PyTuple_GET_ITEM(shape, axis))) {
+                    same = 0;
+                }
             }
             if (PyErr_Occurred()) {
                 PyErr_Clear();
                 continue;
             }
-            if (!same || (length <= f_slight_row && !PyArray_IS_C_CONTIGUOUS(array))) {
-                return 1;
+            if (SLOT(operand, node_at[N_OPERATION]) != Py_None) {
+                PyObject *kind = SLOT(operand, node_at[N_KIND]);
+                pending_view = kind == view_kind ? 1 : PyObject_RichCompareBool(kind, view_kind, Py_EQ);
+                if (pending_view < 0) {
+                    PyErr_Clear();
+                    pending_view = 0;
+                }
+            } else {
+                value = SLOT(operand, node_at[N_VALUE]);
             }
+        } else if (Py_TYPE(operand) == Ndarray) {
+            PyArrayObject *array = (PyArrayObject *)operand;
+            laid = PyArray_NDIM(array);
+            if (laid == 0) {
+                continue;
+            }
+            same = laid == dimensions;
+            for (Py_ssize_t axis = 0; axis < laid; axis++) {
+                Py_ssize_t count = PyArray_DIM(array, (int)axis);
+                many = many || count != 1;
+                along = count;
+                if (same && count != PyLong_AsSsize_t(PyTuple_GET_ITEM(shape, axis))) {
+                    same = 0;
+                }
+            }
+            if (PyErr_Occurred()) {
+                PyErr_Clear();
+                continue;
+            }
+            value = operand;
+        } else {
+            continue; /* A number. */
+        }
+        if (along != length) {
+            if (by_rows && along == 1 && many) {
+                return 1; /* One value for each row. */
+            }
+            continue;
+        }
+        if (!same) {
+            return 1;
+        }
+        if (!by_rows && length > f_slight_row) {
+            continue;
+        }
+        if (pending_view) {
+            return 1;
+        }
+        if (value != NULL && Py_TYPE(value) == Ndarray && !PyArray_IS_C_CONTIGUOUS((PyArrayObject *)value)) {
+            return 1;
         }
     }
     return 0;
@@ -5895,6 +5931,12 @@ module_find_setup(PyObject *module, PyObject *args, PyObject *given)
     f_most_depth = PyLong_AsSsize_t(depth);
     f_short_row = PyLong_AsSsize_t(short_row);
     f_slight_row = PyLong_AsSsize_t(slight_row);
+    PyObject *row_operations = PyDict_GetItemString(given, "row_operations");
+    if (row_operations == NULL || !PyTuple_CheckExact(row_operations)) {
+        PyErr_SetString(PyExc_KeyError, "find_setup() was not given the tuple 'row_operations'");
+        return NULL;
+    }
+    Py_XSETREF(f_row_operations, Py_NewRef(row_operations));
     if (PyErr_Occurred()) {
         return NULL;
     }

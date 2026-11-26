@@ -658,7 +658,8 @@ def _reading_core() -> Any:
                         vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
                         float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
                         is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH,
-                        short_row=SHORT_ROW, slight_row=SLIGHT_ROW)
+                        short_row=SHORT_ROW, slight_row=SLIGHT_ROW,
+                        row_operations=ROW_OPERATIONS)
         _told_core = core
     return core
 
@@ -673,9 +674,14 @@ def _reading_core() -> Any:
 #   table * other               both in one run                          0.85 to 0.93: NumPy walks them as one too
 #   table * column[:, None]     one value for each row                   0.23 to 0.63, a call for each row
 #
-# So the first is an expression below SHORT_ROW, the second up to SLIGHT_ROW, and the others never.
+# So the first is an expression below SHORT_ROW, the second up to SLIGHT_ROW, and the others never by a kernel's
+# call. The four operations of arithmetic are made a row at a time by a loop of the module's own (`program_rows`
+# of `_fused.c`), which has nothing in it but the row's arithmetic, and for those every layout but the third is an
+# expression below SHORT_ROW.
 SHORT_ROW = 16
 SLIGHT_ROW = 8
+# The operations the module makes a row at a time, by their names in a pattern: `ROW_KERNELS` of `_fused.c`.
+ROW_OPERATIONS = ("add", "sub", "mul", "div")
 
 
 def worth_alone(expression: Expression) -> bool:
@@ -686,25 +692,33 @@ def worth_alone(expression: Expression) -> bool:
 
     Returns:
         True when it gives an array of two dimensions or more whose
-        innermost is shorter than `SHORT_ROW`, and one of the arrays it
-        reads along that dimension is the same along an outer one (`table -
-        row`), or the innermost is `SLIGHT_ROW` at most and one of them
-        has its value and does not lie in one run (a slice that cuts the
-        innermost dimension). An operand still pending has no layout to
-        ask: a view counts as one that cuts its rows, which the module
-        finds out and walks as one run if it does not, and anything else
-        as lying in one run.
+        innermost is shorter than `SHORT_ROW`, and one of these holds. An
+        array it reads along that dimension is the same along an outer one
+        (`table - row`). The operation is one of `ROW_OPERATIONS`, which
+        the module makes a row at a time by a loop of its own, and an
+        operand is one value for each row (`table * column[:, None]`) or
+        does not lie in one run. Or the innermost is `SLIGHT_ROW` at most
+        and an operand does not lie in one run, for any operation. An
+        operand that has its value is asked how it lies; one still pending
+        has no layout to ask, and then a view counts as one that cuts its
+        rows, which the module finds out and walks as one run if it does
+        not, and anything else as lying in one run.
     """
     shape = expression.shape
     if expression.result != ARRAY or len(shape) < 2 or not 0 < shape[-1] < SHORT_ROW:
         return False
+    by_rows = type(expression.term) is Term and expression.term.op in ROW_OPERATIONS
     for operand in expression.operands:
         laid = getattr(operand, "shape", None)
-        if not laid or laid[-1] != shape[-1]:
-            continue  # A number, or one value for each row.
+        if not laid:
+            continue  # A number.
+        if laid[-1] != shape[-1]:
+            if by_rows and laid[-1] == 1 and any(length != 1 for length in laid):
+                return True  # One value for each row.
+            continue
         if tuple(laid) != tuple(shape):
             return True
-        if shape[-1] > SLIGHT_ROW:
+        if not by_rows and shape[-1] > SLIGHT_ROW:
             continue
         if type(operand) is Node and operand.operation is not None:
             if operand.kind == rules.VIEW:
@@ -1530,6 +1544,23 @@ def _copy_for(target: ViewOf, old: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return new, target.of(new)
 
 
+def assign_rows(part: np.ndarray, values: np.ndarray) -> None:
+    """Assign an array into a part of another of the same shape: `part[...] = values`.
+
+    NumPy's assignment calls its copying loop once for each row of a part
+    that does not lie in one run, and for rows of a few elements the module
+    copies them quicker (`_fused.assign`). Rows of `SHORT_ROW` elements or
+    more, and whatever the module does not take, are NumPy's.
+
+    Args:
+        part: Where the values belong: a float64 array, usually a slice of one.
+        values: What to put there, of the same shape.
+    """
+    if part.ndim > 1 and part.shape[-1] < SHORT_ROW and _fused is not None and _fused.assign(part, values):
+        return
+    part[...] = values
+
+
 class _Group:
     """The nodes computed together under one node: the tiles of an expression that feed one another, with what they read.
 
@@ -1716,7 +1747,7 @@ class _Group:
                 value, part = _copy_for(self.target, memory)
                 if part.size != value.size:
                     evaluate.WRITES["copied"] += 1
-            part[...] = out
+            assign_rows(part, out)
         if kept and value is memory:
             # The old node's memory is this node's now.
             old.value = None
@@ -2188,6 +2219,7 @@ def enable() -> bool:
         LIBRARY_VECTORS.update({kernel.index: len(kernel.vectors) for kernel in LIBRARY.values()})
         _BY_TOP.update(index(LIBRARY))
     evaluate.planner = plan
+    array.assign_rows = assign_rows
     # What may wait for a kernel: the arithmetic a kernel makes, on float64. Everything else on arrays that have
     # their values is made at once, whatever its size.
     array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | {operator.pow, np.power}, FLOAT64)
@@ -2197,6 +2229,7 @@ def enable() -> bool:
 def disable() -> None:
     """Have every node computed by its own call again, and every operation written as a node."""
     evaluate.planner = None
+    array.assign_rows = None
     array.at_once_below(0)
 
 

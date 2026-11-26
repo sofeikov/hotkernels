@@ -863,6 +863,117 @@ program_spanned(const program_step *steps, Py_ssize_t step_count, operand *reads
     return 1;
 }
 
+/* The kernels that are one operation of arithmetic on two arrays, or on an array and a number: what `program_rows`
+ * makes by a loop of its own. `left` and `right` say which side is the kernel's number. */
+typedef struct {
+    const char *name;
+    char operation;
+    int left, right;
+} row_kernel;
+static const row_kernel ROW_KERNELS[] = {
+    {"fuse_add_v_v_f64", '+', 0, 0}, {"fuse_sub_v_v_f64", '-', 0, 0}, {"fuse_mul_v_v_f64", '*', 0, 0}, {"fuse_div_v_v_f64", '/', 0, 0},
+    {"fuse_add_s_v_f64", '+', 1, 0}, {"fuse_mul_s_v_f64", '*', 1, 0}, {"fuse_sub_s_v_f64", '-', 1, 0}, {"fuse_div_s_v_f64", '/', 1, 0},
+    {"fuse_sub_v_s_f64", '-', 0, 1}, {"fuse_div_v_s_f64", '/', 0, 1},
+};
+
+/* The entry of `ROW_KERNELS` for a kernel, or NULL when it is none of them. */
+static const row_kernel *
+row_kernel_of(const fused_kernel *kernel)
+{
+    for (size_t each = 0; each < sizeof ROW_KERNELS / sizeof ROW_KERNELS[0]; each++) {
+        if (strcmp(kernel->name, ROW_KERNELS[each].name) == 0) {
+            return &ROW_KERNELS[each];
+        }
+    }
+    return NULL;
+}
+
+/* The rows along one dimension of one operation: `rows` of them, `width` elements each, of the arrays at `pa` and
+ * `pb` or of one of them and a number, into the rows at `po`. From one row to the next each moves by its own count
+ * of bytes: `sa`, `sb`, `so`, and `sx` for the number at `px`, which is nothing for a number that is the same for
+ * every row. Each element is the processor's one instruction for the operation, which is what NumPy's loop and the
+ * kernel make. */
+static void
+rows_made(const row_kernel *made, const char *pa, const char *pb, const char *px, char *po, npy_intp rows, npy_intp width,
+          npy_intp sa, npy_intp sb, npy_intp sx, npy_intp so)
+{
+#define ROWS(expression) \
+    for (npy_intp row = 0; row < rows; row++) { \
+        const double *a = (const double *)(pa + row * sa), *b = (const double *)(pb + row * sb); \
+        const double x = *(const double *)(px + row * sx); \
+        double *out = (double *)(po + row * so); \
+        for (npy_intp each = 0; each < width; each++) { \
+            out[each] = expression; \
+        } \
+        (void)b; \
+        (void)x; \
+    }
+    switch (made->operation) {
+    case '+':
+        if (made->left) { ROWS(x + a[each]) } else { ROWS(a[each] + b[each]) }
+        break;
+    case '*':
+        if (made->left) { ROWS(x * a[each]) } else { ROWS(a[each] * b[each]) }
+        break;
+    case '-':
+        if (made->left) { ROWS(x - a[each]) } else if (made->right) { ROWS(a[each] - x) } else { ROWS(a[each] - b[each]) }
+        break;
+    default:
+        if (made->left) { ROWS(x / a[each]) } else if (made->right) { ROWS(a[each] / x) } else { ROWS(a[each] / b[each]) }
+        break;
+    }
+#undef ROWS
+}
+
+/* A program that is one kernel of one operation, on rows too short for a call each. NumPy's loop is called once for
+ * each row of arrays it cannot walk as one run, which costs it more than a short row's arithmetic: `table *
+ * weights[:, None]` on 100,000 rows of four takes it 294 µs and `table[:, :2] += made` on rows of two 861 µs. A
+ * call of the kernel for each row costs as much. So the operation is made here, by two loops with nothing in them
+ * but the rows' arithmetic: 105 µs and 90 µs for those two, written out by themselves. The arrays may lie at any
+ * pitch, a number may be another for each row, and the result may be one of the arrays, element for element.
+ *
+ * `made` is the kernel's entry and `step` the program's one step. The dimension outside the rows is walked by
+ * `rows_made`, and the ones outside that are stepped here. Returns 0. */
+static int
+program_rows(const row_kernel *made, const program_step *step, operand *reads, int arrays, int numbers_given, int dimensions,
+             const npy_intp *shape)
+{
+    operand *target = &reads[arrays], *numbers = &reads[arrays + 1];
+    const operand *first = &reads[step->reads[0]];
+    const operand *second = step->kernel->vectors > 1 ? &reads[step->reads[1]] : first;
+    const operand *number = step->kernel->scalars ? &numbers[step->numbers[0]] : NULL;
+    int last = dimensions - 1, along = dimensions - 2;
+    double same = number != NULL && !number->is_array ? number->number : 0.0;
+    npy_intp position[MOST_DIMENSIONS] = {0};
+    for (;;) {
+        const char *px = number != NULL && number->is_array ? number->data : (const char *)&same;
+        npy_intp sx = number != NULL && number->is_array ? number->strides[along] : 0;
+        rows_made(made, first->data, second->data, px, target->data, shape[along], shape[last], first->strides[along],
+                  second->strides[along], sx, target->strides[along]);
+        int axis = along - 1;
+        for (; axis >= 0; axis--) {
+            if (++position[axis] < shape[axis]) {
+                for (int place = 0; place <= arrays + numbers_given; place++) {
+                    if (reads[place].is_array) {
+                        reads[place].data += reads[place].strides[axis];
+                    }
+                }
+                break;
+            }
+            for (int place = 0; place <= arrays + numbers_given; place++) {
+                if (reads[place].is_array) {
+                    reads[place].data -= reads[place].strides[axis] * (shape[axis] - 1);
+                }
+            }
+            position[axis] = 0;
+        }
+        if (axis < 0) {
+            break;
+        }
+    }
+    return 0;
+}
+
 /* One step of a program with everything about it that does not change from run to run worked out: the kernel, and
  * for each array it reads and for its result the address of the pointer that says where that is now. An operand's
  * pointer moves as the walk steps; a buffer's stays. */
@@ -1170,6 +1281,16 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
     for (int place = 0; place < arrays; place++) {
         stepped = stepped || reads[place].stepped;
     }
+    if (!stepped && run < SHORTEST_ROW && outer > 0 && step_count == 1 && row_kernel_of(steps[0].kernel) != NULL) {
+        /* One operation of arithmetic on rows of a few elements: the module's own loop; see `program_rows`. */
+        feclearexcept(FE_ALL_EXCEPT);
+        program_rows(row_kernel_of(steps[0].kernel), &steps[0], reads, (int)arrays, numbers_given, dimensions, shape);
+        int flags = fetestexcept(REPORTED);
+        if (flags) {
+            feclearexcept(FE_ALL_EXCEPT);
+        }
+        return PyLong_FromLong(flags);
+    }
     if (!stepped && run < SHORTEST_RUN) {
         /* Rows too short to be worth a call each. Where they lie at one pitch in every array they are walked
          * straight through, the elements between them included: see `program_spanned`. */
@@ -1370,7 +1491,71 @@ fused_kernels(PyObject *module, PyObject *unused)
     return rows;
 }
 
+/* assign(part, values) -> True, or False when it was not done.
+ *
+ * `part[...] = values` for two float64 arrays of one shape and two dimensions or more, of which `values` lies in
+ * one run and `part` need not: the rows of a result that was computed into memory of its own, copied to where they
+ * belong. NumPy's assignment is a call of its copying loop for each row, 419 µs for 100,000 rows of two elements.
+ * Nothing is done, and False returned, for arrays that are anything else or that may share memory. */
+static PyObject *
+fused_assign(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 2 || !PyArray_CheckExact(args[0]) || !PyArray_CheckExact(args[1])) {
+        PyErr_SetString(PyExc_TypeError, "assign(part, values) takes two arrays");
+        return NULL;
+    }
+    PyArrayObject *part = (PyArrayObject *)args[0], *values = (PyArrayObject *)args[1];
+    int dimensions = PyArray_NDIM(part);
+    if (dimensions < 2 || dimensions > MOST_DIMENSIONS || PyArray_NDIM(values) != dimensions || PyArray_TYPE(part) != NPY_DOUBLE
+        || PyArray_TYPE(values) != NPY_DOUBLE || !PyArray_ISBEHAVED(part) || !PyArray_ISBEHAVED_RO(values)
+        || !PyArray_IS_C_CONTIGUOUS(values) || !PyArray_SAMESHAPE(part, values) || PyArray_SIZE(part) == 0) {
+        Py_RETURN_FALSE;
+    }
+    npy_intp shape[MOST_DIMENSIONS], position[MOST_DIMENSIONS] = {0};
+    const npy_intp *strides = PyArray_STRIDES(part);
+    const char *low = PyArray_BYTES(part), *high = PyArray_BYTES(part) + ELEMENT;
+    for (int axis = 0; axis < dimensions; axis++) {
+        shape[axis] = PyArray_DIM(part, axis);
+        if (strides[axis] < 0) {
+            Py_RETURN_FALSE;
+        }
+        high += strides[axis] * (shape[axis] - 1);
+    }
+    const char *from_low = PyArray_BYTES(values), *from_high = from_low + PyArray_NBYTES(values);
+    if (strides[dimensions - 1] != ELEMENT || (low < from_high && from_low < high)) {
+        Py_RETURN_FALSE; /* Rows that step, or arrays that may share memory: NumPy's assignment knows what to do. */
+    }
+    int last = dimensions - 1, along = dimensions - 2;
+    npy_intp width = shape[last], rows = shape[along], pitch = strides[along];
+    const double *source = (const double *)PyArray_BYTES(values);
+    char *at = PyArray_BYTES(part);
+    for (;;) {
+        for (npy_intp row = 0; row < rows; row++) {
+            double *to = (double *)(at + row * pitch);
+            for (npy_intp each = 0; each < width; each++) {
+                to[each] = source[each];
+            }
+            source += width;
+        }
+        int axis = along - 1;
+        for (; axis >= 0; axis--) {
+            if (++position[axis] < shape[axis]) {
+                at += strides[axis];
+                break;
+            }
+            at -= strides[axis] * (shape[axis] - 1);
+            position[axis] = 0;
+        }
+        if (axis < 0) {
+            break;
+        }
+    }
+    Py_RETURN_TRUE;
+}
+
 static PyMethodDef methods[] = {
+    {"assign", (PyCFunction)(void (*)(void))fused_assign, METH_FASTCALL,
+     "assign(part, values) -> whether the rows of `values` were copied into `part`"},
     {"elementwise", (PyCFunction)(void (*)(void))fused_elementwise, METH_FASTCALL,
      "elementwise(kernel, operands, out) -> the exceptions raised, or DECLINED"},
     {"program", (PyCFunction)(void (*)(void))fused_program, METH_FASTCALL,

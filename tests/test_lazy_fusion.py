@@ -369,24 +369,59 @@ def test_short_rows_with_much_between_them_are_walked_or_left_to_numpy(width: in
 
 @pytest.mark.parametrize("width", (2, 4, 8, 15, 16))
 def test_one_operation_is_a_kernels_where_numpy_would_make_it_a_short_row_at_a_time(width: int):
-    """`table - row`, and a slice with elements between its rows, are worth a kernel by themselves; other layouts are not."""
+    """`table - row`, a value for each row, a slice with elements between its rows and rows at two pitches are worth
+    a kernel by themselves; two arrays in one run are not, nor anything but arithmetic on rows longer than eight."""
     table, other = arrays(2, (500, width))
     wide = arrays(1, (500, 2 * width))[0]
     row, column = arrays(1, (width,))[0], arrays(1, (500,))[0]
     t, o, w, r, c = (lazy.asarray(each) for each in (table, other, wide, row, column))
+    short, slight = width < fuse.SHORT_ROW, width <= fuse.SLIGHT_ROW
     cases = (
-        (lambda: t - r, table - row, width < fuse.SHORT_ROW),
-        (lambda: r * t, row * table, width < fuse.SHORT_ROW),
-        (lambda: w[:, width:] * 0.5, wide[:, width:] * 0.5, width <= fuse.SLIGHT_ROW),
-        (lambda: w[:, :width] - w[:, width:], wide[:, :width] - wide[:, width:], width <= fuse.SLIGHT_ROW),
+        (lambda: t - r, table - row, short),
+        (lambda: r * t, row * table, short),
+        (lambda: w[:, width:] * 0.5, wide[:, width:] * 0.5, short),
+        (lambda: 0.5 / w[:, width:], 0.5 / wide[:, width:], short),
+        (lambda: w[:, :width] - w[:, width:], wide[:, :width] - wide[:, width:], short),
+        (lambda: t * c[:, None], table * column[:, None], short),
+        (lambda: c[:, None] - t, column[:, None] - table, short),
+        (lambda: t / c[:, None], table / column[:, None], short),
+        (lambda: w[:, :width] * o, wide[:, :width] * other, short),
+        (lambda: o + w[:, width:], other + wide[:, width:], short),
+        (lambda: lazy.abs(w[:, width:]), numpy.abs(wide[:, width:]), slight),
+        (lambda: lazy.maximum(w[:, :width], w[:, width:]), numpy.maximum(wide[:, :width], wide[:, width:]), slight),
         (lambda: t * o, table * other, False),
-        (lambda: t * c[:, None], table * column[:, None], False),
-        (lambda: w[:, :width] * o, wide[:, :width] * other, False),
     )
     for program, expected, by_kernel in cases:
         before = sum(fuse.STATS.calls.values())
         assert same(expected, program().gather())
         assert sum(fuse.STATS.calls.values()) - before == (1 if by_kernel else 0)
+
+
+@pytest.mark.parametrize("shape", ((7, 5, 3), (4, 3, 6, 2), (9, 15), (3, 1, 4)))
+def test_rows_of_one_operation_are_made_in_any_layout(shape: tuple[int, ...]):
+    """The module's loop for one operation on short rows: arrays at any pitch, a value for each row, results in place
+    and into parts, in two dimensions and more, with NumPy's bits."""
+    width = shape[-1]
+    wide_shape = shape[:-1] + (2 * width + 1,)
+    a, b = arrays(2, wide_shape)
+    values = arrays(1, shape[:-1] + (1,))[0]
+
+    def program(np: Any) -> list:
+        """One operation at a time on slices of two grids, into new arrays, in place and into a part of a third."""
+        x, y, v = np.asarray(a.copy()), np.asarray(b.copy()), np.asarray(values)
+        left, right = x[..., :width], y[..., width + 1:]
+        made = [left + right, left - right, left * right, left / right, left * v, v - right, right / v, 2.5 - left, left / 0.5]
+        into = np.zeros(wide_shape)
+        into[..., 1:width + 1] = left * right
+        x[..., :width] += right * 0.5
+        y[..., width + 1:] -= v
+        return made + [into, x, y]
+
+    with numpy.errstate(all="ignore"):
+        expected = program(numpy)
+        got = program(lazy)
+        for theirs, ours in zip(expected, got):
+            assert same(theirs, ours.gather())
 
 
 def test_an_operation_written_over_by_the_next_line_is_one_program_with_it():

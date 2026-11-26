@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 33
+CORE_VERSION = 34
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -1477,6 +1477,47 @@ def _same_index(first: Any, second: Any) -> bool:
         return False
 
 
+# The innermost dimension below which an in-place operator made at once is made as an expression and an assignment
+# (`_is_short_rows`): the one below which NumPy's call for each row costs more than the row's arithmetic.
+SHORT_ROW = 16
+# A quicker `part[...] = values` for two float64 arrays of one shape whose rows are a few elements, or None for
+# NumPy's own: `fuse.enable()` sets it.
+assign_rows: Callable[[np.ndarray, np.ndarray], None] | None = None
+
+
+def _is_short_rows(node: Node, other: Any) -> bool:
+    """Say whether an in-place operator about to be made at once is better made as an expression and an assignment.
+
+    `x[:, :2] += made` on 100,000 rows takes NumPy 861 µs: its loop is
+    called for each row of two elements. The sum as an expression of its
+    own is a loop of the planner's module over the rows, and its rows are
+    then assigned, each in about a fifth of that. A warning the sum raises
+    is NumPy's for the same operation on the same line; an error leaves the
+    array as it was.
+
+    Args:
+        node: The node of the array written into.
+        other: What the operator's right-hand side is.
+
+    Returns:
+        True when a planner and its assignment are set, the array has its
+        values, float64, in two dimensions or more with an innermost shorter
+        than `SHORT_ROW` and not in one run, and is large enough for a call
+        on it to wait; and `other` is a float64 lazy array of the same shape.
+    """
+    if evaluate.planner is None or assign_rows is None or not _at_once_limit:
+        return False
+    value = node.value
+    if node.operation is not None or type(value) is not np.ndarray or value.dtype != np.float64:
+        return False
+    if value.ndim < 2 or value.shape[-1] >= SHORT_ROW or value.flags.c_contiguous or value.size < _at_once_limit:
+        return False
+    if type(other) is not LazyArray:
+        return False
+    waiting = other._node
+    return waiting.shape == value.shape and waiting.dtype == np.float64
+
+
 def _in_place(apply: Callable[[Any, Any], Any], symbol: str, ufunc: np.ufunc) -> Callable[..., Any]:
     """Build the method for an in-place operator, which is a write.
 
@@ -1507,6 +1548,15 @@ def _in_place(apply: Callable[[Any, Any], Any], symbol: str, ufunc: np.ufunc) ->
             return self
         graph.fallback(graph.WRITE, symbol)
         trigger = Trigger(graph.WRITE, symbol)
+        if _is_short_rows(node, other):
+            # NumPy would make the operator a row at a time. The operator's own expression is made instead, which
+            # a planner computes by a loop over the rows, and the result's rows are assigned.
+            made = _defer_or_call(ufunc, ufunc.__name__, f"np.{ufunc.__name__}", (self, other), sys._getframe(1))
+            evaluate.compute_pending(trigger)
+            result = _valued(made)
+            if type(result) is np.ndarray and result.shape == node.value.shape and result.dtype == node.value.dtype:
+                assign_rows(node.value, result)
+                return self
         evaluate.compute_pending(trigger)
         evaluate.compute([self._node], trigger)
         value = self._node.value
