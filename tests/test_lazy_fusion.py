@@ -367,6 +367,40 @@ def test_short_rows_with_much_between_them_are_walked_or_left_to_numpy(width: in
         assert fuse.STATS.declined == (0 if made else 1) and (fuse.STATS.fused_nodes > 0) == made
 
 
+@pytest.mark.parametrize("width", (2, 4, 8, 15, 16))
+def test_one_operation_is_a_kernels_where_numpy_would_make_it_a_short_row_at_a_time(width: int):
+    """`table - row`, and a slice with elements between its rows, are worth a kernel by themselves; other layouts are not."""
+    table, other = arrays(2, (500, width))
+    wide = arrays(1, (500, 2 * width))[0]
+    row, column = arrays(1, (width,))[0], arrays(1, (500,))[0]
+    t, o, w, r, c = (lazy.asarray(each) for each in (table, other, wide, row, column))
+    cases = (
+        (lambda: t - r, table - row, width < fuse.SHORT_ROW),
+        (lambda: r * t, row * table, width < fuse.SHORT_ROW),
+        (lambda: w[:, width:] * 0.5, wide[:, width:] * 0.5, width <= fuse.SLIGHT_ROW),
+        (lambda: w[:, :width] - w[:, width:], wide[:, :width] - wide[:, width:], width <= fuse.SLIGHT_ROW),
+        (lambda: t * o, table * other, False),
+        (lambda: t * c[:, None], table * column[:, None], False),
+        (lambda: w[:, :width] * o, wide[:, :width] * other, False),
+    )
+    for program, expected, by_kernel in cases:
+        before = sum(fuse.STATS.calls.values())
+        assert same(expected, program().gather())
+        assert sum(fuse.STATS.calls.values()) - before == (1 if by_kernel else 0)
+
+
+def test_an_operation_written_over_by_the_next_line_is_one_program_with_it():
+    """`e = a - b; e /= s`: what the array held is an operation the program makes, so there is no memory of it yet."""
+    a, b = arrays(2, (300, 40))
+    x, y = lazy.asarray(a), lazy.asarray(b)
+    error = (x - y + 3.0) * x - 3.0
+    error /= 0.25
+    expected = (a - b + 3.0) * a - 3.0
+    expected /= 0.25
+    assert same(expected, error.gather())
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes >= 4
+
+
 @pytest.mark.parametrize("pitch", (2, 5, 40))
 def test_a_program_of_one_kernel_on_rows_of_one_element_gives_numpys_values(pitch: int):
     """`x[:, :1]` of a table: no call is made for one element at a time."""

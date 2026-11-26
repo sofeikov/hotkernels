@@ -657,9 +657,63 @@ def _reading_core() -> Any:
                         reductions=REDUCTIONS, square_exponents=SQUARE_EXPONENTS, square=SQUARE, where=WHERE,
                         vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
                         float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
-                        is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH)
+                        is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH,
+                        short_row=SHORT_ROW, slight_row=SLIGHT_ROW)
         _told_core = core
     return core
+
+
+# The innermost dimension below which one operation by itself can be an expression, and the one up to which it is
+# for an array that does not lie in one run: `SHORTEST_ROW` and `SLIGHT_ROW` of `_fused.c`. NumPy walks operands it
+# cannot take as one run a row at a time, and for rows this short the call of its loop costs more than the row's
+# arithmetic. Timed on 100,000 rows of 2, 4, 8 and 15 elements, the layer against NumPy's one call:
+#
+#   table - row                 an operand the same for every row        9.1, 6.6, 2.6 and 1.8 times as fast
+#   wide[:, half:] * 0.1        a slice with as much again between rows  1.5, 1.4, 1.5 times, and 0.64 at 15
+#   table * other               both in one run                          0.85 to 0.93: NumPy walks them as one too
+#   table * column[:, None]     one value for each row                   0.23 to 0.63, a call for each row
+#
+# So the first is an expression below SHORT_ROW, the second up to SLIGHT_ROW, and the others never.
+SHORT_ROW = 16
+SLIGHT_ROW = 8
+
+
+def worth_alone(expression: Expression) -> bool:
+    """Say whether one operation by itself is worth a kernel: NumPy would make it a row of a few elements at a time.
+
+    Args:
+        expression: An expression read off a computation.
+
+    Returns:
+        True when it gives an array of two dimensions or more whose
+        innermost is shorter than `SHORT_ROW`, and one of the arrays it
+        reads along that dimension is the same along an outer one (`table -
+        row`), or the innermost is `SLIGHT_ROW` at most and one of them
+        has its value and does not lie in one run (a slice that cuts the
+        innermost dimension). An operand still pending has no layout to
+        ask: a view counts as one that cuts its rows, which the module
+        finds out and walks as one run if it does not, and anything else
+        as lying in one run.
+    """
+    shape = expression.shape
+    if expression.result != ARRAY or len(shape) < 2 or not 0 < shape[-1] < SHORT_ROW:
+        return False
+    for operand in expression.operands:
+        laid = getattr(operand, "shape", None)
+        if not laid or laid[-1] != shape[-1]:
+            continue  # A number, or one value for each row.
+        if tuple(laid) != tuple(shape):
+            return True
+        if shape[-1] > SLIGHT_ROW:
+            continue
+        if type(operand) is Node and operand.operation is not None:
+            if operand.kind == rules.VIEW:
+                return True
+        else:
+            value = operand.value if type(operand) is Node else operand
+            if type(value) is np.ndarray and not value.flags.c_contiguous:
+                return True
+    return False
 
 
 def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[Expression], set[int]]:
@@ -670,13 +724,15 @@ def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[E
             before the nodes it reads, so the largest tree it is the top of is read before any part of it. The
             caller's one list of them, since references are counted (`held_among`).
         fewest: The fewest elements an expression's operations run over for it to be read.
-        alone: Whether one operation by itself counts as an expression. Not for a computation, where NumPy's
-            own call is the way to make one operation; it does for the oracle of a kernel of one operation.
+        alone: Whether one operation by itself counts as an expression whatever its shape. Not for a
+            computation, where NumPy's own call is the way to make one operation unless it would make it a
+            row of a few elements at a time (`worth_alone`); it does for the oracle of a kernel of one operation.
 
     Returns:
-        (the expressions of two operations or more, the numbers of the
-        nodes inside them). Each node is in one expression at most; a node
-        inside one is not the root of another.
+        (the expressions of two operations or more, with those of one
+        that count; the numbers of the nodes inside them). Each node is in
+        one expression at most; a node inside one is not the root of
+        another.
     """
     core = _reading_core()
     if core is not None:
@@ -688,7 +744,8 @@ def find(todo: list[Node], fewest: int = 1, alone: bool = False) -> tuple[list[E
             continue
         mark = len(finder.journal)
         expression = finder.expression(node)
-        if expression is not None and (alone or count_operations(expression.term) > 1 or expression.result == STORE):
+        if expression is not None and (alone or count_operations(expression.term) > 1 or expression.result == STORE
+                                       or worth_alone(expression)):
             found.append(expression)
         else:
             finder.give_up(mark)
@@ -1622,6 +1679,12 @@ class _Group:
             value = out = np.empty(self.shape)
             return _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS), value
         old = write.args[0]
+        if (self.result != STORE and type(old) is Node and old.operation is not None and old.failure is None
+                and any(old is member for member in self.members)):
+            # What the array held is an operation this program makes itself (`e = a - b; e /= s`): there is no
+            # memory of the array's yet, and the write's value is new memory, as the operation's would have been.
+            value = out = np.empty(self.shape)
+            return _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS), value
         if type(old) is not Node or old.operation is not None or old.failure is not None:
             return _fused.DECLINED, None
         memory = old.value
