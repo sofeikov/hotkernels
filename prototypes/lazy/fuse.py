@@ -1345,6 +1345,9 @@ STATS = Stats()
 # left to NumPy from then on, which is what a loop over data with an infinity or a division by zero needs. A
 # line whose program was declined for the layout of its arrays is not remembered: its next turn may have others.
 _flagged: set[graph.Origin] = set()
+# The lines of the program whose program was run and kept where its result had to go into a copy of an array. At
+# such a line's next turn the array is copied before the program runs, not after; see `_Group._elementwise`.
+_kept: set[graph.Origin] = set()
 
 
 def _leave_to_numpy(origin: graph.Origin | None) -> None:
@@ -1555,7 +1558,7 @@ class _Group:
             return COPIED
         return THROUGH if reading and self.watched else INTO_ARRAY
 
-    def _elementwise(self, write: Node | None, operands: tuple, how: str) -> tuple[int, Any]:
+    def _elementwise(self, write: Node | None, operands: tuple, how: str, origin: Any = None) -> tuple[int, Any]:
         """Make the group's kernel call into the memory its result belongs in.
 
         Args:
@@ -1563,6 +1566,7 @@ class _Group:
                 no write.
             operands: What the kernel reads.
             how: INTO_ARRAY, THROUGH or COPIED, from `_may_overwrite`.
+            origin: The line that wrote the node the group gives the value of.
 
         Returns:
             (what `_fused.elementwise` returned, the node's value). For a
@@ -1584,6 +1588,13 @@ class _Group:
             value = out = memory if how == INTO_ARRAY else np.empty_like(memory)
         elif how == INTO_ARRAY:
             value, out = memory, self.target.of(memory)
+        elif how == COPIED and origin in _kept:
+            # This line's program ran and was kept before, so it is taken to run again: the array is copied
+            # first and the program writes the part of the copy, a pass fewer than by way of a temporary.
+            through = False
+            value, out = _copy_for(self.target, memory)
+            if out.size != value.size:
+                evaluate.WRITES["copied"] += 1
         else:
             # Computed into a temporary of the part, and assigned from it once the result is known to be kept:
             # into the array itself (`x[i] += e` where an exception may be reported), or into a copy of it when
@@ -1604,6 +1615,10 @@ class _Group:
             # The old node's memory is this node's now.
             old.value = None
             evaluate.WRITES["in_place"] += 1
+        if kept and how == COPIED and origin is not None:
+            if len(_kept) >= FLAGGED_LIMIT:
+                _kept.clear()
+            _kept.add(origin)
         return raised, value
 
     def run(self, node: Node) -> bool:
@@ -1640,7 +1655,7 @@ class _Group:
                 count *= length
             value: Any = np.float64(total / count) if kernel.mean else np.float64(total)
         else:
-            raised, value = self._elementwise(write, operands, how)
+            raised, value = self._elementwise(write, operands, how, node.origin)
             if raised == _fused.DECLINED:
                 STATS.declined += 1
                 return False
