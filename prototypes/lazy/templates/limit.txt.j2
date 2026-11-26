@@ -1,0 +1,36 @@
+How far fusion could take each program ({{ size }} size, the quickest of {{ runs }} runs, milliseconds)
+
+{{ "%-18s %9s %9s %9s %8s %9s %8s %9s"|format("program", "NumPy", "floor", "fused", "at best", "now", "left", "left of") }}
+{{ "%-18s %9s %9s %9s %8s %9s %8s %9s"|format("", "", "", "", "", "", "", "fused run") }}
+{% for limit in limits %}
+{{ "%-18s %9.2f %9.2f %9.2f %7.2fx %8.2fx %8.2f %8.1f%%"|format(limit.name, limit.eager_ns / ns_per_ms, limit.floor_ns / ns_per_ms, limit.fused_ns / ns_per_ms, limit.eager_ns / limit.floor_ns, limit.eager_ns / limit.fused_ns if limit.fused_ns else 0.0, limit.left_ns / ns_per_ms, 100.0 * limit.left_ns / limit.fused_ns if limit.fused_ns else 0.0) }}
+{% endfor %}
+
+`floor` is the eager time less everything that could be removed from the program's element-by-element operations
+and its reductions: what fusing all of them, at no cost, would leave. `at best` is NumPy over the floor, `now` NumPy
+over the fused run, and `left` the fused run less the floor.
+
+Where NumPy's time is, node by node, and how much of each class could be removed
+
+{{ "%-18s %9s"|format("program", "outside") }}{% for name in classes %} {{ "%17s"|format(name) }}{% endfor %}
+
+{{ "%-18s %9s"|format("", "the graph") }}{% for name in classes %} {{ "%17s"|format("ms   removable" if name in reachable else "ms") }}{% endfor %}
+
+{% for limit in limits %}
+{{ "%-18s %9.2f"|format(limit.name, limit.outside_ns / ns_per_ms) }}{% for name in classes %}{% if name in reachable %} {{ "%8.2f %8.2f"|format(limit.ns.get(name, 0) / ns_per_ms, limit.removable(name) / ns_per_ms) }}{% else %} {{ "%17.2f"|format(limit.ns.get(name, 0) / ns_per_ms) }}{% endif %}{% endfor %}
+
+{% endfor %}
+
+`outside the graph` is the eager time that is no node's: the program's own code, a library's, and calls the layer
+does not defer. A class's `removable` is its time less what the same NumPy loops take for as many elements on arrays
+of {{ short }} to {{ long }} elements, with the cost of the call left out: the passes over memory and the calls.
+
+What the kernels took for the nodes they computed
+
+{{ "%-18s %10s %12s %12s %12s"|format("program", "nodes", "kernels ms", "NumPy ms", "in cache ms") }}
+{% for limit in limits %}
+{{ "%-18s %10d %12.2f %12.2f %12.2f"|format(limit.name, limit.fused_nodes, limit.kernel_ns / ns_per_ms, limit.ns.get("arithmetic", 0) / ns_per_ms, limit.kept.get("arithmetic", 0) / ns_per_ms) }}
+{% endfor %}
+
+`NumPy ms` is what NumPy took for every operation of the class a kernel can make, and `in cache ms` what its loops
+take for as many elements in the cache.

@@ -265,11 +265,10 @@ def test_rows_slices_and_broadcast_operands_are_walked():
 
 
 def test_a_layout_the_kernels_do_not_read_is_left_to_numpy():
-    """Columns of a grid, a reversed array and a Fortran-ordered one are not walked; the results are NumPy's."""
+    """A reversed array, a Fortran-ordered one and a transposed one are not walked; the results are NumPy's."""
     a, b = arrays(2, (30, 40))
     fortran = numpy.asfortranarray(a)
     cases = [
-        (a[:, ::2] + 0.5 * b[:, ::2], lazy.asarray(a)[:, ::2] + 0.5 * lazy.asarray(b)[:, ::2]),
         (a[::-1] + 0.5 * b, lazy.asarray(a)[::-1] + 0.5 * lazy.asarray(b)),
         (fortran + 0.5 * fortran, lazy.asarray(fortran) + 0.5 * lazy.asarray(fortran)),
         (a.T + 0.5 * b.T, lazy.asarray(a).T + 0.5 * lazy.asarray(b).T),
@@ -278,6 +277,107 @@ def test_a_layout_the_kernels_do_not_read_is_left_to_numpy():
         value = got.gather()
         assert same(expected, value) and value.flags.c_contiguous == expected.flags.c_contiguous
     assert calls() == 0 and fuse.STATS.declined == len(cases)
+
+
+# The shortest row the module gathers: `SHORTEST_RUN` of `_fused.c`.
+SHORTEST_GATHERED = 32
+# Shapes whose rows are shorter than a kernel is called for, and one whose rows are long, with what is cut off them.
+SHORT_ROWS = (((7, 9, 26), 1), ((3, 40, 12), 2), ((50, 5), 1), ((6, 4, 5, 16), 3), ((4, 300), 2))
+
+
+@pytest.mark.parametrize("shape, cut", SHORT_ROWS)
+def test_rows_at_one_pitch_are_walked_straight_through(shape: tuple[int, ...], cut: int):
+    """Slices that cut the innermost dimension: every array has the same elements between its rows, and none is copied."""
+    a, b, c = arrays(3, shape)
+    profile = arrays(1, (shape[-1],))[0]
+    inner = (slice(1, -1),) * (len(shape) - 1)
+
+    def program(np: Any) -> Any:
+        """Stencil-like expressions on slices of three grids and a profile along the innermost dimension."""
+        x, y, z, depth = np.asarray(a), np.asarray(b), np.asarray(c), np.asarray(profile)
+        left, right = inner + (slice(None, -cut),), inner + (slice(cut, None),)
+        first = (x[left] - y[right]) * z[left] + 0.25 * x[right]
+        second = (x[left] + depth[:-cut]) * (y[left] - depth[cut:]) - z[right]
+        return first, second
+
+    expected = program(numpy)
+    got = program(lazy)
+    for theirs, ours in zip(expected, got):
+        value = ours.gather()
+        assert same(theirs, value) and value.flags.c_contiguous
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes >= 6
+
+
+@pytest.mark.parametrize("shape, cut", SHORT_ROWS)
+def test_arrays_at_more_than_one_pitch_are_gathered(shape: tuple[int, ...], cut: int):
+    """A slice of a grid beside an array computed from one, a column that steps, and a result stored into a slice."""
+    a, b, c = arrays(3, shape)
+
+    def program(np: Any) -> Any:
+        """Expressions whose operands lie at the grid's pitch, at their own, and stepping over elements."""
+        x, y, z = np.asarray(a), np.asarray(b), np.asarray(c)
+        left, right = (Ellipsis, slice(None, -cut)), (Ellipsis, slice(cut, None))
+        made = x[left] * y[right] + 0.5 * z[left]  # An array of its own, one row after the other.
+        mixed = (made - x[right]) * (y[left] + made) - 0.125 * z[right]
+        stepped = (x[..., ::2] - y[..., ::2]) * z[..., ::2] + x[..., ::2]
+        into = np.zeros(shape)
+        into[left] = (made + y[left]) * (z[right] - 2.0 * x[left])
+        into[right] += made * 0.5 - into[left] * y[right]
+        return made, mixed, stepped, into
+
+    expected = program(numpy)
+    got = program(lazy)
+    for theirs, ours in zip(expected, got):
+        assert same(theirs, ours.gather())
+    # Rows of a few elements at more than one pitch are left to NumPy; longer ones are gathered.
+    assert fuse.STATS.fused_nodes >= (8 if shape[-1] - cut >= SHORTEST_GATHERED else 0)
+
+
+def test_rows_with_too_much_between_them_are_left_to_numpy():
+    """More than a quarter of the walk between rows: the steps would mostly compute what nobody asked for."""
+    a, b = arrays(2, (30, 10))
+    x, y = lazy.asarray(a), lazy.asarray(b)
+    got = (x[:, :6] - y[:, 4:]) * x[:, 4:] + 0.5 * y[:, :6]
+    assert same((a[:, :6] - b[:, 4:]) * a[:, 4:] + 0.5 * b[:, :6], got.gather())
+    assert fuse.STATS.declined == 1 and fuse.STATS.fused_nodes == 0
+
+
+def test_what_lies_between_rows_is_never_written():
+    """The steps walk through the elements between rows; the result's rows are copied, and nothing else is touched."""
+    shape = (6, 8, 26)
+    a, b = arrays(2, shape)
+    canvas = numpy.full(shape, 7.0)
+
+    def program(np: Any, into: Any) -> Any:
+        """Store an expression on slices into the same slice of an array that holds something else."""
+        x, y = np.asarray(a), np.asarray(b)
+        left, right = (slice(1, -1), slice(1, -1), slice(None, -1)), (slice(1, -1), slice(1, -1), slice(1, None))
+        into[left] = (x[left] - y[right]) * x[right] + 0.5 * y[left]
+        return into
+
+    expected = program(numpy, canvas.copy())
+    got = program(lazy, lazy.asarray(canvas.copy()) + 0.0).gather()
+    assert same(expected, got) and got[0, 0, 0] == 7.0 and got[1, 1, 25] == 7.0
+
+
+def test_a_flag_raised_between_rows_drops_the_result_and_numpy_computes_it():
+    """A division by an element between rows that is zero: the kernels' result is dropped, and the values are NumPy's."""
+    shape = (5, 6, 26)
+    a, b = arrays(2, shape)
+    b = numpy.abs(b) + 1.0
+    b[:, :, 25] = 0.0  # Never a divisor of a row below, and a divisor of what lies between rows.
+
+    def program(np: Any) -> Any:
+        """Divide slices that leave the last element of every row out."""
+        x, y = np.asarray(a), np.asarray(b)
+        left = (slice(None), slice(None), slice(None, -1))
+        return (x[left] + 1.0) / y[left] - x[left]
+
+    expected = program(numpy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = program(lazy).gather()
+    assert same(expected, got)
 
 
 def test_other_element_types_are_not_fused():

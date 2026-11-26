@@ -431,118 +431,392 @@ typedef struct {
     int numbers[MOST_NUMBERS];
 } program_step;
 
-/* Makes one block of a program's steps on buffers: the operands gathered into `memory`, one buffer each, then the
- * result's, then the steps' own. */
-static void
-run_gathered(const program_step *steps, Py_ssize_t step_count, int arrays, double *memory, npy_intp block, npy_intp length,
-             const double *floats)
+/* Copies `count` elements that lie `step` bytes apart into a buffer: a row, or part of one. A step of no bytes is
+ * one element for the whole row. */
+static inline void
+gather_run(double *to, const char *from, npy_intp count, npy_intp step)
 {
-    for (Py_ssize_t each = 0; each < step_count; each++) {
-        const program_step *step = &steps[each];
-        int vectors = step->kernel->vectors, scalars = step->kernel->scalars;
-        uintptr_t integers[MOST_INTEGERS] = {0};
-        double values[MOST_NUMBERS] = {0};
-        for (int place = 0; place < vectors; place++) {
-            int from = step->reads[place];
-            int buffer = from < MOST_OPERANDS ? from : arrays + 1 + (from - MOST_OPERANDS);
-            integers[place] = (uintptr_t)(memory + (size_t)buffer * (size_t)block);
+    if (step == ELEMENT) {
+        const double *source = (const double *)from;
+        for (npy_intp each = 0; each < count; each++) {
+            to[each] = source[each];
         }
-        int into = step->writes == RESULT ? arrays : arrays + 1 + (step->writes - MOST_OPERANDS);
-        integers[vectors] = (uintptr_t)(memory + (size_t)into * (size_t)block);
-        integers[vectors + 1] = (uintptr_t)length;
-        for (int place = 0; place < scalars; place++) {
-            values[place] = floats[step->numbers[place]];
+    } else {
+        for (npy_intp each = 0; each < count; each++) {
+            to[each] = *(const double *)(from + each * step);
         }
-        ((elementwise_kernel)step->kernel->function)(
-            integers[0], integers[1], integers[2], integers[3], integers[4], integers[5], integers[6], integers[7],
-            values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
     }
 }
 
-/* A program on arrays whose rows are short or that step over elements. Each step would be a call for a handful of
- * elements, or could not read its arrays at all. So the rows are gathered: as many as fill a block are copied from
- * every array into a buffer of its own, the steps are made on the buffers, and the result's buffer is copied out
- * to its rows. That is a copy more for each array and one for the result, all within the cache, in place of a
- * call for each step of each row. Every array is read before the result's rows are written, so the result may be
- * one of them. Returns 0, or -1 with an error set. */
+/* Where the rows of one array are while the shape is walked row by row: the row the walk is at, as a position
+ * along each outer dimension, where it lies in memory, and at which element of the walk it starts. */
+typedef struct {
+    npy_intp position[MOST_DIMENSIONS];
+    npy_intp start;
+    int done;
+} row_walk;
+
+/* Moves a walk of rows to the next row: the position, and the place in memory of each of `count` arrays. */
+static void
+next_row(row_walk *walk, operand **arrays, char **rows, int count, int dimensions, const npy_intp *shape)
+{
+    int axis = dimensions - 2;
+    for (; axis >= 0; axis--) {
+        if (++walk->position[axis] < shape[axis]) {
+            for (int each = 0; each < count; each++) {
+                rows[each] += arrays[each]->strides[axis];
+            }
+            break;
+        }
+        for (int each = 0; each < count; each++) {
+            rows[each] -= arrays[each]->strides[axis] * (shape[axis] - 1);
+        }
+        walk->position[axis] = 0;
+    }
+    walk->start += shape[dimensions - 1];
+    walk->done = axis < 0;
+}
+
+/* A program on arrays that do not all lie the same way: rows too short to be worth a call each at more than one
+ * pitch (a slice of a grid beside an array computed from one), or an array that steps over elements (a column of
+ * a table).
+ *
+ * The shape is walked element by element in the order of its rows, a block at a time. An array that lies in that
+ * order, one row after the other, is read where it is. Any other is gathered: the rows of the block are copied
+ * into a buffer of the array's own, by a loop written here and not a call for each row, which is what made
+ * gathering rows of 25 elements cost more than it saved. The result is written where it belongs when it lies in
+ * the order of the rows, and otherwise into a buffer whose rows are copied out, as it is when it is one of the
+ * arrays read, so that every row of a block is read before one is written.
+ *
+ * A copy for each array that lies otherwise, within the cache, in place of a pass over memory for each step.
+ * Returns 0, or -1 with an error set. */
 static int
-program_gathered(const program_step *steps, Py_ssize_t step_count, operand *reads, int arrays, const double *floats,
-                 int dimensions, const npy_intp *shape, npy_intp block, int buffers)
+program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, int arrays, const double *floats,
+             int dimensions, const npy_intp *shape, npy_intp block, int buffers, int in_place)
 {
     operand *target = &reads[arrays];
-    npy_intp width = shape[dimensions - 1];
-    npy_intp piece = width < block ? width : block; /* What is gathered of one row at a time. */
-    npy_intp most_rows = block / piece;
-    double *memory = PyMem_Malloc((size_t)(arrays + 1 + buffers) * (size_t)block * sizeof(double));
-    char **rows = PyMem_Malloc((size_t)most_rows * sizeof(char *));
-    if (memory == NULL || rows == NULL) {
-        PyMem_Free(memory);
-        PyMem_Free(rows);
+    int last = dimensions - 1;
+    npy_intp width = shape[last], total = 1;
+    for (int axis = 0; axis < dimensions; axis++) {
+        total *= shape[axis];
+    }
+    /* Whether each array, and the result, lies in the order of the rows: a stride for each dimension that is the
+     * elements of everything inside it. */
+    int direct[MOST_OPERANDS + 1];
+    operand *gathered[MOST_OPERANDS];
+    int gathered_at[MOST_OPERANDS], gathered_count = 0;
+    for (int place = 0; place <= arrays; place++) {
+        npy_intp inside = ELEMENT;
+        direct[place] = 1;
+        for (int axis = last; axis >= 0; axis--) {
+            direct[place] = direct[place] && (shape[axis] == 1 || reads[place].strides[axis] == inside);
+            inside *= shape[axis];
+        }
+        if (place < arrays && !direct[place]) {
+            gathered_at[place] = gathered_count;
+            gathered[gathered_count++] = &reads[place];
+        }
+    }
+    int scattered = !direct[arrays] || in_place;
+    if (block > total) {
+        block = total + (BLOCK - total % BLOCK) % BLOCK;
+    }
+    /* The steps' buffers, then the result's, then one for each array gathered: a block each. */
+    double *memory = PyMem_Malloc((size_t)(buffers + 1 + gathered_count) * (size_t)block * sizeof(double));
+    if (memory == NULL) {
         PyErr_NoMemory();
         return -1;
     }
-    npy_intp position[MOST_DIMENSIONS] = {0};
-    npy_intp held = 0, row_count = 0;
-    npy_intp out_step = target->strides[dimensions - 1];
-    int last = 0;
-    while (!last) {
-        for (npy_intp from = 0; from < width; from += piece) {
-            npy_intp length = width - from < piece ? width - from : piece;
-            for (int place = 0; place < arrays; place++) {
-                double *buffer = memory + (size_t)place * (size_t)block + held;
-                npy_intp step = reads[place].strides[dimensions - 1];
-                const char *source = reads[place].data + from * step;
-                if (step == ELEMENT) {
-                    memcpy(buffer, source, (size_t)length * sizeof(double));
+    double *result = memory + (size_t)buffers * (size_t)block;
+    double *copies = result + block;
+    char *rows[MOST_OPERANDS], *out_row = target->data;
+    for (int each = 0; each < gathered_count; each++) {
+        rows[each] = gathered[each]->data;
+    }
+    row_walk reading = {{0}, 0, 0}, writing = {{0}, 0, 0};
+    for (npy_intp start = 0; start < total; start += block) {
+        npy_intp length = total - start < block ? total - start : block;
+        while (gathered_count && !reading.done && reading.start < start + length) {
+            npy_intp from = reading.start > start ? reading.start : start;
+            npy_intp upto = reading.start + width < start + length ? reading.start + width : start + length;
+            for (int each = 0; each < gathered_count; each++) {
+                npy_intp step = gathered[each]->strides[last];
+                gather_run(copies + (size_t)each * (size_t)block + (from - start), rows[each] + (from - reading.start) * step,
+                           upto - from, step);
+            }
+            if (reading.start + width > start + length) {
+                break; /* The rest of this row is in the next block. */
+            }
+            next_row(&reading, gathered, rows, gathered_count, dimensions, shape);
+        }
+        for (Py_ssize_t each = 0; each < step_count; each++) {
+            const program_step *step = &steps[each];
+            int vectors = step->kernel->vectors, scalars = step->kernel->scalars;
+            uintptr_t integers[MOST_INTEGERS] = {0};
+            double values[MOST_NUMBERS] = {0};
+            for (int place = 0; place < vectors; place++) {
+                int from = step->reads[place];
+                if (from >= MOST_OPERANDS) {
+                    integers[place] = (uintptr_t)(memory + (size_t)(from - MOST_OPERANDS) * (size_t)block);
+                } else if (direct[from]) {
+                    integers[place] = (uintptr_t)(reads[from].data + start * ELEMENT);
                 } else {
-                    for (npy_intp each = 0; each < length; each++) {
-                        buffer[each] = *(const double *)(source + each * step);
-                    }
+                    integers[place] = (uintptr_t)(copies + (size_t)gathered_at[from] * (size_t)block);
                 }
             }
-            rows[row_count++] = target->data + from * out_step;
-            held += length;
-            /* The outer dimensions are stepped once the row is all gathered: see below. */
-            int row_done = from + piece >= width;
-            int full = held + piece > block || row_count == most_rows;
-            if (row_done) {
-                int axis = dimensions - 2;
-                for (; axis >= 0; axis--) {
-                    if (++position[axis] < shape[axis]) {
-                        for (int place = 0; place <= arrays; place++) {
-                            reads[place].data += reads[place].strides[axis];
-                        }
-                        break;
-                    }
-                    for (int place = 0; place <= arrays; place++) {
-                        reads[place].data -= reads[place].strides[axis] * (shape[axis] - 1);
-                    }
-                    position[axis] = 0;
-                }
-                last = axis < 0;
+            if (step->writes != RESULT) {
+                integers[vectors] = (uintptr_t)(memory + (size_t)(step->writes - MOST_OPERANDS) * (size_t)block);
+            } else {
+                integers[vectors] = scattered ? (uintptr_t)result : (uintptr_t)(target->data + start * ELEMENT);
             }
-            if (full || (row_done && last)) {
-                run_gathered(steps, step_count, arrays, memory, block, held, floats);
-                /* Every piece gathered has the same length but the last of a row, which is only ever alone. */
-                const double *result = memory + (size_t)arrays * (size_t)block;
-                npy_intp each_length = held / row_count;
-                for (npy_intp row = 0; row < row_count; row++) {
-                    if (out_step == ELEMENT) {
-                        memcpy(rows[row], result + row * each_length, (size_t)each_length * sizeof(double));
-                    } else {
-                        for (npy_intp each = 0; each < each_length; each++) {
-                            *(double *)(rows[row] + each * out_step) = result[row * each_length + each];
-                        }
-                    }
-                }
-                held = 0;
-                row_count = 0;
+            integers[vectors + 1] = (uintptr_t)length;
+            for (int place = 0; place < scalars; place++) {
+                values[place] = floats[step->numbers[place]];
             }
+            ((elementwise_kernel)step->kernel->function)(
+                integers[0], integers[1], integers[2], integers[3], integers[4], integers[5], integers[6], integers[7],
+                values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
+        }
+        while (scattered && !writing.done && writing.start < start + length) {
+            npy_intp from = writing.start > start ? writing.start : start;
+            npy_intp upto = writing.start + width < start + length ? writing.start + width : start + length;
+            npy_intp step = target->strides[last];
+            char *to = out_row + (from - writing.start) * step;
+            const double *source = result + (from - start);
+            if (step == ELEMENT) {
+                double *row = (double *)to;
+                for (npy_intp each = 0; each < upto - from; each++) {
+                    row[each] = source[each];
+                }
+            } else {
+                for (npy_intp each = 0; each < upto - from; each++) {
+                    *(double *)(to + each * step) = source[each];
+                }
+            }
+            if (writing.start + width > start + length) {
+                break;
+            }
+            next_row(&writing, &target, &out_row, 1, dimensions, shape);
         }
     }
     PyMem_Free(memory);
-    PyMem_Free(rows);
     return 0;
+}
+
+/* The most of a walk that may be elements between rows, as a divisor: a quarter. More than that and the rows are
+ * not walked as one stretch, since the steps would mostly compute what nobody asked for. */
+#define MOST_BETWEEN 4
+
+/* A program on rows too short to be worth a call each, where the rows lie at one pitch in every array: slices that
+ * cut the innermost dimension, `x[2:-2, 2:-2, :-1]` of a grid 26 deep, are rows of 25 elements every 26.
+ *
+ * Such rows cannot be joined, since a row does not end where the next begins. But every array has the same
+ * elements between its rows as it has rows, so the steps can walk each array straight through, from its first
+ * element to its last, the elements between the rows included: element for element the arrays still correspond.
+ * What the steps make of the elements between rows is never looked at. The last step writes a buffer of a block,
+ * and only the rows are copied from it to where the result belongs, which may be laid out any way. So the arrays
+ * are read where they lie, with no copy, at the cost of the arithmetic on the elements between rows.
+ *
+ * An array that is the same along a dimension walked this way (`dzt[None, None, :-1]`) is read from a buffer that
+ * holds its stretch at the others' pitch, over and over. Dimensions are taken from the innermost outwards for as
+ * long as the arrays agree; the ones left are stepped one position at a time, as everywhere.
+ *
+ * The elements between rows are other elements of the same arrays, so they are numbers like any, and are read
+ * within the arrays' memory. Their arithmetic can raise a floating-point flag that no row raised; the result is
+ * then dropped like any that raised one, and NumPy's calls made.
+ *
+ * Returns 1 when the program was made this way, 0 when it does not apply and nothing was done, -1 with an error. */
+static int
+program_spanned(const program_step *steps, Py_ssize_t step_count, operand *reads, int arrays, operand *numbers,
+                int numbers_given, int dimensions, const npy_intp *shape, npy_intp block, int buffers)
+{
+    operand *target = &reads[arrays];
+    int last = dimensions - 1;
+    npy_intp width = shape[last];
+    if (dimensions < 2 || width < 2 || arrays == 0) {
+        return 0;
+    }
+    for (int place = 0; place < arrays; place++) {
+        if (reads[place].strides[last] != ELEMENT) {
+            return 0;
+        }
+    }
+    /* From the innermost dimension outwards: `pitch[axis]` is how many elements every array moves by for one
+     * position along the dimension, and `extent` how many lie from the first to the last element of what is
+     * walked so far. `period[place]` is that pitch for an array that is the same along a dimension, with
+     * `own[place]` the elements of its own it has within one period. */
+    npy_intp pitch[MOST_DIMENSIONS] = {0}, period[MOST_OPERANDS] = {0}, own[MOST_OPERANDS] = {0};
+    npy_intp extent = width;
+    int first = last;
+    for (int axis = last - 1; axis >= 0; axis--) {
+        if (shape[axis] == 1) {
+            first = axis;
+            continue;
+        }
+        npy_intp common = 0;
+        int agreed = 1;
+        for (int place = 0; place < arrays && agreed; place++) {
+            npy_intp stride = reads[place].strides[axis];
+            if (period[place]) {
+                agreed = stride == 0; /* Repeats already: only if it is the same along this dimension too. */
+            } else if (stride != 0) {
+                agreed = stride % ELEMENT == 0 && (common == 0 || stride == common);
+                common = stride;
+            }
+        }
+        for (int place = 0; place < numbers_given && agreed; place++) {
+            agreed = !numbers[place].is_array || numbers[place].strides[axis] == 0;
+        }
+        npy_intp step = common / ELEMENT;
+        if (!agreed || common == 0 || step < extent || (step - extent) * MOST_BETWEEN > step) {
+            break;
+        }
+        int fits = 1;
+        for (int place = 0; place < arrays; place++) {
+            fits = fits && (period[place] || reads[place].strides[axis] != 0 || step <= LONGEST_PERIOD);
+        }
+        if (!fits) {
+            break;
+        }
+        for (int place = 0; place < arrays; place++) {
+            if (!period[place] && reads[place].strides[axis] == 0) {
+                period[place] = step;
+                own[place] = extent;
+            }
+        }
+        pitch[axis] = step;
+        extent += (shape[axis] - 1) * step;
+        first = axis;
+    }
+    if (first == last || extent < SHORTEST_RUN) {
+        return 0;
+    }
+    if (block > extent) {
+        block = extent + (BLOCK - extent % BLOCK) % BLOCK;
+    }
+    /* The steps' buffers and the result's, a block each; then for each array that repeats, a block and a period. */
+    size_t needed = (size_t)(buffers + 1) * (size_t)block;
+    npy_intp tile_at[MOST_OPERANDS];
+    for (int place = 0; place < arrays; place++) {
+        tile_at[place] = (npy_intp)needed;
+        if (period[place]) {
+            needed += (size_t)(block + period[place]);
+        }
+    }
+    double *memory = PyMem_Malloc(needed * sizeof(double));
+    if (memory == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    double *result = memory + (size_t)buffers * (size_t)block;
+    npy_intp out_step = target->strides[last];
+    npy_intp position[MOST_DIMENSIONS] = {0};
+    double floats[MOST_OPERANDS];
+    for (;;) {
+        for (int place = 0; place < numbers_given; place++) {
+            floats[place] = numbers[place].is_array ? *(const double *)numbers[place].data : numbers[place].number;
+        }
+        for (int place = 0; place < arrays; place++) {
+            if (!period[place]) {
+                continue;
+            }
+            /* One period: the array's own elements, then one of them again for the elements between rows; and the
+             * period over and over for a block and a period more, so that a block may start anywhere in one. */
+            double *tile = memory + tile_at[place];
+            npy_intp held = period[place], length = block + period[place];
+            memcpy(tile, reads[place].data, (size_t)own[place] * sizeof(double));
+            for (npy_intp each = own[place]; each < held; each++) {
+                tile[each] = tile[0];
+            }
+            while (held < length) {
+                npy_intp more = held < length - held ? held : length - held;
+                memcpy(tile + held, tile, (size_t)more * sizeof(double));
+                held += more;
+            }
+        }
+        /* The rows of the result, in the order they lie: where the next one starts in the walk, and in memory. */
+        npy_intp row[MOST_DIMENSIONS] = {0};
+        npy_intp row_at = 0;
+        char *row_out = target->data;
+        int rows_left = 1;
+        for (npy_intp start = 0; start < extent; start += block) {
+            npy_intp length = extent - start < block ? extent - start : block;
+            for (Py_ssize_t each = 0; each < step_count; each++) {
+                const program_step *step = &steps[each];
+                int vectors = step->kernel->vectors, scalars = step->kernel->scalars;
+                uintptr_t integers[MOST_INTEGERS] = {0};
+                double values[MOST_NUMBERS] = {0};
+                for (int place = 0; place < vectors; place++) {
+                    int from = step->reads[place];
+                    if (from >= MOST_OPERANDS) {
+                        integers[place] = (uintptr_t)(memory + (size_t)(from - MOST_OPERANDS) * (size_t)block);
+                    } else if (period[from]) {
+                        integers[place] = (uintptr_t)(memory + tile_at[from] + start % period[from]);
+                    } else {
+                        integers[place] = (uintptr_t)(reads[from].data + start * ELEMENT);
+                    }
+                }
+                integers[vectors] = step->writes == RESULT ? (uintptr_t)result
+                                                           : (uintptr_t)(memory + (size_t)(step->writes - MOST_OPERANDS) * (size_t)block);
+                integers[vectors + 1] = (uintptr_t)length;
+                for (int place = 0; place < scalars; place++) {
+                    values[place] = floats[step->numbers[place]];
+                }
+                ((elementwise_kernel)step->kernel->function)(
+                    integers[0], integers[1], integers[2], integers[3], integers[4], integers[5], integers[6], integers[7],
+                    values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
+            }
+            while (rows_left && row_at < start + length) {
+                npy_intp from = row_at > start ? row_at : start;
+                npy_intp upto = row_at + width < start + length ? row_at + width : start + length;
+                if (out_step == ELEMENT) {
+                    memcpy(row_out + (from - row_at) * ELEMENT, result + (from - start), (size_t)(upto - from) * sizeof(double));
+                } else {
+                    for (npy_intp each = from; each < upto; each++) {
+                        *(double *)(row_out + (each - row_at) * out_step) = result[each - start];
+                    }
+                }
+                if (row_at + width > start + length) {
+                    break; /* The rest of this row is in the next block. */
+                }
+                int axis = last - 1;
+                for (; axis >= first; axis--) {
+                    if (++row[axis] < shape[axis]) {
+                        row_at += pitch[axis];
+                        row_out += target->strides[axis];
+                        break;
+                    }
+                    row_at -= (shape[axis] - 1) * pitch[axis];
+                    row_out -= (shape[axis] - 1) * target->strides[axis];
+                    row[axis] = 0;
+                }
+                rows_left = axis >= first;
+            }
+        }
+        /* Step the dimensions that are not walked through, as an odometer. */
+        int axis = first - 1;
+        for (; axis >= 0; axis--) {
+            if (++position[axis] < shape[axis]) {
+                for (int place = 0; place <= arrays + numbers_given; place++) {
+                    if (reads[place].is_array) {
+                        reads[place].data += reads[place].strides[axis];
+                    }
+                }
+                break;
+            }
+            for (int place = 0; place <= arrays + numbers_given; place++) {
+                if (reads[place].is_array) {
+                    reads[place].data -= reads[place].strides[axis] * (shape[axis] - 1);
+                }
+            }
+            position[axis] = 0;
+        }
+        if (axis < 0) {
+            break;
+        }
+    }
+    PyMem_Free(memory);
+    return 1;
 }
 
 /* program(steps, arrays, operands, out, block) -> flags, or DECLINED.
@@ -722,12 +996,31 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
     for (int place = 0; place < arrays; place++) {
         stepped = stepped || reads[place].stepped;
     }
+    if (!stepped && run < SHORTEST_RUN) {
+        /* Rows too short to be worth a call each. Where they lie at one pitch in every array they are walked
+         * straight through, the elements between them included: see `program_spanned`. */
+        feclearexcept(FE_ALL_EXCEPT);
+        int spanned = program_spanned(steps, step_count, reads, (int)arrays, numbers, numbers_given, dimensions, shape, block, buffers);
+        if (spanned < 0) {
+            return NULL;
+        }
+        if (spanned) {
+            int flags = fetestexcept(REPORTED);
+            if (flags) {
+                feclearexcept(FE_ALL_EXCEPT);
+            }
+            return PyLong_FromLong(flags);
+        }
+    }
     if (stepped || (run < SHORTEST_RUN && step_count > 1)) {
         /* Arrays a kernel cannot read where they lie, or runs so short that every step would be a call for a
-         * handful of elements: the rows are gathered into blocks. Not rows of a few elements, though: gathering
-         * one is a copy for each array, and for rows that short the copies cost what NumPy's own passes do
-         * (measured on the Veros routines, whose innermost dimension is 26 long). Those are left to NumPy.
-         * A number that is not the same for every row cannot be gathered: a call has one value for each number. */
+         * handful of elements, at a pitch the arrays do not share: the shape is walked in the order of its rows
+         * and the arrays that lie otherwise are gathered; see `program_flat`. Not rows of a few elements, though.
+         * Gathering one is a copy for each array that lies otherwise, and for rows that short the copies cost what
+         * NumPy's own passes do: on the Veros routines, whose innermost dimension is 26 long, isoneutral mixing
+         * runs in 193 to 200 ms either way and the kinetic energy in 102 to 103 ms gathered against 97 to 100 ms
+         * declined. Those are left to NumPy. A number that is not the same for every row cannot be gathered: a
+         * call has one value for each number. */
         if (shape[dimensions - 1] < SHORTEST_RUN) {
             return PyLong_FromLong(DECLINED);
         }
@@ -745,9 +1038,8 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
         for (int place = 0; place < numbers_given; place++) {
             constants[place] = numbers[place].is_array ? *(const double *)numbers[place].data : numbers[place].number;
         }
-        /* The dimensions were joined for the walk above; the gathering walks the shape as it is. */
         feclearexcept(FE_ALL_EXCEPT);
-        if (program_gathered(steps, step_count, reads, (int)arrays, constants, dimensions, shape, block, buffers) < 0) {
+        if (program_flat(steps, step_count, reads, (int)arrays, constants, dimensions, shape, block, buffers, in_place) < 0) {
             return NULL;
         }
         int flags = fetestexcept(REPORTED);
