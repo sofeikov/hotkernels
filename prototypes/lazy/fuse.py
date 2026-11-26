@@ -1561,6 +1561,33 @@ def assign_rows(part: np.ndarray, values: np.ndarray) -> None:
     part[...] = values
 
 
+def _copies(operands: tuple) -> int:
+    """Count the arrays among a program's operands that the module would have to copy before a kernel can read them.
+
+    An array that steps over elements, `tke[:, :, :, tau]` of a grid with
+    a time level as its last axis, is copied into a run a block at a time,
+    which costs about what a pass of NumPy's over it does: 458 µs for a
+    million elements three apart. A program is worth that only when it
+    saves more passes than it makes copies. One kernel of two operations
+    that reads two such arrays replaces one pass by two copies, and timed
+    0.6 ms slower than NumPy's two calls; thirteen operations that read
+    three are 1.7 times NumPy's calls.
+
+    Args:
+        operands: What the program reads: arrays and numbers.
+
+    Returns:
+        How many different arrays among them step over elements. One value
+        for each row, `weights[:, None]`, is a number to a kernel and no
+        array to copy.
+    """
+    seen = set()
+    for operand in operands:
+        if type(operand) is np.ndarray and operand.ndim and operand.shape[-1] != 1 and operand.strides[-1] != operand.itemsize:
+            seen.add((operand.__array_interface__["data"][0], operand.strides))
+    return len(seen)
+
+
 class _Group:
     """The nodes computed together under one node: the tiles of an expression that feed one another, with what they read.
 
@@ -1779,6 +1806,10 @@ class _Group:
         how = self._may_overwrite(write) if write is not None else COPIED
         operands = self.operands()
         if operands is None:
+            return False
+        if self.steps is not None and _copies(operands) >= len(self.members) + 1:
+            # As many arrays to copy as passes the program saves: NumPy's own calls are as quick.
+            STATS.declined += 1
             return False
         kernel = self.kernel
         if kernel is not None:

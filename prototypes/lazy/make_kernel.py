@@ -133,6 +133,9 @@ SHAPES = (
     "sub(mul(S0,add(V0,div(sub(V1,V2),S1))),sq(V3))", "div(mul(S0,V0),S1)", "add(V0,add(V1,add(V2,V3)))",
     "max(V0,V1)", "max(S0,V0)", "min(V0,V1)", "min(S0,V0)", "div(neg(add(V0,mul(V1,V2))),sub(min(S0,V3),S1))",
     "add(V0,mul(max(S0,mul(V1,V2)),mul(V3,V4)))", "max(S0,max(V0,min(S1,V1)))",
+    # The two halves of an advection flux, four operations and eight: written whole because a program of six
+    # kernel calls for its thirteen operations took twice what one loop takes (docs/lazy-fusion-design.md).
+    "mul(S0,mul(add(V0,V1),mul(S1,V2)))", "mul(S0,mul(V0,mul(abs(mul(S1,V1)),add(mul(V2,V3),sub(S2,V4)))))",
 )
 
 app = typer.Typer(add_completion=False)

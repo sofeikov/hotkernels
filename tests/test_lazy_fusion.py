@@ -603,9 +603,38 @@ def test_columns_of_a_grid_are_gathered_into_blocks():
     out[:, 1] = (lazy.asarray(table)[:, 0] - 0.5 * lazy.asarray(table)[:, 3]) * lazy.asarray(other)[:, 2] + 1.5
     expected[:, 1] = (table[:, 0] - 0.5 * table[:, 3]) * other[:, 2] + 1.5
     assert same(expected, out.gather())
-    column = gathered(lambda: (lazy.asarray(table)[:, 1] * lazy.asarray(table)[:, 2] - lazy.asarray(other)[:, 0]) / 3.0)
-    assert same((table[:, 1] * table[:, 2] - other[:, 0]) / 3.0, column)
+    column = gathered(lambda: ((lazy.asarray(table)[:, 1] * lazy.asarray(table)[:, 2] - lazy.asarray(other)[:, 0]) / 3.0 + 1.0) * 0.5)
+    assert same(((table[:, 1] * table[:, 2] - other[:, 0]) / 3.0 + 1.0) * 0.5, column)
     assert fuse.STATS.declined == 0 and calls() >= 2
+    # As many columns to copy as operations: the copies cost what the program saves, and NumPy's calls make it.
+    both = gathered(lambda: (lazy.asarray(table)[:, 1] - lazy.asarray(table)[:, 2]) * lazy.asarray(other)[:, 0])
+    assert same((table[:, 1] - table[:, 2]) * other[:, 0], both) and fuse.STATS.declined == 1
+
+
+@pytest.mark.parametrize("shape", ((30, 14, 26, 3), (9, 40, 12, 2), (6, 5, 33, 4)))
+def test_arrays_that_step_through_several_dimensions_are_gathered_once(shape: tuple[int, ...]):
+    """A grid with a time level as its last axis: every third element, the same way through two or three dimensions,
+    read twice by one expression, with a result stored into part of another grid."""
+    a, b = arrays(2, shape)
+    grid = shape[:-1]
+    c, d = arrays(2, grid)
+
+    def program(np: Any) -> Any:
+        """A flux of thirteen operations on slices of two such grids, and the same into a part."""
+        vel, var = np.asarray(a)[..., 1], np.asarray(b)[..., 0]
+        cr, rj = np.asarray(c), np.asarray(d)
+        here, there = (slice(1, -2), slice(2, -2)), (slice(2, -1), slice(2, -2))
+        flux = 1.5 * vel[here] * (var[there] + var[here]) * 0.5 - np.abs(1.5 * vel[here]) * ((1.0 - cr[here]) + rj[there] * cr[here]) * rj[here] * 0.5
+        into = np.zeros(grid)
+        into[here] = vel[here] * (var[there] + var[here]) * 0.5 - np.abs(vel[here]) * ((1.0 - cr[here]) + rj[there] * cr[here]) * rj[here]
+        return flux, into
+
+    expected = program(numpy)
+    got = program(lazy)
+    for theirs, ours in zip(expected, got):
+        assert same(theirs, ours.gather())
+    rows = shape[1] - 4 if shape[2] < 32 else 1
+    assert (fuse.STATS.declined == 0) == (rows * shape[2] >= 32)
 
 
 def test_the_driver_refuses_a_program_that_is_not_one():
