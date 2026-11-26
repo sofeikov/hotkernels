@@ -60,8 +60,6 @@ COMMUTATIVE = frozenset({"add", "mul", "max", "min"})
 OPERATIONS = {**ARITHMETIC, **UNARY, **COMPARISONS, np.where: "where"}
 # The ufunc an in-place operator applies, by the name `array.py` gives its write.
 IN_PLACE = {"x += y": np.add, "x -= y": np.subtract, "x *= y": np.multiply, "x /= y": np.true_divide}
-# The keyword that makes a ufunc lay its result out in C order, as the copy a write makes is.
-IN_C_ORDER = {"order": "C"}
 # The largest whole number a float64 holds exactly: a Python integer up to it is the same number as a float.
 EXACT_INTEGER = 2 ** 53
 # The exponents of `np.power` that NumPy computes as one multiplication, `x * x`.
@@ -154,18 +152,26 @@ class Expression:
         return count
 
 
-def count_uses(todo: list[Node]) -> dict[int, int]:
+def count_uses(todo: list[Node], unread: dict[int, int] | None = None) -> dict[int, int]:
     """Count how often each node is read by the nodes of one computation.
 
     Args:
         todo: The pending nodes about to be computed.
+        unread: When given, filled with node number -> how many of those nodes keep it as the old contents of
+            an array they write the whole of without reading it: `np.add(a, b, out=x)` once `rewrite_write`
+            has made it one call. Such a node is referred to, which `held_among` has to know, and is not read.
 
     Returns:
         Node number -> how many operands of those nodes it is. An operand written twice counts twice.
     """
     uses: dict[int, int] = {}
     for node in todo:
-        for arg in node.args:
+        args = node.args
+        if type(node.operation) is _WholeCall and not node.operation.reads_old:
+            old, args = args[0], args[1:]
+            if unread is not None and type(old) is Node:
+                unread[old.number] = unread.get(old.number, 0) + 1
+        for arg in args:
             if type(arg) is Node:
                 uses[arg.number] = uses.get(arg.number, 0) + 1
     return uses
@@ -188,7 +194,7 @@ def _spare_references(nodes: list) -> list[int]:
 _ALONE = _spare_references([object()])[0]
 
 
-def held_among(todo: list[Node], uses: dict[int, int]) -> set[int]:
+def held_among(todo: list[Node], uses: dict[int, int], unread: dict[int, int] | None = None) -> set[int]:
     """Find the nodes of a computation whose value something outside it will want.
 
     Such a node is one the program holds a lazy array of, or one that a
@@ -205,12 +211,16 @@ def held_among(todo: list[Node], uses: dict[int, int]) -> set[int]:
     Args:
         todo: The pending nodes about to be computed. The caller's one list of them: a second list would count.
         uses: How often each node is read by the nodes of the computation, from `count_uses`.
+        unread: How often each is referred to by them without being read, from `count_uses`; None for never.
 
     Returns:
         The numbers of the nodes with a reference the computation and the list do not account for.
     """
     spare = _spare_references(todo)
-    return {node.number for node, count in zip(todo, spare) if count - _ALONE > uses.get(node.number, 0)}
+    if not unread:
+        return {node.number for node, count in zip(todo, spare) if count - _ALONE > uses.get(node.number, 0)}
+    return {node.number for node, count in zip(todo, spare)
+            if count - _ALONE > uses.get(node.number, 0) + unread.get(node.number, 0)}
 
 
 def _is_number(arg: Any) -> bool:
@@ -269,8 +279,10 @@ def call_of(node: Node) -> tuple[Any, tuple] | None:
             return (operation.perform.function, args[1:]) if isinstance(operation.perform.function, np.ufunc) else None
         ufunc = IN_PLACE.get(node.name)
         return (ufunc, args) if ufunc is not None else None
-    # A write `rewrite_write` has already turned into its ufunc.
-    return (operation, args) if isinstance(operation, np.ufunc) and node.kwargs == IN_C_ORDER else None
+    if type(operation) is _WholeCall:
+        # A write `rewrite_write` has already turned into its ufunc.
+        return operation.ufunc, (args if operation.reads_old else args[1:])
+    return None
 
 
 def operation_of(node: Node) -> tuple[str, tuple] | None:
@@ -294,6 +306,56 @@ def operation_of(node: Node) -> tuple[str, tuple] | None:
     return None
 
 
+class _WholeCall:
+    """What a write into the whole of an array calls once it is its one ufunc call.
+
+    `x += y` is, as written, a copy of `x` and the sum made into the copy.
+    This makes the sum of what `x` held and `y` into new memory laid out as
+    the copy would have been, or, when nothing reads the old contents again,
+    into the memory `x` has: one pass either way, and the second is what
+    NumPy does.
+    """
+
+    __slots__ = ("ufunc", "reads_old")
+
+    def __init__(self, ufunc: np.ufunc, reads_old: bool) -> None:
+        """Remember the call.
+
+        Args:
+            ufunc: The operation.
+            reads_old: True for an in-place operator, whose first operand is what the array held. False for a
+                ufunc with `out=`, which reads only its own operands; the node keeps the old contents as its
+                first operand all the same, since their memory is where the result may go.
+        """
+        self.ufunc = ufunc
+        self.reads_old = reads_old
+
+    def __call__(self, old: np.ndarray, *values: Any) -> np.ndarray:
+        """Make the call into new memory.
+
+        Args:
+            old: The array's contents before the write.
+            *values: The operands after it.
+
+        Returns:
+            The array's contents after the write, laid out as a copy of `old` would be.
+        """
+        new = np.empty_like(old)
+        return self.ufunc(old, *values, out=new) if self.reads_old else self.ufunc(*values, out=new)
+
+    def in_place(self, old: np.ndarray, *values: Any) -> np.ndarray:
+        """Make the call into the memory the array has.
+
+        Args:
+            old: The array's contents before the write, in an array nothing else will read.
+            *values: The operands after it.
+
+        Returns:
+            The same array, holding the result.
+        """
+        return self.ufunc(old, *values, out=old) if self.reads_old else self.ufunc(*values, out=old)
+
+
 def rewrite_write(node: Node) -> bool:
     """Turn a write into the whole of a float64 array into the one call that gives the same array.
 
@@ -301,8 +363,8 @@ def rewrite_write(node: Node) -> bool:
     operator to the copy in place: two passes over memory. `old + y` is one
     pass and has the same bits when everything is float64: the same loop
     adds the same operands, and nothing is cast on the way into the array.
-    The copy is laid out in C order whatever `old` is, so the call is asked
-    for that order too. The node keeps its kind, its name and its line.
+    The result is laid out as the copy would have been. The node keeps its
+    kind, its name, its line and the old contents as its first operand.
 
     Args:
         node: A pending node.
@@ -317,7 +379,8 @@ def rewrite_write(node: Node) -> bool:
         return False
     if any(_leaf_kind(arg, node.shape) is None for arg in call[1]):
         return False
-    node.operation, node.args, node.kwargs = call[0], call[1], IN_C_ORDER
+    reads_old = type(node.operation.perform) is not array._Into
+    node.operation = _WholeCall(call[0], reads_old)
     return True
 
 
@@ -334,9 +397,11 @@ class _Finder:
         # The numbers of the nodes about to be computed.
         self.taking = {node.number for node in todo}
         # How often each node is read by the nodes of the computation.
-        self.uses = count_uses(todo)
+        # How often each is kept, unread, as the old contents of an array a rewritten write gives the whole of.
+        self.unread: dict[int, int] = {}
+        self.uses = count_uses(todo, self.unread)
         # The numbers of the nodes whose value something outside the computation will want.
-        self.held = held_among(todo, self.uses)
+        self.held = held_among(todo, self.uses, self.unread)
         self.fewest = fewest
         # The numbers of the nodes that are inside an expression found so far, and not its root.
         self.inside: set[int] = set()
@@ -1248,6 +1313,20 @@ class _StoreCall:
         self.ufunc(*values, out=part)
         return new
 
+    def in_place(self, old: np.ndarray, *values: Any) -> np.ndarray:
+        """Make the operation into the part of the memory the array has.
+
+        Args:
+            old: The array's contents before the write, in an array nothing else will read.
+            *values: The operation's operands. One that is a view of `old` may overlap the part; NumPy then
+                computes as if it did not, which is what the assignment of a temporary gives.
+
+        Returns:
+            The same array, written into.
+        """
+        self.ufunc(*values, out=self.target.of(old))
+        return old
+
 
 def _copy_for(target: ViewOf, old: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Make the array a write gives, ready for the part to be written.
@@ -1262,7 +1341,7 @@ def _copy_for(target: ViewOf, old: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         it, every element is about to be written and nothing is copied: the
         new array is empty memory of the copy's layout.
     """
-    new = np.empty(old.shape) if target.of(old).size == old.size else old.copy()
+    new = np.empty_like(old) if target.of(old).size == old.size else old.copy(order=array.KEPT_ORDER)
     return new, target.of(new)
 
 
@@ -1311,6 +1390,109 @@ class _Group:
             values.append(source)
         return tuple(values)
 
+    def _written(self, node: Node) -> Node:
+        """Find the write whose array the group's result belongs in.
+
+        Args:
+            node: The write the group gives the value of.
+
+        Returns:
+            `node`, unless what its array held is itself a write of the
+            whole array that the group computes inside: `np.add(a, b,
+            out=x); np.multiply(x, 0.5, out=x)` is one kernel call, and its
+            result belongs where `x` was before the first of the two. Then
+            the earliest such write.
+        """
+        write = node
+        while True:
+            old = write.args[0]
+            if type(old) is Node and type(old.operation) is _WholeCall and any(old is member for member in self.members):
+                write = old
+            else:
+                return write
+
+    def _held(self, write: Node) -> int:
+        """Count the references this group and its members have to the node a write's array held.
+
+        Args:
+            write: The write whose array the group's result belongs in, from `_written`.
+
+        Returns:
+            How many references to the write's first operand are the
+            plan's own, which `evaluate.reusable` then does not take for
+            readers: the other nodes inside the group that read it, each
+            place it is among what the kernel reads, and the record of the
+            part written into.
+        """
+        old = write.args[0]
+        held = sum(1 for source in self.sources if source is old)
+        held += sum(1 for member in self.members if member is not write for arg in member.args if arg is old)
+        parts = {id(source) for source in self.sources if type(source) is ViewOf and source.old is old}
+        if self.target is not None and self.target.old is old:
+            parts.add(id(self.target))
+        return held + len(parts)
+
+    def _may_overwrite(self, write: Node) -> bool:
+        """Say whether the kernel may write its result into the memory the written array has.
+
+        A kernel's result is dropped when it raised a floating-point
+        exception that NumPy reports, and NumPy's own calls are then made
+        on the same operands. That is only possible while the operands are
+        what they were. So the kernel writes where the array is only when
+        it reads nothing of what the array held (`x[i] = a * (b - c)`),
+        or when no exception is reported under the settings the lines were
+        written under. Otherwise its result goes to a copy, or to new
+        memory, as before.
+
+        Args:
+            write: The write whose array the result belongs in, from `_written`.
+
+        Returns:
+            True when both that holds and nothing else reads what the array held (`evaluate.reusable`).
+        """
+        held = self._held(write)
+        old = write.args[0]
+        # The record of the part written into refers to the old node and reads nothing of it.
+        reading = held - (1 if self.target is not None and self.target.old is old
+                          and not any(source is self.target for source in self.sources) else 0)
+        if reading and self.watched:
+            return False
+        return evaluate.reusable(write, held)
+
+    def _elementwise(self, write: Node | None, operands: tuple, reuse: bool) -> tuple[int, Any]:
+        """Make the group's kernel call into the memory its result belongs in.
+
+        Args:
+            write: The write whose array the result belongs in, from `_written`; None when the group's node is
+                no write.
+            operands: What the kernel reads.
+            reuse: Whether that array may be written where it is.
+
+        Returns:
+            (what `_fused.elementwise` returned, the node's value). For a
+            write the value is the array written into: the one the node's
+            first operand holds when `reuse` says so, where the kernel's
+            call is then the only pass over memory, and otherwise a copy of
+            it, or new memory where every element is written.
+        """
+        if write is None:
+            value = out = np.empty(self.shape)
+            return _fused.elementwise(self.kernel.index, operands, out), value
+        old = write.args[0]
+        if type(old) is not Node or old.operation is not None or old.failure is not None:
+            return _fused.DECLINED, None
+        memory = old.value
+        if self.result == STORE:
+            value, out = (memory, self.target.of(memory)) if reuse else _copy_for(self.target, memory)
+        else:
+            value = out = memory if reuse else np.empty_like(memory)
+        raised = _fused.elementwise(self.kernel.index, operands, out)
+        if reuse and raised != _fused.DECLINED and not raised & self.watched:
+            # The old node's memory is this node's now.
+            old.value = None
+            evaluate.WRITES["in_place"] += 1
+        return raised, value
+
     def run(self, node: Node) -> bool:
         """Compute the group's node with one kernel call.
 
@@ -1324,6 +1506,9 @@ class _Group:
             kernel raised an exception NumPy would have reported, in which
             case NumPy's own calls are what report it.
         """
+        # Asked before the operands are collected: a view of the array among them would count as a reader of it.
+        write = self._written(node) if node.kind == rules.WRITE else None
+        reuse = write is not None and self._may_overwrite(write)
         operands = self.operands()
         if operands is None:
             return False
@@ -1339,14 +1524,7 @@ class _Group:
                 count *= length
             value: Any = np.float64(total / count) if kernel.mean else np.float64(total)
         else:
-            if self.result == STORE:
-                old = self.target.old
-                if old.operation is not None or old.failure is not None:
-                    return False
-                value, out = _copy_for(self.target, old.value)
-            else:
-                value = out = np.empty(self.shape)
-            raised = _fused.elementwise(kernel.index, operands, out)
+            raised, value = self._elementwise(write, operands, reuse)
             if raised == _fused.DECLINED:
                 STATS.declined += 1
                 return False

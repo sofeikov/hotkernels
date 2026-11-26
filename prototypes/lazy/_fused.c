@@ -27,6 +27,7 @@
 #include <Python.h>
 #include <fenv.h>
 #include <stdint.h>
+#include <string.h>
 #include <numpy/arrayobject.h>
 
 /* The most dimensions an expression may have here. More are declined. */
@@ -40,6 +41,8 @@
 #define MOST_NUMBERS 8
 /* Bytes in a float64. */
 #define ELEMENT 8
+/* Elements a kernel computes in one step of its loop: it loads these from every array before it stores them. */
+#define BLOCK 8
 /* What the entry points return when they will not make the call. */
 #define DECLINED (-1)
 /* The exceptions a caller is told of. Inexact is not one: nearly every operation raises it. */
@@ -149,12 +152,35 @@ joins(const operand *read, int vector, int axis, npy_intp run)
     return read->strides[axis] == (vector ? run * ELEMENT : 0);
 }
 
+/* The first and the last byte an operand's walk touches, for an operand `read_operand` took: its strides are
+ * positive or zero, so the walk starts at `data` and ends at the last element of the last step. */
+static void
+extent(const operand *read, int dimensions, const npy_intp *shape, const char **low, const char **high)
+{
+    npy_intp span = 0;
+    for (int axis = 0; axis < dimensions; axis++) {
+        span += read->strides[axis] * (shape[axis] - 1);
+    }
+    *low = read->data;
+    *high = read->data + span + ELEMENT;
+}
+
 /* elementwise(kernel, operands, out) -> flags, or DECLINED.
  *
  * Args:
  *   kernel: The kernel's place in the table.
  *   operands: A tuple, the kernel's arrays and then its numbers, in the order of its arguments.
- *   out: A writable float64 array of the expression's shape, overlapping no operand. It is filled.
+ *   out: A writable float64 array of the expression's shape. It is filled.
+ *
+ * `out` may be one of the operands exactly, element for element: `x -= s * y`
+ * made where `x` is. A kernel loads the eight elements of a block from every
+ * array before it stores the block, so a block may be written where it was
+ * read. Only its last block is different: for a length that is no multiple
+ * of eight it is a block that ends with the array and overlaps the one
+ * before, which would then be read after it was written. So with such an
+ * operand each run is made as two calls: the whole blocks, and then the
+ * fewer than eight elements left, which every kernel computes one at a time.
+ * An operand that overlaps `out` in any other way is declined.
  */
 static PyObject *
 fused_elementwise(PyObject *module, PyObject *const *args, Py_ssize_t count)
@@ -204,6 +230,28 @@ fused_elementwise(PyObject *module, PyObject *const *args, Py_ssize_t count)
             return PyLong_FromLong(DECLINED);
         }
     }
+    /* Where `out` lies against each array read: apart from it, or the very same elements. */
+    int in_place = 0;
+    {
+        const char *out_low, *out_high;
+        extent(target, dimensions, shape, &out_low, &out_high);
+        for (int place = 0; place < vectors + 1 + scalars; place++) {
+            const operand *read = &reads[place];
+            if (place == vectors || !read->is_array) {
+                continue;
+            }
+            const char *low, *high;
+            extent(read, dimensions, shape, &low, &high);
+            if (low >= out_high || out_low >= high) {
+                continue;
+            }
+            if (place > vectors || read->data != target->data
+                || memcmp(read->strides, target->strides, (size_t)dimensions * sizeof(npy_intp)) != 0) {
+                return PyLong_FromLong(DECLINED);
+            }
+            in_place = 1;
+        }
+    }
     /* Lengthen the inner run by every outer dimension that every operand walks straight through. */
     int outer = dimensions - 1;
     npy_intp run = shape[outer];
@@ -226,18 +274,30 @@ fused_elementwise(PyObject *module, PyObject *const *args, Py_ssize_t count)
     elementwise_kernel call = (elementwise_kernel)kernel->function;
     uintptr_t integers[MOST_INTEGERS] = {0};
     double floats[MOST_NUMBERS] = {0};
-    integers[vectors + 1] = (uintptr_t)run;
+    /* The lengths of the calls of one run: the run, or its whole blocks and then the elements left over. */
+    npy_intp whole = in_place ? run - run % BLOCK : run;
+    npy_intp lengths[2] = {whole, run - whole};
     npy_intp position[MOST_DIMENSIONS] = {0};
     feclearexcept(FE_ALL_EXCEPT);
     for (;;) {
-        for (int place = 0; place <= vectors; place++) {
-            integers[place] = (uintptr_t)reads[place].data;
-        }
         for (int place = 0; place < scalars; place++) {
             floats[place] = numbers[place].is_array ? *(const double *)numbers[place].data : numbers[place].number;
         }
-        call(integers[0], integers[1], integers[2], integers[3], integers[4], integers[5], integers[6], integers[7],
-             floats[0], floats[1], floats[2], floats[3], floats[4], floats[5], floats[6], floats[7]);
+        npy_intp done = 0;
+        for (int part = 0; part < 2; part++) {
+            if (lengths[part] == 0) {
+                continue;
+            }
+            for (int place = 0; place <= vectors; place++) {
+                /* An array of one element along the run is read at that element by every call. */
+                npy_intp step = reads[place].strides[dimensions - 1];
+                integers[place] = (uintptr_t)(reads[place].data + done * step);
+            }
+            integers[vectors + 1] = (uintptr_t)lengths[part];
+            call(integers[0], integers[1], integers[2], integers[3], integers[4], integers[5], integers[6], integers[7],
+                 floats[0], floats[1], floats[2], floats[3], floats[4], floats[5], floats[6], floats[7]);
+            done += lengths[part];
+        }
         /* Step the outer dimensions as an odometer: the last one first, carrying into the one before. */
         int axis = outer - 1;
         for (; axis >= 0; axis--) {

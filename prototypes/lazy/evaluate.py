@@ -2,7 +2,10 @@
 
 Left alone, this makes exactly the calls the eager program would have made,
 on the same operands, in the order they were written, so the results are
-NumPy's by construction.
+NumPy's by construction. One thing is done differently from the letter of
+the graph, and gives the same values: a write, which is defined as a copy
+of the array with the write made into it, is made into the array's own
+memory when nothing will read what the array held before (`reusable`).
 
 Two things can be put in from outside, and both are empty unless something
 sets them. `planner` is asked, before a computation starts, which of its
@@ -12,6 +15,7 @@ each call took, for the tools that measure a program.
 """
 from __future__ import annotations
 
+import sys
 import time
 import warnings
 import weakref
@@ -20,7 +24,7 @@ from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
-from . import graph
+from . import graph, rules
 from .graph import Node, Trigger
 
 
@@ -115,6 +119,96 @@ class _Progress:
     failed: set[int] = field(default_factory=set)
 
 
+class _Quiet:
+    """What the calls of one computation run under: their warnings caught, and NumPy's error settings as each wants.
+
+    A node's call runs under the `np.errstate` its operation was written
+    under, and a warning NumPy issues in it would name a line of this file,
+    so it is caught and issued again at the line that wrote the operation.
+    Both used to be set up around every call, which cost more than a call
+    on a small array does. Here they are set up once for the computation:
+    the warnings are caught for all of it and looked at after each call,
+    and the error settings are changed only when a node wants others than
+    the node before it. `catch_warnings` changes the process's filters;
+    that is safe here only because every evaluation holds the layer's lock.
+    """
+
+    __slots__ = ("catcher", "caught", "found", "outer", "active")
+
+    def __enter__(self) -> "_Quiet":
+        """Start catching warnings, and note the error settings in effect."""
+        # The warnings caught and not yet given a line, as `catch_warnings` records them.
+        self.caught: list[warnings.WarningMessage] = []
+        # The warnings waiting to be issued again: (warning, the line that wrote the operation).
+        self.found: list[tuple[warnings.WarningMessage, graph.Origin]] = []
+        # The error settings before the computation, and the ones in effect now. A node's settings are a
+        # dictionary shared by every node written under them, so the same object nearly always.
+        self.outer = self.active = np.geterr()
+        self._catch()
+        return self
+
+    def _catch(self) -> None:
+        """Catch every warning from here on."""
+        self.catcher = warnings.catch_warnings(record=True)
+        self.caught = self.catcher.__enter__()
+        warnings.simplefilter("always")
+
+    def under(self, errstate: dict | None) -> None:
+        """Put NumPy's error settings as a node wants them.
+
+        Args:
+            errstate: The settings the node's operation was written under; None for a node that has none.
+        """
+        if errstate is not None and errstate != self.active:
+            np.seterr(**errstate)
+        if errstate is not None:
+            self.active = errstate
+
+    def note(self, origin: graph.Origin) -> None:
+        """Give the warnings just caught the line of the node whose call issued them.
+
+        Args:
+            origin: Where the user wrote that node's operation.
+        """
+        self.found.extend((warning, origin) for warning in self.caught)
+        self.caught.clear()
+
+    def issue(self) -> None:
+        """Issue the warnings found so far again, each at its line, and go on catching.
+
+        The user's own filters apply, so this is done outside the catching:
+        a filter that makes a warning an error raises here, with the
+        computation stopped at the node that warned, as it used to be.
+
+        Raises:
+            Warning: A warning the user's filters turn into an error.
+        """
+        found, self.found = self.found, []
+        self.catcher.__exit__(None, None, None)
+        try:
+            for warning, origin in found:
+                _reissue(warning, origin)
+        finally:
+            self._catch()
+
+    def __exit__(self, kind: Any, error: Any, traceback: Any) -> None:
+        """Put the filters and the error settings back, and issue what was found.
+
+        Raises:
+            Warning: A warning the user's filters turn into an error, unless the computation is already raising.
+        """
+        self.catcher.__exit__(None, None, None)
+        if self.active != self.outer:
+            np.seterr(**self.outer)
+        found, self.found = self.found, []
+        for warning, origin in found:
+            try:
+                _reissue(warning, origin)
+            except Warning:
+                if error is None:
+                    raise
+
+
 def compute(roots: Iterable[Node], trigger: Trigger) -> None:
     """Compute some nodes and whatever they need.
 
@@ -128,16 +222,25 @@ def compute(roots: Iterable[Node], trigger: Trigger) -> None:
     roots = list(roots)
     with graph.LOCK:
         todo = _needed(roots)
+        if not todo:
+            # Nothing to compute: the commonest case by far, a value asked for of an array that has it.
+            for root in roots:
+                if root.failure is not None:
+                    raise root.failure
+            return
         started = CLOCK.enter(len(todo))
         progress = _begin(todo)
         try:
-            plan = planner(todo) if planner is not None and todo else None
-            while todo:
-                # pop() drops the list's reference, so an intermediate is freed as
-                # soon as its last consumer has been computed.
-                node = todo.pop()
-                if plan is None or not _planned(plan, node, progress):
-                    _step(node, progress)
+            plan = planner(todo) if planner is not None else None
+            with _Quiet() as quiet:
+                while todo:
+                    # pop() drops the list's reference, so an intermediate is freed as
+                    # soon as its last consumer has been computed.
+                    node = todo.pop()
+                    if plan is None or not _planned(plan, node, progress, quiet):
+                        _step(node, progress, quiet)
+                    if quiet.found:
+                        quiet.issue()
         finally:
             _end(progress, roots, trigger)
             CLOCK.leave(started)
@@ -162,44 +265,50 @@ def compute_pending(trigger: Trigger) -> None:
     """
     with graph.LOCK:
         todo = graph.pending_nodes()
+        if not todo:
+            return
         started = CLOCK.enter(len(todo))
         progress = _begin(todo)
         node = None
         try:
-            plan = planner(todo) if planner is not None and todo else None
+            plan = planner(todo) if planner is not None else None
             # The nodes a plan computes inside a group have no value afterwards. Nothing should hold one, or the
             # plan would not have put it inside; if something does, it is computed below, since after this
             # function nothing may be pending.
             skipped = [weakref.ref(node) for node in todo if node.number in plan.inner] if plan is not None else []
             node = None
-            while todo:
-                node = todo.pop()
-                if not node.pending:
-                    continue
-                inherited = _inherited_failure(node)
-                if inherited is not None:
-                    _fail(node, inherited)
-                    progress.numbers.append(node.number)
-                    progress.failed.add(node.number)
-                elif plan is None or not _planned(plan, node, progress):
-                    _step(node, progress)
-            node = None  # The loop's last node must not be kept alive by this name while the skipped ones are looked at.
-            for reference in reversed(skipped):
-                node = reference()
-                if node is not None and node.pending:
-                    _compute_one(node)
+            with _Quiet() as quiet:
+                while todo:
+                    node = todo.pop()
+                    if not node.pending:
+                        continue
+                    inherited = _inherited_failure(node)
+                    if inherited is not None:
+                        _fail(node, inherited)
+                        progress.numbers.append(node.number)
+                        progress.failed.add(node.number)
+                    elif plan is None or not _planned(plan, node, progress, quiet):
+                        _step(node, progress, quiet)
+                    if quiet.found:
+                        quiet.issue()
+                node = None  # The loop's last node must not be kept alive by this name while the skipped ones are looked at.
+                for reference in reversed(skipped):
+                    node = reference()
+                    if node is not None and node.pending:
+                        _compute_one(node, quiet)
         finally:
             _end(progress, [], trigger)
             CLOCK.leave(started)
 
 
-def _planned(plan: Plan, node: Node, progress: _Progress) -> bool:
+def _planned(plan: Plan, node: Node, progress: _Progress, quiet: _Quiet) -> bool:
     """Take one node of a planned computation the plan's way, if the plan has one for it.
 
     Args:
         plan: The computation's plan.
         node: The next pending node, in the order written.
         progress: The computation's record, which gains the node's number if it is taken here.
+        quiet: What the computation's calls run under.
 
     Returns:
         True when nothing is left to do for the node: it is inside a group,
@@ -227,7 +336,7 @@ def _planned(plan: Plan, node: Node, progress: _Progress) -> bool:
         return True
     for member in plan.members(group):
         if member.pending:
-            _measured(member)
+            _measured(member, quiet)
     return False
 
 
@@ -245,38 +354,43 @@ def _begin(todo: list[Node]) -> _Progress:
     return _Progress()
 
 
-def _step(node: Node, progress: _Progress) -> None:
+def _step(node: Node, progress: _Progress, quiet: _Quiet) -> None:
     """Compute one node of a computation and note it.
 
     Args:
         node: A pending node whose operands are computed or failed.
         progress: The computation's record, which gains the node's number.
+        quiet: What the computation's calls run under.
 
     Raises:
         Exception: What computing the node raised, or the failure of an operand.
     """
     progress.numbers.append(node.number)
     try:
-        _measured(node)
+        if meter is None:
+            _compute_one(node, quiet)
+        else:
+            _measured(node, quiet)
     except Exception:
         progress.failed.add(node.number)
         raise
 
 
-def _measured(node: Node) -> None:
+def _measured(node: Node, quiet: _Quiet) -> None:
     """Compute one node, telling the meter what it took if there is one.
 
     Args:
         node: A pending node whose operands are computed or failed.
+        quiet: What the computation's calls run under.
 
     Raises:
         Exception: What computing the node raised, or the failure of an operand.
     """
     if meter is None:
-        _compute_one(node)
+        _compute_one(node, quiet)
         return
     started = time.perf_counter_ns()
-    _compute_one(node)
+    _compute_one(node, quiet)
     meter(node, time.perf_counter_ns() - started)
 
 
@@ -304,61 +418,195 @@ def _needed(roots: Iterable[Node]) -> list[Node]:
         a loop of a thousand steps makes a graph a thousand nodes deep.
     """
     found: dict[int, Node] = {}
-    stack = list(roots)
+    stack = [root for root in roots if root.operation is not None]
     while stack:
         node = stack.pop()
-        if node.pending and node.number not in found:
-            found[node.number] = node
-            stack.extend(arg for arg in node.args if isinstance(arg, Node))
+        number = node.number
+        if number not in found:
+            found[number] = node
+            for arg in node.args:
+                if type(arg) is Node and arg.operation is not None:
+                    stack.append(arg)
+    if len(found) < 2:
+        return list(found.values())
     return [found[number] for number in sorted(found, reverse=True)]
 
 
-def _compute_one(node: Node) -> None:
+def _old_contents(write: Node) -> tuple[int, int]:
+    """Count the references to what a write's array held before it: to the node, and to the node's array.
+
+    Args:
+        write: A node whose first operand is a computed node with a value.
+
+    Returns:
+        (`sys.getrefcount` of the node, the same of its value), this
+        function's own references among them.
+    """
+    old = write.args[0]
+    return sys.getrefcount(old), sys.getrefcount(old.value)
+
+
+def _view_counts(write: Node, memory: np.ndarray) -> list[tuple[int, int]]:
+    """Count the references to each operand of a write that is a view of the array written into.
+
+    Args:
+        write: A write's node.
+        memory: The array the write's first operand holds.
+
+    Returns:
+        For each different operand after the first that is a computed node
+        whose value is a view made directly of `memory`: (references to the
+        node, less one for each place the write has it at; references to
+        its value), this function's own among them.
+    """
+    counts = []
+    seen: set[int] = set()
+    for arg in write.args[1:]:
+        if type(arg) is Node and arg.number not in seen:
+            seen.add(arg.number)
+            value = arg.value
+            if type(value) is np.ndarray and value.base is memory:
+                del value
+                places = sum(1 for other in write.args if other is arg)
+                counts.append((sys.getrefcount(arg) - places, sys.getrefcount(arg.value)))
+    return counts
+
+
+def _view_operands(write: Node, memory: np.ndarray) -> int:
+    """Count the operands of a write that are views of the array written into and that the write alone reads.
+
+    `p[:, -1] = p[:, -2]` reads a view of the array it writes. The view's
+    array refers to the array it is a view of, which is one of the
+    references `_old_contents` counts; it is the write's own.
+
+    Args:
+        write: A write's node.
+        memory: The array the write's first operand holds.
+
+    Returns:
+        How many of the views `_view_counts` lists have no reference to the node or to its value but the write's.
+    """
+    return sum(1 for nodes, arrays in _view_counts(write, memory) if nodes <= _VIEW_ALONE[0] and arrays <= _VIEW_ALONE[1])
+
+
+def _calibrated() -> tuple[tuple[int, int], tuple[int, int]]:
+    """Measure what the counts above report for objects nothing else refers to.
+
+    Measured, not assumed: an interpreter may count its own references
+    differently, and the counts depend on how the functions are written.
+
+    Returns:
+        (`_old_contents` of a write whose old contents nothing else refers
+        to, `_view_counts` of a view operand that the write alone reads).
+    """
+    kind = np.dtype(np.float64)
+    write = Node(0, "write", None, (Node(0, "array", None, (), {}, (2,), kind, value=np.zeros(2)),), {}, (2,), kind)
+    alone = _old_contents(write)
+    memory = write.args[0].value
+    write.args = (write.args[0], Node(1, "view", None, (), {}, (1,), kind, value=memory[:1]))
+    return alone, _view_counts(write, memory)[0]
+
+
+# What `_old_contents` reports when the write is the only reader, and what `_view_operands` sees for a view
+# that the write alone reads.
+_VIEW_ALONE: tuple[int, int] = (0, 0)
+_ALONE, _VIEW_ALONE = _calibrated()
+# Counts of writes made in place and of writes that copied, for the tools that measure a program.
+WRITES = {"in_place": 0, "copied": 0}
+
+
+def reusable(write: Node, held: int = 0) -> bool:
+    """Say whether a write may be made into the memory its array already has, instead of into a copy.
+
+    A write is defined as a copy of what the array held with the write
+    made into it, so that an operation written before the write still reads
+    the old contents whenever it is computed. The copy is not needed when
+    nothing will read the old contents again, and then the write is what
+    NumPy does: into the memory, in place. That is so when all of this holds:
+
+    - the old contents are computed, in an array that owns its memory and
+      that nothing outside the layer can know;
+    - no pending node reads them: a pending node refers to its operands,
+      and a computed one has let go of them, so a reference to the old
+      node beyond the write's own is a reader, or a lazy array that still
+      stands for the old contents;
+    - no computed view of them is alive: a view's array refers to the
+      array it views. The views the write itself reads are its own; NumPy
+      takes care of a source that overlaps its destination.
+
+    CPython counts references exactly. Where a count is higher than it has
+    to be the write copies, which is always right.
+
+    Args:
+        write: A pending node of kind WRITE.
+        held: References to the old contents' node that the caller knows of and that read nothing after the
+            write: a plan's own record of what it computes together with the write.
+
+    Returns:
+        True when the write's first operand may be overwritten.
+    """
+    args = write.args
+    old = args[0] if args else None
+    if type(old) is not Node or old.operation is not None or old.failure is not None or old.exposed:
+        return False
+    memory = old.value
+    if type(memory) is not np.ndarray or memory.base is not None or not memory.flags.writeable:
+        return False
+    del old
+    nodes, arrays = _old_contents(write)
+    # `memory` is one more reference to the array than the calibration had.
+    spare = arrays - 1 - _ALONE[1]
+    if nodes - held > _ALONE[0] or spare < 0:
+        return False
+    return spare == 0 or spare == _view_operands(write, memory)
+
+
+def _compute_one(node: Node, quiet: _Quiet) -> None:
     """Compute one node whose operands are all computed or failed.
 
     Args:
         node: A pending node.
+        quiet: What the computation's calls run under.
 
     Raises:
         Exception: The failure of an operand, or what the NumPy call raised,
             with a note naming the line that wrote the operation.
     """
-    inherited = _inherited_failure(node)
-    if inherited is not None:
-        _fail(node, inherited)
-        raise inherited
+    operation, moved = node.operation, None
+    if node.kind == rules.WRITE:
+        in_place = getattr(operation, "in_place", None)
+        if in_place is not None and reusable(node):
+            operation, moved = in_place, node.args[0]
+            WRITES["in_place"] += 1
+        else:
+            WRITES["copied"] += 1
+    values = []
+    for arg in node.args:
+        if type(arg) is Node:
+            if arg.failure is not None:
+                _fail(node, arg.failure)
+                raise arg.failure
+            arg = arg.value
+        values.append(arg)
+    if node.errstate is not quiet.active:
+        quiet.under(node.errstate)
     try:
-        value, caught = _call(node)
+        value = operation(*values, **node.kwargs)
     except Exception as error:
         error.add_note(f"in the lazy operation '{node.name}' written at {node.origin.filename}:{node.origin.lineno}")
         _fail(node, error)
         raise
+    if moved is not None:
+        # The old node's memory is the new node's now. Nothing reads the old one again; if anything did, it
+        # would find no value there rather than the new contents under the old name.
+        moved.value = None
     node.value = value
     if not graph.is_known(node.shape):
         node.shape = np.shape(value)  # The length a mask selected is known now.
+    origin = node.origin
     graph.settle(node)
-    for warning in caught:
-        _reissue(warning, node.origin)
-
-
-def _call(node: Node) -> tuple[Any, list[warnings.WarningMessage]]:
-    """Make a node's NumPy call on its operands' values.
-
-    Args:
-        node: A pending node whose operands are computed.
-
-    Returns:
-        (the result, the warnings NumPy issued while computing it). The call
-        runs under the `np.errstate` the operation was written under, and its
-        warnings are recorded instead of shown, since they would name a line
-        of this file. `catch_warnings` changes the process's filters; that is
-        safe here only because every evaluation holds the layer's lock.
-    """
-    args = tuple(arg.value if isinstance(arg, Node) else arg for arg in node.args)
-    with warnings.catch_warnings(record=True) as caught, np.errstate(**node.errstate):
-        warnings.simplefilter("always")
-        value = node.operation(*args, **node.kwargs)
-    return value, caught
+    if quiet.caught:
+        quiet.note(origin)
 
 
 def _reissue(warning: warnings.WarningMessage, origin: graph.Origin) -> None:
