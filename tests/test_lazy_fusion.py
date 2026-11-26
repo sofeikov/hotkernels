@@ -349,13 +349,32 @@ def test_short_rows_at_two_pitches_are_a_program_each_from_sixteen_elements(leng
     assert sum(fuse.STATS.calls.values()) == (2 if length >= SHORTEST_ROW else 0)
 
 
-def test_rows_with_too_much_between_them_are_left_to_numpy():
-    """More than a quarter of the walk between rows: the steps would mostly compute what nobody asked for."""
-    a, b = arrays(2, (30, 10))
+# How many times their length rows of fewer than `SHORTEST_ROW` elements may lie apart and be walked straight
+# through: `MOST_SPREAD` of `_fused.c`.
+MOST_SPREAD = 8
+
+
+@pytest.mark.parametrize("width, pitch", ((1, 3), (2, 4), (2, 16), (2, 17), (6, 10), (15, 120), (15, 121), (16, 40), (30, 39)))
+def test_short_rows_with_much_between_them_are_walked_or_left_to_numpy(width: int, pitch: int):
+    """Columns of two tables: rows of a few elements are walked through up to eight times their length, longer rows
+    are a program each, and rows of a few elements farther apart than that are NumPy's."""
+    a, b = arrays(2, (70, pitch))
     x, y = lazy.asarray(a), lazy.asarray(b)
-    got = (x[:, :6] - y[:, 4:]) * x[:, 4:] + 0.5 * y[:, :6]
-    assert same((a[:, :6] - b[:, 4:]) * a[:, 4:] + 0.5 * b[:, :6], got.gather())
-    assert fuse.STATS.declined == 1 and fuse.STATS.fused_nodes == 0
+    got = (x[:, :width] - y[:, -width:]) * x[:, -width:] + 0.5 * y[:, :width]
+    assert same((a[:, :width] - b[:, -width:]) * a[:, -width:] + 0.5 * b[:, :width], got.gather())
+    made = width >= SHORTEST_ROW or pitch <= width * MOST_SPREAD
+    if width > 1:  # A row of one element is a number to the planner, not an array.
+        assert fuse.STATS.declined == (0 if made else 1) and (fuse.STATS.fused_nodes > 0) == made
+
+
+@pytest.mark.parametrize("pitch", (2, 5, 40))
+def test_a_program_of_one_kernel_on_rows_of_one_element_gives_numpys_values(pitch: int):
+    """`x[:, :1]` of a table: no call is made for one element at a time."""
+    a, b = arrays(2, (3000, pitch))
+    x, y = lazy.asarray(a), lazy.asarray(b)
+    got = x[:, :1] * y[:, -1:] + y[:, :1]
+    assert same(a[:, :1] * b[:, -1:] + b[:, :1], got.gather())
+    assert sum(fuse.STATS.calls.values()) <= 1
 
 
 def test_what_lies_between_rows_is_never_written():

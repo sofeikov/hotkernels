@@ -60,6 +60,9 @@
 /* The shortest inner run that is worth copying arrays into row order for, and below which rows at one pitch are
  * walked straight through instead of one by one. */
 #define SHORTEST_RUN 32
+/* The shortest row a program of one step is run on by itself: on rows of one element, which a slice `x[:, :1]`
+ * has, a call for each takes 3 to 9 times what NumPy's pass does, and on rows of two it is 1.3 times as fast. */
+#define SHORTEST_CALL 2
 /* The shortest row a program of several steps is run on by itself, every step a call for that row: two of the
  * kernels' blocks of eight. Timed on `(a + b) * c - d` with rows at two pitches, four million elements, against
  * NumPy's three passes: 1.06 to 1.21 times as fast for rows of 16 to 28, and 0.70 to 0.88 for rows of 4 to 12, where
@@ -609,8 +612,17 @@ program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, i
 }
 
 /* The most of a walk that may be elements between rows, as a divisor: a quarter. More than that and the rows are
- * not walked as one stretch, since the steps would mostly compute what nobody asked for. */
+ * not walked as one stretch, since the steps would mostly compute what nobody asked for, and a row of
+ * `SHORTEST_ROW` elements or more is quicker as a program of its own. */
 #define MOST_BETWEEN 4
+/* For rows shorter than `SHORTEST_ROW`, how many times a row's length the rows may lie apart and still be walked
+ * straight through. NumPy's own loop is called once for each such row, which costs it more than the row's
+ * arithmetic does: `particles[:, :2] += particles[:, 2:] * dt` on 100,000 rows takes it 1,255 µs, and the same
+ * arithmetic on 200,000 elements in one run 82 µs. So a walk that computes eight times what was asked for still
+ * wins. Timed on 400,000 elements in rows of 2 to 15, every 1.25 to 8 times their length, a program of one kernel
+ * is 1.3 to 2.9 times NumPy's passes and one of two kernels 1.05 to 3.2 times, but for one layout of the 98 that
+ * is 0.93. Not timed farther apart. */
+#define MOST_SPREAD 8
 
 /* A program on rows too short to be worth a call each, where the rows lie at one pitch in every array: slices that
  * cut the innermost dimension, `x[2:-2, 2:-2, :-1]` of a grid 26 deep, are rows of 25 elements every 26.
@@ -630,6 +642,9 @@ program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, i
  * within the arrays' memory. Their arithmetic can raise a floating-point flag that no row raised; the result is
  * then dropped like any that raised one, and NumPy's calls made.
  *
+ * How much may lie between rows is `MOST_BETWEEN` of the walk, and for rows of a few elements `MOST_SPREAD` times
+ * the row.
+ *
  * Returns 1 when the program was made this way, 0 when it does not apply and nothing was done, -1 with an error. */
 static int
 program_spanned(const program_step *steps, Py_ssize_t step_count, operand *reads, int arrays, operand *numbers,
@@ -638,7 +653,7 @@ program_spanned(const program_step *steps, Py_ssize_t step_count, operand *reads
     operand *target = &reads[arrays];
     int last = dimensions - 1;
     npy_intp width = shape[last];
-    if (dimensions < 2 || width < 2 || arrays == 0) {
+    if (dimensions < 2 || arrays == 0) {
         return 0;
     }
     for (int place = 0; place < arrays; place++) {
@@ -673,7 +688,11 @@ program_spanned(const program_step *steps, Py_ssize_t step_count, operand *reads
             agreed = !numbers[place].is_array || numbers[place].strides[axis] == 0;
         }
         npy_intp step = common / ELEMENT;
-        if (!agreed || common == 0 || step < extent || (step - extent) * MOST_BETWEEN > step) {
+        if (!agreed || common == 0 || step < extent) {
+            break;
+        }
+        /* Too much between: for the rows themselves when they are short, by their length; else by the walk. */
+        if (axis == last - 1 && width < SHORTEST_ROW ? step > width * MOST_SPREAD : (step - extent) * MOST_BETWEEN > step) {
             break;
         }
         int fits = 1;
@@ -1147,7 +1166,7 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
             return PyLong_FromLong(flags);
         }
     }
-    if (stepped || (run < SHORTEST_ROW && step_count > 1)) {
+    if (stepped || (run < SHORTEST_ROW && step_count > 1) || (run < SHORTEST_CALL && outer > 0)) {
         /* Arrays a kernel cannot read where they lie: the shape is walked in the order of its rows and the arrays
          * that lie otherwise are gathered; see `program_flat`. Not rows of a few elements, though. Gathering one is
          * a copy for each array that lies otherwise, and for rows that short the copies cost what NumPy's own
@@ -1155,6 +1174,7 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
          * 200 ms either way and the kinetic energy in 102 to 103 ms gathered against 97 to 100 ms declined. Those
          * are left to NumPy, and so are rows a kernel can read where they lie but that are shorter than
          * `SHORTEST_ROW`, at a pitch the arrays do not share: every step would be a call for a handful of elements.
+         * A program of one step is a call for each row down to `SHORTEST_CALL` elements, and left to NumPy below.
          * A number that is not the same for every row cannot be gathered: a call has one value for each number. */
         if (shape[dimensions - 1] < SHORTEST_RUN) {
             return PyLong_FromLong(DECLINED);
