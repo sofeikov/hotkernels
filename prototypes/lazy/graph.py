@@ -338,7 +338,8 @@ def fallback(kind: str, call: str) -> None:
         logger.log(level, _FALLBACK_LINE, FALLBACK_WORDS[kind], call, os.path.basename(origin.filename), origin.lineno)
 
 
-def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False, exposed: bool = False) -> Node:
+def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False, exposed: bool = False,
+         origin: "Origin | None" = None) -> Node:
     """Make a node for an array or NumPy scalar that already exists.
 
     Args:
@@ -348,11 +349,12 @@ def leaf(value: Any, source: str = "array", kind: str = "", strict: bool = False
         kind: AT_ONCE for the result of a call made at once; empty otherwise.
         strict: Whether the array refuses to give its values without `gather()`.
         exposed: Whether the array's memory may be known outside the layer.
+        origin: The line that wrote the operation, for a view that was taken at once; None otherwise.
 
     Returns:
         A computed node with that value.
     """
-    node = Node(next(_numbers), "array", None, (), {}, value.shape, value.dtype, None, None, value, None, kind, strict,
+    node = Node(next(_numbers), "array", None, (), {}, value.shape, value.dtype, origin, None, value, None, kind, strict,
                 exposed)
     if observer is not None:
         observer.made(node, source)

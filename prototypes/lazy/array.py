@@ -79,6 +79,13 @@ FIT_MEMORY_LIMIT = 4096
 # strictness its node is to have, once something asks for the node. One tuple for each pair, made here once, so
 # that such an array is one object and nothing else. In the order the C core reads them: by kind, then strictness.
 VALUED = tuple((kind, strict) for kind in ("", graph.AT_ONCE) for strict in (False, True))
+# The ufunc behind each in-place function of the `operator` module that `LazyArray` has a method for: what
+# `s += v` is for a number, into which nothing is written.
+IN_PLACE_UFUNCS = {operator.iadd: np.add, operator.isub: np.subtract, operator.imul: np.multiply,
+                   operator.itruediv: np.true_divide}
+# How many things a view keeps of what it has seen when it holds NumPy's view and no node: the cell's contents,
+# the view's array, and whether it is strict. A view with a node keeps two, the contents and the node.
+HOLDS_ARRAY = 3
 
 # The element-by-element writes that `_fits_elementwise` found to fit, by what
 # `_fit_key` writes down of each. Only those: one that does not fit is made at
@@ -1567,13 +1574,19 @@ class LazyArray:
         """
         if not self._steps:
             return self._cell.node
-        contents, node = self._seen
+        seen = self._seen
+        contents, node = seen[0], seen[1]
         if contents is not self._cell.node:
             node = self._cell.node
             for step in self._steps:
                 node = graph.deferred(step.operation, step.name, (node,) + step.tail, step.kwargs, step.shape, step.dtype,
                                       rules.VIEW, node.strict, step.origin)
             self._seen = (self._cell.node, node)
+        elif len(seen) == HOLDS_ARRAY:
+            # A view the C core took at once holds NumPy's view where the node would be, and whether it is strict:
+            # most such views are read once by the next small call. The node is made now, on the line of the step.
+            node = graph.leaf(node, kind=graph.AT_ONCE, strict=seen[2], origin=self._steps[-1].origin)
+            self._seen = (contents, node)
         return node
 
     def _expose(self) -> None:
@@ -2033,9 +2046,10 @@ class LazyArray:
     __eq__, __ne__ = _binary(np.equal), _binary(np.not_equal)
     __neg__, __pos__ = _unary(np.negative), _unary(np.positive)
     __abs__, __invert__ = _unary(np.absolute), _unary(np.invert)
-    __iadd__, __isub__ = _in_place(operator.iadd, "x += y", np.add), _in_place(operator.isub, "x -= y", np.subtract)
-    __imul__ = _in_place(operator.imul, "x *= y", np.multiply)
-    __itruediv__ = _in_place(operator.itruediv, "x /= y", np.true_divide)
+    __iadd__ = _in_place(operator.iadd, "x += y", IN_PLACE_UFUNCS[operator.iadd])
+    __isub__ = _in_place(operator.isub, "x -= y", IN_PLACE_UFUNCS[operator.isub])
+    __imul__ = _in_place(operator.imul, "x *= y", IN_PLACE_UFUNCS[operator.imul])
+    __itruediv__ = _in_place(operator.itruediv, "x /= y", IN_PLACE_UFUNCS[operator.itruediv])
 
 
 # The roads the C core can stand on, beside the operators and reductions that say so where they are made.
@@ -2094,7 +2108,7 @@ def _set_up(core: Any) -> None:
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
                at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE,
-               fresh_functions=FRESH_FUNCTIONS, valued=VALUED, generic=np.generic,
+               fresh_functions=FRESH_FUNCTIONS, valued=VALUED, generic=np.generic, in_place_ufuncs=IN_PLACE_UFUNCS,
                deferred_kinds="".join(sorted(rules.DEFERRED_KINDS)))
 
 
