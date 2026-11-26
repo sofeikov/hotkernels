@@ -43,7 +43,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 30
+#define CORE_VERSION 31
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -4682,6 +4682,7 @@ static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
 static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
 static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
 static PyObject *s_isnative;
+static PyObject *s_active, *s_caught, *s_found, *s_note, *s_issue; /* The names of `evaluate._Quiet` */
 
 /* What the finder notes of one node the computation takes. */
 typedef struct {
@@ -6096,16 +6097,16 @@ module_at_once_counts(PyObject *module, PyObject *ignored)
 /* The most operands a node is computed with on the C stack; one of more is left to Python. */
 #define MOST_COMPUTED 8
 
-/* `compute_plain(node)`: compute one pending node whose call is plain, as `evaluate._compute_one` does: the
- * operation on its operands' values, the value kept, the operands let go (`graph.settle`). A plain call is one
- * that is no write, has no keyword, gives a shape that is known, and reads only values that are there; the
- * caller sees to the error settings and to what is caught. True when the node was computed; False, with nothing
- * done, for any other node, which Python computes; NULL with NumPy's error, the node untouched. */
-static PyObject *
-module_compute_plain(PyObject *module, PyObject *node)
+/* Compute one pending node whose call is plain, as `evaluate._compute_one` does: the operation on its operands'
+ * values, the value kept, the operands let go (`graph.settle`). A plain call is one that is no write, has no
+ * keyword, gives a shape that is known, and reads only values that are there; the caller sees to the error
+ * settings and to what is caught. 1 when the node was computed; 0, with nothing done, for any other node, which
+ * Python computes; -1 with NumPy's error set, the node untouched. */
+static int
+plain_now(PyObject *node)
 {
-    if (!enabled || Py_TYPE(node) != Node) {
-        Py_RETURN_FALSE;
+    if (Py_TYPE(node) != Node) {
+        return 0;
     }
     PyObject *operation = SLOT(node, node_at[N_OPERATION]), *args = SLOT(node, node_at[N_ARGS]);
     PyObject *kwargs = SLOT(node, node_at[N_KWARGS]), *kind = SLOT(node, node_at[N_KIND]);
@@ -6113,19 +6114,19 @@ module_compute_plain(PyObject *module, PyObject *node)
         || PyDict_GET_SIZE(kwargs) != 0 || kind == write_kind || !PyUnicode_CheckExact(kind)
         || PyUnicode_Compare(kind, write_kind) == 0 || !PyTuple_CheckExact(SLOT(node, node_at[N_SHAPE]))
         || !shape_known(SLOT(node, node_at[N_SHAPE]))) {
-        Py_RETURN_FALSE;
+        return 0;
     }
     PyObject *values[MOST_COMPUTED];
     Py_ssize_t count = PyTuple_GET_SIZE(args);
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *arg = PyTuple_GET_ITEM(args, place);
-        if (Py_TYPE(arg) == Node) {
-            if (!has_value(arg)) {
-                Py_RETURN_FALSE; /* Failed, or its memory taken by a write: Python says what follows. */
-            }
-            arg = SLOT(arg, node_at[N_VALUE]);
+        if (Py_TYPE(arg) == Node && !has_value(arg)) {
+            return 0; /* Failed, or its memory taken by a write: Python says what follows. */
         }
-        values[place] = Py_NewRef(arg);
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        values[place] = Py_NewRef(Py_TYPE(arg) == Node ? SLOT(arg, node_at[N_VALUE]) : arg);
     }
     Py_INCREF(operation);
     PyObject *value = PyObject_Vectorcall(operation, values, (size_t)count, NULL);
@@ -6134,7 +6135,7 @@ module_compute_plain(PyObject *module, PyObject *node)
         Py_DECREF(values[place]);
     }
     if (value == NULL) {
-        return NULL;
+        return -1;
     }
     /* `node.value = value`, then `graph.settle(node)`. */
     Py_SETREF(SLOT(node, node_at[N_VALUE]), value);
@@ -6144,10 +6145,286 @@ module_compute_plain(PyObject *module, PyObject *node)
     PyObject *reference = PyWeakref_NewRef(node, NULL);
     if (reference == NULL || PySet_Discard(pending, reference) < 0) {
         Py_XDECREF(reference);
-        return NULL;
+        return -1;
     }
     Py_DECREF(reference);
-    Py_RETURN_TRUE;
+    return 1;
+}
+
+/* `compute_plain(node)`: `plain_now` for `evaluate._compute_one`. True when the node was computed, False when
+ * it is Python's to compute, NULL with NumPy's error. */
+static PyObject *
+module_compute_plain(PyObject *module, PyObject *node)
+{
+    int done = enabled ? plain_now(node) : 0;
+    if (done < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(done);
+}
+
+/* `run_nodes(todo, inner, groups, quiet, numbers, slow, failed, pending_only)`: the loop of `evaluate.compute` and
+ * of `evaluate.compute_pending`, which takes the nodes of one computation in the order they were written.
+ *
+ * Two kinds of node are taken here, and they are most of a computation's: a node inside a planned group, which is
+ * only noted, and a node whose call is plain and written under the error settings in effect, which `plain_now`
+ * computes. Every other node goes to `slow`, the Python that takes one node of that loop: a group's own node, a
+ * write, a node with keywords or other error settings, one whose operand failed. So the Python loop is the
+ * definition, and this is its quick road node by node.
+ *
+ * `todo` is the list, newest first, which is emptied from its end; `inner` and `groups` are the plan's, or None;
+ * `quiet` is the computation's `evaluate._Quiet`; `numbers` gains the number of each node taken here; `failed` is
+ * called with a node and the error its plain call raised, to do what `_compute_one` and `_step` do with one;
+ * `pending_only` is true for `compute_pending`, which passes over a node that has been computed meanwhile. */
+static PyObject *
+module_run_nodes(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 8 || !PyList_CheckExact(args[0]) || !PyList_CheckExact(args[4])
+        || (args[1] != Py_None && !PyAnySet_Check(args[1])) || (args[2] != Py_None && !PyDict_Check(args[2]))) {
+        PyErr_SetString(PyExc_TypeError, "run_nodes(todo, inner, groups, quiet, numbers, slow, failed, pending_only)");
+        return NULL;
+    }
+    PyObject *todo = args[0], *inner = args[1], *groups = args[2], *quiet = args[3], *numbers = args[4];
+    PyObject *slow = args[5], *failed = args[6];
+    int pending_only = PyObject_IsTrue(args[7]);
+    PyObject *active = PyObject_GetAttr(quiet, s_active), *caught = PyObject_GetAttr(quiet, s_caught);
+    PyObject *node = NULL;
+    if (active == NULL || caught == NULL || pending_only < 0) {
+        goto fail;
+    }
+    while (PyList_GET_SIZE(todo) > 0) {
+        /* `todo.pop()`: the list lets go of the node, so an intermediate is freed with its last reader. */
+        Py_ssize_t last = PyList_GET_SIZE(todo) - 1;
+        node = Py_NewRef(PyList_GET_ITEM(todo, last));
+        if (PyList_SetSlice(todo, last, last + 1, NULL) < 0) {
+            goto fail;
+        }
+        int python = 1, look = 1;
+        if (Py_TYPE(node) == Node) {
+            PyObject *number = SLOT(node, node_at[N_NUMBER]);
+            if (pending_only && SLOT(node, node_at[N_OPERATION]) == Py_None) {
+                Py_CLEAR(node);
+                continue;
+            }
+            /* `compute_pending` first fails a node one of whose operands failed: Python's to do. */
+            int inherited = 0;
+            PyObject *read = SLOT(node, node_at[N_ARGS]);
+            for (Py_ssize_t place = 0; pending_only && PyTuple_CheckExact(read) && place < PyTuple_GET_SIZE(read); place++) {
+                PyObject *arg = PyTuple_GET_ITEM(read, place);
+                inherited = inherited || (Py_TYPE(arg) == Node && SLOT(arg, node_at[N_FAILURE]) != Py_None);
+            }
+            int inside = !inherited && inner != Py_None ? PySet_Contains(inner, number) : 0;
+            int grouped = !inherited && inside == 0 && groups != Py_None ? PyDict_Contains(groups, number) : 0;
+            if (inside < 0 || grouped < 0) {
+                goto fail;
+            }
+            if (inside) {
+                /* Inside a group: its group's own node gives what it would have. */
+                if (PyList_Append(numbers, number) < 0) {
+                    goto fail;
+                }
+                python = look = 0;
+            } else if (!inherited && !grouped && enabled && SLOT(node, node_at[N_ERRSTATE]) == active) {
+                PyObject *origin = Py_NewRef(SLOT(node, node_at[N_ORIGIN]));
+                Py_ssize_t noted = PyList_GET_SIZE(numbers);
+                int done = PyList_Append(numbers, number) < 0 ? -2 : plain_now(node);
+                if (done == 0) {
+                    /* Python's to compute, and to note. */
+                    if (PyList_SetSlice(numbers, noted, PyList_GET_SIZE(numbers), NULL) < 0) {
+                        Py_DECREF(origin);
+                        goto fail;
+                    }
+                } else if (done == 1) {
+                    python = 0;
+                    look = 0;
+                    if (PyList_CheckExact(caught) && PyList_GET_SIZE(caught) != 0) {
+                        PyObject *heard = PyObject_CallMethodOneArg(quiet, s_note, origin);
+                        if (heard == NULL) {
+                            Py_DECREF(origin);
+                            goto fail;
+                        }
+                        Py_DECREF(heard);
+                        look = 1;
+                    }
+                } else {
+                    Py_DECREF(origin);
+                    if (done == -1 && PyErr_ExceptionMatches(PyExc_Exception)) {
+                        /* What `_compute_one` and `_step` do with an error: a note of the line, the node failed. */
+                        PyObject *kind, *error, *trace;
+                        PyErr_Fetch(&kind, &error, &trace);
+                        PyErr_NormalizeException(&kind, &error, &trace);
+                        if (trace != NULL) {
+                            PyException_SetTraceback(error, trace);
+                        }
+                        PyObject *told = PyObject_CallFunctionObjArgs(failed, node, error, NULL);
+                        if (told == NULL) {
+                            Py_XDECREF(kind);
+                            Py_XDECREF(error);
+                            Py_XDECREF(trace);
+                            goto fail;
+                        }
+                        Py_DECREF(told);
+                        PyErr_Restore(kind, error, trace);
+                    }
+                    goto fail;
+                }
+                Py_DECREF(origin);
+            }
+        }
+        if (python) {
+            PyObject *taken = PyObject_CallOneArg(slow, node);
+            if (taken == NULL) {
+                goto fail;
+            }
+            Py_DECREF(taken);
+            /* Python may have put other error settings, and issued warnings, which starts another catching. */
+            Py_SETREF(active, PyObject_GetAttr(quiet, s_active));
+            Py_SETREF(caught, PyObject_GetAttr(quiet, s_caught));
+            if (active == NULL || caught == NULL) {
+                goto fail;
+            }
+        }
+        Py_CLEAR(node);
+        if (look) {
+            /* `if quiet.found: quiet.issue()`. */
+            PyObject *found = PyObject_GetAttr(quiet, s_found);
+            int any = found ? PyObject_IsTrue(found) : -1;
+            Py_XDECREF(found);
+            if (any < 0) {
+                goto fail;
+            }
+            if (any) {
+                PyObject *issued = PyObject_CallMethodNoArgs(quiet, s_issue);
+                if (issued == NULL) {
+                    goto fail;
+                }
+                Py_DECREF(issued);
+                Py_SETREF(caught, PyObject_GetAttr(quiet, s_caught));
+                if (caught == NULL) {
+                    goto fail;
+                }
+            }
+        }
+    }
+    Py_DECREF(active);
+    Py_DECREF(caught);
+    Py_RETURN_NONE;
+fail:
+    Py_XDECREF(node);
+    Py_XDECREF(active);
+    Py_XDECREF(caught);
+    return NULL;
+}
+
+/* One pending node and its number, for `needed`. */
+typedef struct {
+    long long number;
+    PyObject *node;
+} Wanted;
+
+static int
+newest_first(const void *first, const void *second)
+{
+    long long one = ((const Wanted *)first)->number, other = ((const Wanted *)second)->number;
+    return (one < other) - (one > other);
+}
+
+/* `needed(roots)`: `evaluate._needed`. The pending nodes some roots depend on, themselves included, in descending
+ * number, in a new list that is the only thing here to refer to them. Found with a stack, not by recursion. */
+static PyObject *
+module_needed(PyObject *module, PyObject *roots)
+{
+    if (!PyList_CheckExact(roots)) {
+        PyErr_SetString(PyExc_TypeError, "needed(roots) takes a list of nodes");
+        return NULL;
+    }
+    Py_ssize_t room = 64, depth = 0, count = 0, kept = 64;
+    PyObject **stack = PyMem_Malloc((size_t)room * sizeof(PyObject *));
+    Wanted *found = PyMem_Malloc((size_t)kept * sizeof(Wanted));
+    PyObject *seen = PySet_New(NULL), *result = NULL;
+    if (stack == NULL || found == NULL || seen == NULL) {
+        PyErr_NoMemory();
+        goto done;
+    }
+    for (Py_ssize_t place = 0; place < PyList_GET_SIZE(roots); place++) {
+        PyObject *root = PyList_GET_ITEM(roots, place);
+        if (Py_TYPE(root) != Node) {
+            PyErr_SetString(PyExc_TypeError, "needed(roots) takes a list of nodes");
+            goto done;
+        }
+        if (SLOT(root, node_at[N_OPERATION]) == Py_None) {
+            continue;
+        }
+        if (depth == room) {
+            room *= 2;
+            PyObject **grown = PyMem_Realloc(stack, (size_t)room * sizeof(PyObject *));
+            if (grown == NULL) {
+                PyErr_NoMemory();
+                goto done;
+            }
+            stack = grown;
+        }
+        stack[depth++] = root;
+    }
+    while (depth > 0) {
+        PyObject *node = stack[--depth];
+        PyObject *number = SLOT(node, node_at[N_NUMBER]);
+        int known = PySet_Contains(seen, number);
+        if (known < 0) {
+            goto done;
+        }
+        if (known) {
+            continue;
+        }
+        if (PySet_Add(seen, number) < 0) {
+            goto done;
+        }
+        if (count == kept) {
+            kept *= 2;
+            Wanted *grown = PyMem_Realloc(found, (size_t)kept * sizeof(Wanted));
+            if (grown == NULL) {
+                PyErr_NoMemory();
+                goto done;
+            }
+            found = grown;
+        }
+        found[count].node = node;
+        found[count].number = PyLong_AsLongLong(number);
+        count++;
+        PyObject *read = SLOT(node, node_at[N_ARGS]);
+        if (!PyTuple_CheckExact(read)) {
+            continue;
+        }
+        for (Py_ssize_t place = 0; place < PyTuple_GET_SIZE(read); place++) {
+            PyObject *arg = PyTuple_GET_ITEM(read, place);
+            if (Py_TYPE(arg) != Node || SLOT(arg, node_at[N_OPERATION]) == Py_None) {
+                continue;
+            }
+            if (depth == room) {
+                room *= 2;
+                PyObject **grown = PyMem_Realloc(stack, (size_t)room * sizeof(PyObject *));
+                if (grown == NULL) {
+                    PyErr_NoMemory();
+                    goto done;
+                }
+                stack = grown;
+            }
+            stack[depth++] = arg;
+        }
+    }
+    if (PyErr_Occurred()) {
+        goto done;
+    }
+    qsort(found, (size_t)count, sizeof(Wanted), newest_first);
+    result = PyList_New(count);
+    for (Py_ssize_t place = 0; result != NULL && place < count; place++) {
+        PyList_SET_ITEM(result, place, Py_NewRef(found[place].node));
+    }
+done:
+    PyMem_Free(stack);
+    PyMem_Free(found);
+    Py_XDECREF(seen);
+    return result;
 }
 
 /* `track(lazy)`: make a lazy array known to the garbage collector, for one that held its value alone and was given
@@ -6170,6 +6447,9 @@ static PyMethodDef methods[] = {
      "Say whether a view taken at once, which the layer keeps no record of, may be alive."},
     {"quick_slots", module_quick_slots, METH_NOARGS,
      "Stand in the slots of LazyArray for the operators that carry a road, once the roads are on the class."},
+    {"run_nodes", (PyCFunction)(void (*)(void))module_run_nodes, METH_FASTCALL,
+     "The loop of evaluate.compute: take a computation's nodes in order, computing the plain ones here."},
+    {"needed", module_needed, METH_O, "evaluate._needed: the pending nodes some roots depend on, newest first."},
     {"compute_plain", module_compute_plain, METH_O,
      "Compute one pending node whose call is plain, as evaluate._compute_one does. True when it was computed."},
     {"track", module_track, METH_O, "Make a lazy array that has just been given its cell known to the garbage collector."},
@@ -6248,10 +6528,16 @@ PyInit__core(void)
     empty_string = PyUnicode_InternFromString("");
     s_transpose = PyUnicode_InternFromString("transpose");
     s_isnative = PyUnicode_InternFromString("isnative");
+    s_active = PyUnicode_InternFromString("active");
+    s_caught = PyUnicode_InternFromString("caught");
+    s_found = PyUnicode_InternFromString("found");
+    s_note = PyUnicode_InternFromString("note");
+    s_issue = PyUnicode_InternFromString("issue");
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
-        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !no_keywords || !empty_string || !s_transpose || !s_isnative) {
+        || !s_type_limit || !s_nin || !s_nout || !s_signature || !s_type || !s_array || !no_keywords || !empty_string || !s_transpose || !s_isnative || !s_active || !s_caught || !s_found
+        || !s_note || !s_issue) {
         Py_DECREF(module);
         return NULL;
     }

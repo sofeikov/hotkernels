@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 30
+CORE_VERSION = 31
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -2191,7 +2191,7 @@ def use_core(core: Any) -> None:
         setattr(owner, name, method)
     _stood_in_for_elsewhere.clear()
     graph.deferred = _python_deferred
-    evaluate.compute_plain = None
+    evaluate.compute_plain = evaluate.run_nodes = evaluate.needed = None
     if _core is not None:
         at_once_below(0)
         _core.enable(False)
@@ -2220,7 +2220,7 @@ def use_core(core: Any) -> None:
     # slots for the operators, which take the calls made at once without the way through the method.
     core.quick_slots()
     graph.deferred = core.deferred
-    evaluate.compute_plain = core.compute_plain
+    evaluate.compute_plain, evaluate.run_nodes, evaluate.needed = core.compute_plain, core.run_nodes, core.needed
     _core = core
 
 

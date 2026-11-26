@@ -63,6 +63,12 @@ meter: Callable[[Node, int], None] | None = None
 # `_compute_one` does for a node that is no write, has no keyword and reads values that are there, and says
 # False, having done nothing, for any other.
 compute_plain: Callable[[Node], bool] | None = None
+# The C core's loop over the nodes of a computation, or None: `array.use_core` sets it. It takes the nodes in the
+# order `compute` and `compute_pending` take them, notes a node inside a group, computes a plain one, and hands
+# every other to the Python that takes one node. Not used while a meter times each call.
+run_nodes: Callable[..., None] | None = None
+# The C core's `_needed`, or None.
+needed: Callable[[list[Node]], list[Node]] | None = None
 
 
 @dataclass
@@ -225,7 +231,7 @@ def compute(roots: Iterable[Node], trigger: Trigger) -> None:
     """
     roots = list(roots)
     with graph.LOCK:
-        todo = _needed(roots)
+        todo = needed(roots) if needed is not None else _needed(roots)
         if not todo:
             # Nothing to compute: the commonest case by far, a value asked for of an array that has it.
             for root in roots:
@@ -237,6 +243,9 @@ def compute(roots: Iterable[Node], trigger: Trigger) -> None:
         try:
             plan = planner(todo) if planner is not None else None
             with _Quiet() as quiet:
+                if run_nodes is not None and meter is None:
+                    run_nodes(todo, None if plan is None else plan.inner, None if plan is None else plan.groups, quiet,
+                              progress.numbers, _taker(plan, progress, quiet), _failer(progress), False)
                 while todo:
                     # pop() drops the list's reference, so an intermediate is freed as
                     # soon as its last consumer has been computed.
@@ -282,6 +291,9 @@ def compute_pending(trigger: Trigger) -> None:
             skipped = [weakref.ref(node) for node in todo if node.number in plan.inner] if plan is not None else []
             node = None
             with _Quiet() as quiet:
+                if run_nodes is not None and meter is None:
+                    run_nodes(todo, None if plan is None else plan.inner, None if plan is None else plan.groups, quiet,
+                              progress.numbers, _pending_taker(plan, progress, quiet), _failer(progress), True)
                 while todo:
                     node = todo.pop()
                     if not node.pending:
@@ -303,6 +315,65 @@ def compute_pending(trigger: Trigger) -> None:
         finally:
             _end(progress, [], trigger)
             CLOCK.leave(started)
+
+
+def _taker(plan: Plan | None, progress: _Progress, quiet: _Quiet) -> Callable[[Node], None]:
+    """Build what takes one node of `compute`'s loop, for the C core's loop to call for a node it does not take.
+
+    Args:
+        plan: The computation's plan, or None.
+        progress: The computation's record.
+        quiet: What the computation's calls run under.
+
+    Returns:
+        A function of the node that does what one turn of the loop does but for the look at warnings found.
+    """
+    def take(node: Node) -> None:
+        """Take one node: the plan's way if it has one, by its own call otherwise."""
+        if plan is None or not _planned(plan, node, progress, quiet):
+            _step(node, progress, quiet)
+    return take
+
+
+def _pending_taker(plan: Plan | None, progress: _Progress, quiet: _Quiet) -> Callable[[Node], None]:
+    """Build what takes one node of `compute_pending`'s loop, for the C core's loop to call.
+
+    Args:
+        plan: The computation's plan, or None.
+        progress: The computation's record.
+        quiet: What the computation's calls run under.
+
+    Returns:
+        A function of the node that does what one turn of that loop does but for the look at warnings found.
+    """
+    def take(node: Node) -> None:
+        """Take one node that is still pending: failed with its operand, the plan's way, or by its own call."""
+        inherited = _inherited_failure(node)
+        if inherited is not None:
+            _fail(node, inherited)
+            progress.numbers.append(node.number)
+            progress.failed.add(node.number)
+        elif plan is None or not _planned(plan, node, progress, quiet):
+            _step(node, progress, quiet)
+    return take
+
+
+def _failer(progress: _Progress) -> Callable[[Node, BaseException], None]:
+    """Build what the C core's loop calls with a node whose plain call raised.
+
+    Args:
+        progress: The computation's record.
+
+    Returns:
+        A function of the node and the error that does what `_compute_one` and `_step` do with one: the error
+        gets a note of the line, the node is failed for good, and the record has its number among the failed.
+    """
+    def failed(node: Node, error: BaseException) -> None:
+        """Note the line on the error and fail the node."""
+        error.add_note(f"in the lazy operation '{node.name}' written at {node.origin.filename}:{node.origin.lineno}")
+        _fail(node, error)
+        progress.failed.add(node.number)
+    return failed
 
 
 def _planned(plan: Plan, node: Node, progress: _Progress, quiet: _Quiet) -> bool:
