@@ -127,6 +127,7 @@ The pattern is consistent: the judge verifies what its generated inputs exercise
 - **`np.digitize` with decreasing bins.** It searches the bins reversed, as a view no kernel takes.
 - **`np.interp` with `left`, `right` or `period`**, and with more than 64 sample points per query, where reading the sample points for NaN would cost more than the kernel saves.
 - **One or two element types per operation.** `np.argmax` on int32, `x[mask]` on float16, `np.sum` on int64: all go to NumPy. (NumPy is already fast on several of those.)
+- **One call at a time.** Every kernel the package installs serves one NumPy call, so `a * b + c` is still two passes over memory. Kernels that compute a whole expression in one pass exist only in a prototype outside the package, on [a lazy layer]([[ root ]]report/lazy/) that writes the program down as a graph first; [fusion]([[ root ]]report/fusion/) describes them and [its results]([[ root ]]report/fusion-results/) what they gained on twenty-six programs.
 - **Plain arrays only.** Subclasses reaching the function, method and indexing hooks go to NumPy.
 - **`np.compress` with `axis` or `out`.** The compress kernels write past the elements they keep, so they never run on a buffer the caller owns.
 - **In-place `clip`.** `np.clip(x, 0, 1, out=x)` goes to NumPy.

@@ -12,6 +12,7 @@ It is written for someone who has used NumPy for years, is comfortable with the 
 - **They reach unmodified code** by changing a handful of function pointers inside NumPy. A call no kernel takes costs about a nanosecond more. [Chapter 7]([[ root ]]report/delivery/).
 - **Several results are narrower than their headline**, and the judge has blind spots. [Chapter 8]([[ root ]]report/results/).
 - **A kernel for a whole expression needs the expression whole**, which no hook sees. A lazy layer, designed and prototyped but not in the package, writes NumPy code down as a graph and computes it on request, with NumPy's results bit for bit. [Chapter 10]([[ root ]]report/lazy/).
+- **On that graph, fusion computes an expression in one pass**, with eighty kernels that keep NumPy's bits and are checked by the judge. With `hotkernels.install()` in effect, on an Apple M1 Pro, all twenty-six programs it was measured on run within 1% of NumPy's speed or faster, and those made of expressions on large arrays up to 2.80x faster than NumPy; it is a prototype too. [Chapters 11]([[ root ]]report/fusion/) and [12]([[ root ]]report/fusion-results/).
 
 ## The whole system on one page
 
