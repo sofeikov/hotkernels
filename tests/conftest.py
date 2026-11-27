@@ -67,6 +67,8 @@ def lazy_core(request: pytest.FixtureRequest) -> Iterator[str | None]:
     # The layer logs each line of code once per process, and this process runs each test's lines twice.
     graph._logged.clear()
     before = array._core
+    # No array of an earlier test is alive, so no view taken at once is: writes wait wherever they can.
+    array.views_stand_alone(False)
     if way == CORE:
         core = request.getfixturevalue("built_core")
         if isinstance(core, str):

@@ -113,6 +113,8 @@ During a kernel run you may change exactly two files:
 - `kernels/<name>/<arch>/kernel.s`
 - `kernels/<name>/<arch>/attempts.md`
 
+A fused kernel of the lazy layer's prototype is in `prototypes/lazy/kernels/<name>/` instead, laid out the same way and found by the judge under the same name. The same two files are yours there, and everything below holds for it; what a fused kernel is held to beyond that is in [prototypes/lazy/kernels/README.md](prototypes/lazy/kernels/README.md). It is not installed by the package, so it never needs a release note. A fused kernel that `prototypes/lazy/make_kernel.py` wrote from the name of its shape is tuned the same way: its `kernel.s` is yours from then on, and its log says what the tool wrote and what you changed.
+
 When the run is over and its pull request is open, and the kernel is one the package installs, add the run's one release note: a `speed` note summarising it, as described in [Release notes](#release-notes). That is the only other file a run creates.
 
 Everything else is locked: `spec.py`, `naive.c`, and all of `judge/`. The judge compares those against the `main` branch and fails the run if they differ. Do not pass `--unlocked`; it exists for people creating a kernel or changing the judge, and it marks the results as untrusted.

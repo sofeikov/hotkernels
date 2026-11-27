@@ -38,9 +38,12 @@ kernels/<name>/        one directory per kernel (the contract from core-design.m
   naive.c
   <arch>/kernel.s      arm64 or x86_64
   <arch>/attempts.md   what was tried on that architecture
+prototypes/lazy/kernels/<name>/   the fused kernels of the lazy layer's prototype, laid out the same way
 results/               recorded results, committed
 .judge/                build output and raw runs, not committed
 ```
+
+A kernel is looked for by name in `kernels/` and then in `prototypes/lazy/kernels/`. The second holds the kernels of [lazy-fusion-design.md](lazy-fusion-design.md), one per fused expression: they are checked, timed and locked to `main` as any other kernel, and the package, which builds from `kernels/` alone, does not contain them.
 
 The judge is written in Python because NumPy is the reference for correctness. It compiles kernels by calling `clang` directly with flags it controls. There is no build system in the proof of concept.
 

@@ -1,0 +1,56 @@
+// void {{ name }}({% for array in arrays %}const double *{{ array }}, {% endfor %}double *out, size_t n{% for number in numbers %}, double {{ number }}{% endfor %});
+// out[i] = {{ c }}
+//
+// {% for array in arrays %}x{{ loop.index0 }} = {{ array }}, {% endfor %}x{{ out }} = out, x{{ length }} = n{% for number in numbers %}, d{{ loop.index0 }} = {{ number }}{% endfor %}.
+//
+// A fused kernel for the shape {{ shape }}, written by
+// prototypes/lazy/make_kernel.py from that name. Every operation is one
+// instruction that rounds once, in the order NumPy's passes make them: no
+// multiply-add, and a division is a division.
+//
+// Eight elements per iteration, four vectors of two. Every load of an
+// iteration comes before its store, so out may be one of the arrays itself
+// for a length that is a multiple of eight or below eight. A remainder of 1
+// to 7 elements is one more block that ends exactly at the end of the arrays
+// and overlaps the block before it, computed from the arrays again: there
+// out must not overlap an array. Fewer than 8 elements are done one at a time.
+
+.text
+.globl _{{ name }}
+.p2align 2
+_{{ name }}:
+    cmp     x{{ length }}, #{{ block }}
+    b.lo    Lsmall
+{% for number in numbers %}
+    dup     v{{ top - loop.index0 }}.2d, v{{ loop.index0 }}.d[0]         // {{ number }} in every lane
+{% endfor %}
+    sub     x8, x{{ length }}, #{{ block }}              // x8 = elements left after this block
+Lblock:
+{% for mnemonic, operands in wide %}
+    {{ "%-7s"|format(mnemonic) }} {{ operands }}
+{% endfor %}
+{% for array in arrays %}
+    add     x{{ loop.index0 }}, x{{ loop.index0 }}, #64
+{% endfor %}
+    add     x{{ out }}, x{{ out }}, #64
+    subs    x8, x8, #{{ block }}
+    b.hs    Lblock
+    adds    x8, x8, #{{ block }}              // elements left: 0 to 7
+    b.eq    Ldone
+    sub     x9, x8, #{{ block }}              // back by what is missing from a whole block
+{% for array in arrays %}
+    add     x{{ loop.index0 }}, x{{ loop.index0 }}, x9, lsl #3
+{% endfor %}
+    add     x{{ out }}, x{{ out }}, x9, lsl #3
+    mov     x8, #0
+    b       Lblock
+Lsmall:
+    cbz     x{{ length }}, Ldone
+Lone:
+{% for mnemonic, operands in narrow %}
+    {{ "%-7s"|format(mnemonic) }} {{ operands }}
+{% endfor %}
+    subs    x{{ length }}, x{{ length }}, #1
+    b.ne    Lone
+Ldone:
+    ret

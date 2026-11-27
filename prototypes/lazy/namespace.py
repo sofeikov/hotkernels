@@ -40,6 +40,9 @@ CONVERTERS = frozenset({"array", "asarray", "asanyarray", "ascontiguousarray", "
 PASS_THROUGH = frozenset({"asarray", "asanyarray"})
 # NumPy's random generators, whose methods make arrays out of the module's sight.
 RANDOM_GENERATORS = (np.random.Generator, np.random.RandomState)
+# The objects of the module that make arrays when they are indexed, not called: `np.mgrid[0:4, 0:3]`,
+# `np.r_[1:4, 0.5]`.
+INDEXERS = frozenset({"mgrid", "ogrid", "r_", "c_"})
 # Types of an argument that is no array and holds none: a call's arguments are mostly these and arrays.
 NO_ARRAY = frozenset({int, float, bool, complex, str, type(None)})
 
@@ -218,6 +221,52 @@ class LazyCallable:
         return LazyCallable(attribute, self._strict) if callable(attribute) else attribute
 
 
+class LazyIndexer:
+    """Stands where one of NumPy's objects that make arrays by an index stands, and makes those arrays lazy.
+
+    `np.mgrid[0:n, 0:m]` is no call, so the stand-in for the module never
+    sees it made. Without this the grids are plain `ndarray`s, and whatever
+    the program does with them is outside the layer: `grid[mask]` with a
+    lazy mask is then NumPy's own indexing of an `ndarray` by an object it
+    has to convert first, which no kernel of the package is asked about.
+    """
+
+    __slots__ = ("_indexer", "_strict", "_source")
+
+    def __init__(self, indexer: Any, name: str, strict: bool) -> None:
+        """Stand in for one of them.
+
+        Args:
+            indexer: `np.mgrid`, `np.ogrid`, `np.r_` or `np.c_`.
+            name: Its name in the module.
+            strict: Whether the arrays it makes are strict.
+        """
+        self._indexer = indexer
+        self._strict = strict
+        self._source = f"np.{name}[...]"
+
+    def __repr__(self) -> str:
+        """Say which object this stands in for."""
+        return f"<lazy stand-in for {self._indexer!r}>"
+
+    def __getitem__(self, key: Any) -> Any:
+        """Make what NumPy's object makes for an index, lazy.
+
+        Args:
+            key: The index as written: slices and numbers, and for `np.r_` and `np.c_` arrays as well.
+
+        Returns:
+            NumPy's result with its `ndarray`s made lazy. A lazy array in the
+            index reaches NumPy's own functions, which defer to it, and what
+            comes back is lazy already.
+        """
+        return _made_lazy(self._indexer[key], self._source, self._strict, not _holds_arrays(key))
+
+    def __getattr__(self, name: str) -> Any:
+        """Answer any other attribute as NumPy's object does."""
+        return getattr(self._indexer, name)
+
+
 class LazyRandom:
     """Stands where one of NumPy's random generators stands, and makes the arrays it draws lazy.
 
@@ -315,6 +364,8 @@ class LazyNumPy:
         """
         if isinstance(attribute, ModuleType):
             return LazyNumPy(attribute, self._strict)
+        if self._module is np and name in INDEXERS:
+            return LazyIndexer(attribute, name, self._strict)
         if isinstance(attribute, type) or not callable(attribute):
             return attribute
         if self._module is np and name in CONVERTERS:
