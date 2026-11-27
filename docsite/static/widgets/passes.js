@@ -8,9 +8,9 @@
 // array size the reader chooses.
 //
 // This is arithmetic, not a measurement: bytes read and written by each call,
-// with float64 elements (8 bytes) and booleans (1 byte). Nothing in the lazy
-// layer's first build computes this way; the figure shows what a graph would
-// make possible. The cache sizes are the Apple M1 Pro's, as in the chapter on
+// with float64 elements (8 bytes) and booleans (1 byte). The lazy layer by
+// itself still computes one node at a time; computing an expression in one
+// pass is what fusion does with its graph (report/fusion). The cache sizes are the Apple M1 Pro's, as in the chapter on
 // the machine.
 //
 // Attributes:

@@ -108,7 +108,23 @@ path = "report/lazy"
 source = "report/lazy.md"
 title = "Writing the program down: a lazy layer"
 label = "A lazy layer"
-summary = "A design and a prototype for NumPy code whose operations become a graph, computed when the program asks, with NumPy's results bit for bit. Nothing is faster yet; the graph is what a kernel for a whole expression would need."
+summary = "A design and a prototype for NumPy code whose operations become a graph, computed when the program asks, with NumPy's results bit for bit. The layer by itself makes nothing faster; its graph is what lets the next two chapters compute a whole expression in one pass."
+layout = "report"
+
+[[page]]
+path = "report/fusion"
+source = "report/fusion.md"
+title = "Fusion: one pass for a whole expression"
+label = "Fusion"
+summary = "How the lazy layer's graph is computed faster than one NumPy call per operation, with NumPy's bits: patterns read off the kernels' own specs, programs of kernel calls run a cache-sized block at a time, and the rules that keep every result exact."
+layout = "report"
+
+[[page]]
+path = "report/fusion-results"
+source = "report/fusion-results.md"
+title = "What fusion gained, and what is left"
+label = "Fusion's results"
+summary = "Twenty-six programs run four ways, with hotkernels.install() in effect: where fusion wins, where it costs, and what no fusion could take."
 layout = "report"
 
 [[page]]
