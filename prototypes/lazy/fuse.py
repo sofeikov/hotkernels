@@ -36,6 +36,7 @@ mathematics library, which a kernel cannot make, and end an expression.
 from __future__ import annotations
 
 import operator
+import platform
 import sys
 import time
 from dataclasses import dataclass, field
@@ -61,8 +62,12 @@ COMPARISONS = {np.greater: "gt", np.greater_equal: "ge", np.less: "lt", np.less_
                np.equal: "eq", np.not_equal: "ne"}
 # The names of the comparisons.
 MASKS = frozenset(COMPARISONS.values())
-# The operations whose two operands may be written in either order.
-COMMUTATIVE = frozenset({"add", "mul", "max", "min"})
+# The machine names of ARM64, where `np.maximum` and `np.minimum` give the same bits with their operands either way.
+ARM64_MACHINES = ("arm64", "aarch64")
+# The operations whose two operands may be written in either order. On x86-64 `np.maximum` and `np.minimum` give
+# the second operand of two zeros, so `np.maximum(x, 0.0)` and `np.maximum(0.0, x)` differ where x is -0.0, and
+# a kernel takes their operands only in the order the program wrote them.
+COMMUTATIVE = frozenset({"add", "mul"} | ({"max", "min"} if platform.machine().lower() in ARM64_MACHINES else set()))
 # Every such operation by the callable a node holds for it.
 OPERATIONS = {**ARITHMETIC, **UNARY, **COMPARISONS, np.where: "where"}
 # The ufunc an in-place operator applies, by the name `array.py` gives its write.

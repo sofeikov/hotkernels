@@ -6,7 +6,7 @@ The approach is the plainest one there is. A **pattern** is a small tree of oper
 
 ## Summary
 
-- **A fused kernel gives NumPy's bits, and the judge checks it.** Every operation in one is a single IEEE operation that NumPy makes with the same instruction, in the program's order, each rounded by itself. No multiply-add is fused and no sum is regrouped. There are eighty kernels, in NEON assembly for ARM64, and each passes the judge against its NumPy expression on 20,000 to 370,000 cases. See [Why the bits are NumPy's](#why-the-bits-are-numpys).
+- **A fused kernel gives NumPy's bits, and the judge checks it.** Every operation in one is a single IEEE operation that NumPy makes with the same instruction, in the program's order, each rounded by itself. No multiply-add is fused and no sum is regrouped. There are eighty kernels, in NEON assembly for ARM64 (on x86-64 two are AVX2 assembly and the rest their compiled C, which is as fast there: [Another processor](#another-processor)), and each passes the judge against its NumPy expression on 20,000 to 370,000 cases. See [Why the bits are NumPy's](#why-the-bits-are-numpys).
 - **The pattern is the kernel's own oracle.** A kernel's `spec.py` names the NumPy expression it must equal. Run on lazy arrays, that expression writes a graph, and the shape of that graph is the pattern. Nothing else says what a kernel serves. See [The library](#the-library).
 - **A whole expression is one pass over memory, whatever its length.** Its kernel calls are run a block of 4,096 elements at a time, so what one kernel gives the next stays in the cache. For that every operation has a kernel, the single operations too. See [An expression block by block](#an-expression-block-by-block).
 - **Most kernels are written by a program from the name of their shape.** Fourteen were written by hand; `make_kernel.py` wrote sixty-six, each with its spec and its C reference, and the judge holds them to the same bits. See [The kernels](#the-kernels).
@@ -21,7 +21,8 @@ The approach is the plainest one there is. A **pattern** is a small tree of oper
 - **A kernel the lazy run does not reach is a loss, and one was found.** A plain `ndarray` indexed by a lazy mask is not a call the layer makes, so the package's kernel for `x[mask]` was never asked: the second Mandelbrot program ran 16% behind the eager program with the kernels installed, and runs 1% behind with the arrays `np.mgrid` makes lazy.
 - **What is left is measured, program by program, and what could take it was tried.** A tool splits each fused run into the time in its kernels, the calls NumPy still makes that a kernel could make, and the rest. What a fusion of everything not yet fused could take off, at no cost of its own, is under half a percent of the run for twenty programs and 6% for the two it is largest in. A loop written for each thing that is left says what a kernel for it could do at best, and the two that showed a gain are built. The four programs behind the eager one write no graph, and writing their graphs alone takes longer than the programs do. See [What is left](#what-is-left).
 - **Twenty more programs were run, those of issue 298, and they found five things in the layer, none a missing pattern.** Two gain as the corpus's stencils do, 2.31x and 1.84x. The rest are on small arrays, where a write into an array the program was handed took 3.9 µs, a recurrence over rows copied its array for every row, and a small call waited behind a large one: one filter took 11.6 s for NumPy's 37 ms and takes 41 ms. See [The programs of issue 298](#the-programs-of-issue-298).
-- **What is parked is in four issues:** timing on x86-64 ([309](https://github.com/sofeikov/hotkernels/issues/309)), what a call on a small array costs ([310](https://github.com/sofeikov/hotkernels/issues/310)), the size at which a short expression is worth fusing ([311](https://github.com/sofeikov/hotkernels/issues/311)), and the graph page showing what was fused ([312](https://github.com/sofeikov/hotkernels/issues/312)).
+- **On x86-64 the programs gain as on ARM64, with the kernels' C.** The AVX2 loop the tool writes there is level with clang's vectorisation of the C references for all but two kernels, so those two are assembly and the rest C; NumPy's maximum and its NaNs differ from ARM64's in ways the judge found. See [Another processor](#another-processor).
+- **What is parked is in four issues:** whether the limits set on the M1 Pro should move on x86-64 ([309](https://github.com/sofeikov/hotkernels/issues/309)), what a call on a small array costs ([310](https://github.com/sofeikov/hotkernels/issues/310)), the size at which a short expression is worth fusing ([311](https://github.com/sofeikov/hotkernels/issues/311)), and the graph page showing what was fused ([312](https://github.com/sofeikov/hotkernels/issues/312)).
 
 ## What is fused
 
@@ -153,13 +154,13 @@ uv run python -m prototypes.lazy.make_kernel "sub(V0,mul(div(mul(S0,V1),S1),sub(
 uv run judge check fuse_sub_v_mul_div_mul_s_v_s_sub_v_v_f64 --unlocked
 ```
 
-- **It writes the four files of a kernel:** `spec.py`, whose oracle is the shape as a NumPy expression, with every number tried at zero of either sign, at an overflow, a denormal, an infinity and a NaN; `naive.c`; `arm64/kernel.s`; and the first entry of the log.
+- **It writes the four files of a kernel:** `spec.py`, whose oracle is the shape as a NumPy expression, with every number tried at zero of either sign, at an overflow, a denormal, an infinity and a NaN; `naive.c`; `arm64/kernel.s`; `x86_64/kernel.s`; and the first entry of each log. `--arch x86_64` writes the x86-64 loop alone for a kernel that is there, reading the shape off its oracle, so the kernels written by hand get one as well.
 - **The kernel is then a kernel like the others.** Nothing the tool writes is trusted: the judge checks it against NumPy, and the pattern it serves is read off its oracle. A test holds the files in the repository to what the tool writes today.
 - **Registers are given to the tree by the usual rule,** the operand that needs more of them first, four registers to a value. A number is held in every lane of one register. Shapes of up to six arrays and eight numbers fit.
 - **Which shapes:** the eighteen single operations (the four of arithmetic on two arrays and on an array and a number either way round, a maximum and a minimum, a negation, an absolute value, a square root, a square), the forty-six shapes of two to six operations that cover the corpus's expressions best, as the miner chose them one at a time, and the two halves of an advection flux, four operations and eight ([What is left](#what-is-left)).
-- **`np.maximum` and `np.minimum` are the processor's `fmax` and `fmin` on ARM64,** at every length and position: a NaN wins over a number, and of two zeros the maximum is the positive one. C's `fmax` is another function, so the reference spells the rule out.
+- **`np.maximum` and `np.minimum` are the processor's `fmax` and `fmin` on ARM64,** at every length and position: a NaN wins over a number, and of two zeros the maximum is the positive one. On x86-64 they are `vmaxpd` and `vminpd` with a NaN of the first operand carried through: a NaN still wins, and of two zeros the result is the second operand. C's `fmax` is another function, so the reference spells out both rules, one for each architecture.
 - **One shape was refused by the judge, and rightly.** For `(s0 + (-|a|)) / s1` the compiler turns the C reference's `s0 + (-|a|)` into `s0 - |a|`, which gives a NaN the other sign. The assembly was NumPy's; the reference was not, and a kernel whose reference is wrong is not kept.
-- **Not tuned.** A written kernel loads with plain `ldp` and is as the tool left it. Against the compiled C it is expected level, as the kernels written by hand are: the loops are ones clang vectorises as written.
+- **Not tuned.** A written kernel loads with plain `ldp`, or `vmovupd` on x86-64, and is as the tool left it. Against the compiled C it is expected level, as the kernels written by hand are: the loops are ones clang vectorises as written.
 - **What it does not write:** a comparison and `np.where`, whose mask is kept in a register; a reduction; float32.
 
 ### The library
@@ -174,7 +175,7 @@ def oracle(a, b, s):
 `fuse.py` calls it with lazy arrays and two numbers. The oracle writes a graph without computing anything, the expression is read off that graph as off any other, and its name, `add(V0,mul(S0,V1))`, is the pattern. Which leaf is which argument is known because the arrays passed in are the leaves read.
 
 - **The specification is its own pattern.** What a kernel is matched against and what the judge checks it against are one function, so they cannot disagree. A kernel whose oracle is not one expression of the operations above, or does not read each argument once, has no pattern and is refused when the library is loaded.
-- **A name is the tree as written,** with the operands of a sum, a product, a maximum or a minimum in a fixed order: `sub(V0,mul(S0,V1))`. Two expressions of one shape have one name whichever way round the program wrote them.
+- **A name is the tree as written,** with the operands of a sum, a product, a maximum or a minimum in a fixed order: `sub(V0,mul(S0,V1))`. Two expressions of one shape have one name whichever way round the program wrote them. On x86-64 a maximum and a minimum keep the program's order: of two zeros NumPy's loop there gives the second operand, so `np.maximum(x, 0.0)` and `np.maximum(0.0, x)` are different functions.
 - **Arguments come in one order:** the input arrays, the output array, the length, then the numbers. [`_fused.c`](../prototypes/lazy/_fused.c) calls every kernel with eight integer arguments and eight floating-point ones, of which the kernel reads those it has; both ARM64 and x86-64 pass that many in registers or in order on the stack, so one call reaches any kernel.
 
 - **A shape is preferred to NumPy's call where the passes are as many.** A kernel's pass is a step of a program and stays in the cache; NumPy's is a pass over memory. Among shapes the largest that gives the fewest passes is taken.
@@ -422,7 +423,7 @@ How many times faster than NumPy's passes, by the number of elements, and than t
 - **More operations gain more, but less than their number.** Eight operations in one pass are 2.7x, five are 1.7x to 1.9x. The stencil kernels read five and six arrays, and reading is what they wait for.
 - **At 4,096 elements the figure is mostly calls.** Three to seven times, of which a good part is what each call into NumPy from Python costs. Inside the layer a node costs more than that again, so the figure there is not smaller.
 - **The assembly is level with the compiled C, with three exceptions.** Clang vectorises these loops as written, and beyond the first-level cache both wait for memory. The loads with a non-temporal hint are 1.05x to 1.2x ahead at 262,144 to 1,048,576 elements in the kernels that read two or three arrays, which is where the 2% to 5% over all sizes comes from; with five or six arrays the hint gains nothing that is significant. The flux limiter is 6.5x ahead: its C reference, a comparison that feeds a selection, is compiled to a loop of one element at a time. The sum of squares is 1.5x ahead of a C reference the compiler vectorises only in part.
-- **Each kernel's log has its runs,** in `arm64/attempts.md` beside it.
+- **Each kernel's log has its runs,** in `arm64/attempts.md` beside it, and the x86-64 runs in `x86_64/attempts.md`.
 
 ### The programs, four ways
 
@@ -926,7 +927,87 @@ So on these programs a further pattern has nothing left that a measurement can s
 
 ### Another processor
 
-Everything above was measured on one machine, an Apple M1 Pro. On x86-64 the fused kernels are built from their C references, and CI runs this layer's tests there, so the results are NumPy's bits on that architecture too. Nothing was timed there. The limits of [Computing a group](#computing-a-group) and [Planning](#planning) were set by timings on this machine, and a program of kernel calls may meet what a kernel alone does not: an output a few bytes behind its input stalls a loop on x86-64. `make_kernel.py` writes NEON; the same walk of the tree would write AVX2. [Issue 309](https://github.com/sofeikov/hotkernels/issues/309) is the run to make and what to look at in it.
+Everything above was measured on an Apple M1 Pro. This is the same on x86-64, an Intel Core i5-14600KF under Linux with NumPy 2.5.5 and CPython 3.13, as [issue 309](https://github.com/sofeikov/hotkernels/issues/309) asked.
+
+**The kernels.** `make_kernel.py --arch x86_64` writes the same walk of the tree in AVX2, eight elements a step in two `ymm` registers of four, and wrote it for the seventy-nine kernels that compute an expression element by element. All seventy-nine pass the judge, and each was timed against its compiled C with `uv run judge run`. Seventy-six are level with it, 0.96x to 1.02x over all sizes: clang vectorises the C references at the judge's `-O3 -march=native` as it does on ARM64, and beyond the first-level cache both wait for memory. One is slower, `max(S0,max(V0,min(S1,V1)))` at 0.75x, because clang tests once whether a number is a NaN where the written loop tests it every step. Two are far ahead, `np.sqrt(a)` at 5.46x and `s / np.sqrt(a)` at 3.50x, because the C reference's `sqrt` keeps C's rule that a square root of a negative number sets `errno`, and clang then calls the library for every element. So on x86-64 those two are assembly and the other seventy-eight are their C references, which is what the repository does wherever a kernel's assembly does not beat its compiler. Each kernel's `x86_64/attempts.md` has its figures. The sum of squares is a reduction, which the tool does not write; its C is 14.9x NumPy's two passes over all sizes and 4x from 65,536 elements up, and no assembly was written for it.
+
+**What NumPy does there that it does not do on ARM64.** Three things, each found by the judge:
+
+- **`np.maximum` and `np.minimum` give the second operand of two zeros,** whatever its sign, where ARM64's `fmax` gives the positive zero. The C references had ARM64's rule and failed the judge on x86-64; they now have both, one for each architecture. And since `np.maximum(x, 0.0)` and `np.maximum(0.0, x)` then differ where `x` is `-0.0`, `fuse.py` takes a maximum's and a minimum's operands only in the order the program wrote them there. The long expression of the tests loses one fused node to it: its `np.maximum(a, 0.25)` would need a kernel for `max(V0,S0)`, which the library does not have.
+- **An invalid operation gives a NaN with its sign bit set,** where ARM64's is `np.nan`'s bits. A program that holds `np.nan` and also makes `inf - inf` has two kinds of NaN, and which of two an operation returns is which operand comes first. NumPy's own loops do not keep to one order: `a + b` returns `a`'s NaN in blocks of eight and `b`'s in the elements left over, and `a + s` the number's NaN from nine elements up and the array's below. A C compiler is free to swap the operands of a sum. So each fused spec's domain is now inputs whose NaNs all have the bits of this processor's invalid operations (`one_nan`), and the judge checks that a result is a NaN wherever NumPy's is, but not which of two. On ARM64 that changes nothing. What a program with both kinds gets is NumPy's NaN, or the other one; [the kernels' README](../prototypes/lazy/kernels/README.md#what-is-not-specified) already said so.
+- **One C reference cannot be NumPy's even then.** In `s0 * (a * (|s1 * b| * (c * d + (s2 - e))))` the absolute value makes a NaN with the sign bit clear out of one with it set, a second kind inside the expression, and clang orders the products otherwise than NumPy's passes. The judge refuses the reference, so that kernel has no assembly on x86-64 either.
+
+**The programs, four ways,** with the command of [The programs, four ways](#the-programs-four-ways), the quickest of 5 runs:
+
+```text
+program             NumPy ms installed    lazy ms    build  compute   fused ms    build     plan  compute  vs lazy vs NumPy  vs inst.
+regression             64.44     35.93      36.93     0.33    36.61      28.54    22.55     0.58     5.42    1.29x    2.26x     1.26x
+attention              45.76     52.46      51.38     0.53    50.85      55.40     1.54     0.18    53.68    0.93x    0.83x     0.95x
+perceptron             45.96     36.45      84.26    33.93    50.34      39.75    39.30     0.04     0.41    2.12x    1.16x     0.92x
+char_rnn               22.96     19.85      79.11    44.45    34.66      23.26    23.26     0.00     0.00    3.40x    0.99x     0.85x
+particle_filter       385.16    357.22     416.16   129.21   286.95     324.53   136.34     3.97   184.22    1.28x    1.19x     1.10x
+veros_eos             236.45    238.29     275.78     1.51   274.27     141.46     1.56     0.46   139.44    1.95x    1.67x     1.68x
+veros_isoneutral      407.01    394.03     414.48    40.59   373.89     307.55    54.50     1.01   252.05    1.35x    1.32x     1.28x
+veros_tke             199.54    165.52     162.29    30.23   132.06     123.19    40.11     0.54    82.53    1.32x    1.62x     1.34x
+cavity_flow           182.05    182.16     219.74     7.48   212.26      58.97     8.91     2.64    47.43    3.73x    3.09x     3.09x
+hdiff                 179.82    168.60     216.11    16.37   199.74      81.60    16.09     0.04    65.47    2.65x    2.20x     2.07x
+black_scholes          77.84     78.30      81.66     3.91    77.75      70.61     4.02     0.04    66.55    1.16x    1.10x     1.11x
+trimesh_mesh          141.29    121.84     121.07   120.82     0.26     122.10   122.10     0.00     0.00    0.99x    1.16x     1.00x
+sklearn_metrics      1013.62    313.42     317.86   313.17     4.69     315.63   315.63     0.00     0.00    1.01x    3.21x     0.99x
+empyrical_stats       863.61    446.06     444.12   444.12     0.00     447.12   447.12     0.00     0.00    0.99x    1.93x     1.00x
+skimage_pipeline     1133.26   1074.84    1075.49  1075.49     0.00    1075.72  1075.72     0.00     0.00    1.00x    1.05x     1.00x
+pandas_sales          406.11    394.60     394.00   394.00     0.00     394.08   394.08     0.00     0.00    1.00x    1.03x     1.00x
+astropy_timeseries   1422.70   1258.71    1268.18  1266.33     1.85    1247.53  1246.67     0.11     0.76    1.02x    1.14x     1.01x
+example                35.65     13.40      14.09     6.62     7.48      14.01    12.21     0.01     1.78    1.01x    2.55x     0.96x
+flame                 114.27     69.74     155.32    82.50    72.82      74.00    71.85     0.03     2.11    2.10x    1.54x     0.94x
+azimint_naive          56.90     58.74      71.35     6.21    65.14      59.34    59.34     0.00     0.00    1.20x    0.96x     0.99x
+azimint_hist           88.96     58.50      58.43    58.40     0.03      58.81    58.81     0.00     0.00    0.99x    1.51x     0.99x
+mandelbrot1            91.96     84.71      93.54     1.32    92.22      90.08    90.08     0.00     0.00    1.04x    1.02x     0.94x
+mandelbrot2           132.90    135.40     170.50    26.30   144.19     138.71   138.71     0.00     0.00    1.23x    0.96x     0.98x
+make_decision         119.09     71.85    1330.18  1050.77   279.41      98.44    98.44     0.00     0.00   13.51x    1.21x     0.73x
+pandas_filter         142.76    100.72     101.18   101.18     0.00     100.07   100.07     0.00     0.00    1.01x    1.43x     1.01x
+equalize_hist         114.07    104.20     104.14   104.05     0.10     105.46   105.46     0.00     0.00    0.99x    1.08x     0.99x
+```
+
+- **Where the programs are expressions on large arrays the gains are those of ARM64 or larger:** the cavity flow 3.09x, the regression 2.26x, the horizontal diffusion 2.20x, the equation of state 1.67x, turbulent kinetic energy 1.62x, isoneutral mixing 1.32x, the particle filter 1.19x. This is with seventy-eight of the eighty kernels compiled C: fusion's gain is the passes it saves, not the instructions.
+- **One program is behind NumPy by more than a few percent:** the attention block, at 0.83x. It is behind with the kernels installed and no graph too (45.76 ms for NumPy, 52.46 ms installed), and the fused run is 0.95x of that; its time is in matrix products. Why the installed run is slower there was not looked into. Three more are within 4% of NumPy, behind it: the character RNN, the naive azimuthal integration and the second Mandelbrot set.
+- **Against the eager program with the same kernels** the small-array programs are behind as on ARM64, by the cost of a call made at once: the decision tree at 0.73x, the character RNN at 0.85x, the perceptron at 0.92x, the flame graph at 0.94x.
+**How far fusion could go,** with the command of [How far any fusion could go](#how-far-any-fusion-could-go):
+
+```text
+program                NumPy installed     floor     fused  at best       now     left   left of
+                                                                                       fused run
+regression            137.76     34.79     15.87     29.23    8.68x     4.71x    13.36     45.7%
+attention              46.43     47.84     21.09     48.62    2.20x     0.95x    27.53     56.6%
+perceptron             41.01     35.11     29.48     31.93    1.39x     1.28x     2.45      7.7%
+char_rnn               22.11     19.14     13.73     22.63    1.61x     0.98x     8.89     39.3%
+particle_filter       382.99    352.62    273.35    323.16    1.40x     1.19x    49.81     15.4%
+veros_eos             239.96    242.17     67.26    144.86    3.57x     1.66x    77.60     53.6%
+veros_isoneutral      402.41    402.42    273.50    315.56    1.47x     1.28x    42.07     13.3%
+veros_tke             206.05    194.47    108.66    129.89    1.90x     1.59x    21.23     16.3%
+cavity_flow           187.29    187.80    136.72     60.30    1.37x     3.11x   -76.43   -126.8%
+hdiff                 183.11    171.72     43.46     82.56    4.21x     2.22x    39.09     47.4%
+black_scholes          79.01     78.72     62.61     70.36    1.26x     1.12x     7.75     11.0%
+trimesh_mesh          138.90    118.47    118.33    119.19    1.17x     1.17x     0.87      0.7%
+sklearn_metrics      1023.67    315.48    314.97    317.75    3.25x     3.22x     2.78      0.9%
+empyrical_stats       865.87    443.41    443.41    445.98    1.95x     1.94x     2.58      0.6%
+skimage_pipeline     1121.49   1064.61   1064.61   1056.27    1.05x     1.06x    -8.33     -0.8%
+pandas_sales          400.17    396.73    396.73    410.12    1.01x     0.98x    13.39      3.3%
+astropy_timeseries   1522.91   1304.26   1303.82   1270.13    1.17x     1.20x   -33.69     -2.7%
+example                36.09     14.00     10.57     14.37    3.41x     2.51x     3.80     26.4%
+flame                 114.52     72.05     62.12     76.06    1.84x     1.51x    13.94     18.3%
+azimint_naive          61.95     63.77     41.98     65.05    1.48x     0.95x    23.07     35.5%
+azimint_hist           89.40     58.95     58.94     58.99    1.52x     1.52x     0.05      0.1%
+mandelbrot1            93.20     86.13     63.23     92.84    1.47x     1.00x    29.60     31.9%
+mandelbrot2           132.73    137.74    133.68    137.31    0.99x     0.97x     3.63      2.6%
+make_decision         118.63     71.81         -     99.21        -     1.20x        -         -
+pandas_filter         156.36    117.63    117.63    117.32    1.33x     1.33x    -0.31     -0.3%
+equalize_hist         113.57    103.76    103.75    104.29    1.09x     1.09x     0.54      0.5%
+```
+
+- **Where the most is left:** the equation of state (77.6 ms, 54% of its fused run), the horizontal diffusion (39.1 ms, 47%), the particle filter (49.8 ms) and isoneutral mixing (42.1 ms). The cavity flow's fused run is below its floor: the floor is the eager program less what could be removed from it, and fusion also removes the copies its writes made.
+- **A program's NumPy time is not steady on this machine.** The regression took 64.44 ms on plain NumPy in the table of four ways and 137.76 ms here, which is where its 8.68x at best comes from; its fused time moved by 2% between the two. Each table is the quickest of five runs; the two tables were taken one after the other.
+- **The limits were not moved.** The block of 4,096 elements, the shortest rows, `OPERATIONS_A_COPY` and the 32,768 elements below which a call is made at once are the ones the M1 Pro set; with them the programs above are where they are. Whether other values do better on x86-64 was not measured.
 
 ### What is open in the layer, and is not fusion
 

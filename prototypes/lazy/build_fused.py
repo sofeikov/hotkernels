@@ -156,8 +156,11 @@ def build(force: bool = False) -> Path:
     """
     fused = kernels()
     built = target()
+    # The architecture's directory of each kernel as well: removing its `kernel.s` changes what is built from it
+    # (the C reference then), and leaves no newer file behind, but the directory's own time.
     sources = [SOURCE, Path(__file__), TEMPLATES / TABLE_TEMPLATE, *(kernel.source for kernel in fused),
-               *(kernel.directory / "spec.py" for kernel in fused)]
+               *(kernel.directory / "spec.py" for kernel in fused),
+               *(kernel.directory / ARCH for kernel in fused if (kernel.directory / ARCH).is_dir())]
     if not force and _is_fresh(built, sources):
         return built
     if shutil.which(CC) is None:

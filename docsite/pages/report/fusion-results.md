@@ -1,7 +1,7 @@
 <p class="lede">The previous chapter built the machinery: expressions read off the graph, patterns read off the kernels' own specs, programs of kernel calls run a block at a time, every result NumPy's bit for bit. This chapter asks what it bought. Twenty-six programs were run four ways, with and without the graph, with and without the package's kernels, and every millisecond of the fused runs was then accounted for: what fusion took, what it could still take, and what no fusion of any kind could touch.</p>
 
 ::: note A prototype, measured on one machine
-Everything here is from [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md) and the prototype in [prototypes/lazy/](repo:prototypes/lazy). None of it is in the package. Every timing was taken on an Apple M1 Pro with NumPy 2.5.5 and CPython 3.13, with the layer's nodes written by its C core. The fused kernels' specs are not on `main`, so the judge's runs of them are `--unlocked`. Nothing was timed on x86-64; [the end of the chapter](#another-processor) says why that matters. How fusion works is in [the fusion chapter]([[ root ]]report/fusion/), and the lazy layer it runs on in [the lazy chapter]([[ root ]]report/lazy/).
+Everything here is from [docs/lazy-fusion-design.md](repo:docs/lazy-fusion-design.md) and the prototype in [prototypes/lazy/](repo:prototypes/lazy). None of it is in the package. Every timing was taken on an Apple M1 Pro with NumPy 2.5.5 and CPython 3.13, with the layer's nodes written by its C core. The fused kernels' specs are not on `main`, so the judge's runs of them are `--unlocked`. The same was timed on x86-64, and [the end of the chapter](#another-processor) has what it found. How fusion works is in [the fusion chapter]([[ root ]]report/fusion/), and the lazy layer it runs on in [the lazy chapter]([[ root ]]report/lazy/).
 :::
 
 ## How it was measured
@@ -315,7 +315,12 @@ That is a statement about one corpus on one machine, and it is weaker than it so
 
 ### Another processor
 
-Everything above was measured on one machine. On x86-64 the fused kernels are built from their C references, and CI runs the layer's tests there, so the results are NumPy's bits on that architecture too. Nothing was timed there. The limits the layer uses, such as the block of 4,096 elements and the size below which a call is made at once, were set by timings on the M1 Pro. A program of kernel calls may also meet what a kernel alone does not: on x86-64 an output a few bytes behind its input stalls a loop, which [the x86-64 chapter]([[ root ]]report/x86-64/) describes. `make_kernel.py` writes NEON; the same walk of the tree would write AVX2. [Issue 309](https://github.com/sofeikov/hotkernels/issues/309) is the run to make there, and what to look at in it.
+Everything above was measured on an Apple M1 Pro. The same was run on x86-64, an Intel Core i5-14600KF under Linux with NumPy 2.5.5, and the details are in [the design's section](repo:docs/lazy-fusion-design.md#another-processor).
+
+- **The kernels there are compiled C, with two exceptions.** The kernel tool writes the same loop in AVX2 for every kernel that computes an expression element by element, and the judge passed seventy-nine of them. Timed against their C references, seventy-six are level (0.96x to 1.02x) and one is slower: clang vectorises those loops as well. Two are 5.5x and 3.5x ahead, `np.sqrt(a)` and `s / np.sqrt(a)`, because C's `sqrt` keeps its `errno` rule and is not vectorised. Only those two are assembly there.
+- **The programs gain as on ARM64.** Fused against plain NumPy: the cavity flow 3.09x, the regression 2.26x, the horizontal diffusion 2.20x, the equation of state 1.67x, turbulent kinetic energy 1.62x, isoneutral mixing 1.32x, the particle filter 1.19x. Fusion's gain is the passes it saves, and C saves them as well as assembly. The attention block is behind, at 0.83x, as it is with the kernels installed and no graph.
+- **NumPy is not the same function there.** `np.maximum` of two zeros is its second operand, not the positive zero, so a maximum's operands are matched only in the order the program wrote them. An invalid operation such as `inf - inf` gives a NaN with its sign bit set, unlike `np.nan`, and NumPy's own loops return one or the other of two NaNs depending on where an element falls. The judge now checks that a fused result is a NaN wherever NumPy's is, and not which of two.
+- **The layer's limits were not moved.** The block of 4,096 elements and the size below which a call is made at once are still the M1 Pro's. Whether x86-64 wants others is [issue 309](https://github.com/sofeikov/hotkernels/issues/309).
 
 ### What is open in the layer, and is not fusion
 
@@ -326,7 +331,7 @@ Everything above was measured on one machine. On x86-64 the fused kernels are bu
 
 What is parked is in four issues:
 
-- [Issue 309](https://github.com/sofeikov/hotkernels/issues/309): timing the layer and its kernels on x86-64, and what to look at in that run.
+- [Issue 309](https://github.com/sofeikov/hotkernels/issues/309): whether the limits set on the M1 Pro should move on x86-64.
 - [Issue 310](https://github.com/sofeikov/hotkernels/issues/310): what a call on a small array costs through a lazy array, and what could lower it.
 - [Issue 311](https://github.com/sofeikov/hotkernels/issues/311): the size at which a short expression is worth fusing.
 - [Issue 312](https://github.com/sofeikov/hotkernels/issues/312): the graph page showing what was fused: which operations a program of kernels made together, and which were given up.
