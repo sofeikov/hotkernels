@@ -10,11 +10,15 @@
  * decides nothing about what is fused: `fuse.py` does, and hands over a
  * kernel's place in the table with the operands in the kernel's order.
  *
- * Three entry points:
+ * Four entry points:
  *
  *   program(steps, arrays, operands, out, block) -> flags, or DECLINED
  *   elementwise(kernel, operands, out)           -> flags, or DECLINED
  *   reduce(kernel, operands)                     -> (value, flags), or DECLINED
+ *   row_sums(out, first, second, count)          -> flags, or DECLINED
+ *
+ * `row_sums` calls no kernel: it adds rows of a few elements along the last
+ * axis, of an array or of the product of two, by a loop of its own.
  *
  * `program` is what `fuse.py` calls for an expression: several kernels, each
  * a step, all made on one block of elements before any is made on the next,
@@ -1915,6 +1919,129 @@ fused_assign(PyObject *module, PyObject *const *args, Py_ssize_t count)
     Py_RETURN_TRUE;
 }
 
+/* The longest row `row_sums` adds. NumPy adds a row of fewer than eight elements from left to right, starting from
+ * 0.0; from eight it adds pairwise, in another order. */
+#define LONGEST_SUMMED_ROW 7
+
+/* Each product is rounded before it is added, as NumPy's two passes round it: no fused multiply-add. */
+#pragma STDC FP_CONTRACT OFF
+
+/* The sums of `rows` rows of `width` elements into `to`, one after the other: the row at `pa` (and the row at `pb`,
+ * element by element times it, when `pb` is not NULL) moves by `sa` (`sb`) bytes from one row to the next and by
+ * `ea` (`eb`) from one element to the next. Each sum starts from 0.0 and adds from left to right, so a row of
+ * `-0.0` gives 0.0, as NumPy's does. Inlined with a constant `width`, so that each length has a loop of its own. */
+static inline __attribute__((always_inline)) void
+sum_rows(double *to, const char *pa, const char *pb, npy_intp rows, int width, npy_intp sa, npy_intp sb, npy_intp ea,
+         npy_intp eb)
+{
+    if (pb == NULL) {
+        for (npy_intp row = 0; row < rows; row++) {
+            double total = 0.0;
+            for (int each = 0; each < width; each++) {
+                total += *(const double *)(pa + each * ea);
+            }
+            to[row] = total;
+            pa += sa;
+        }
+        return;
+    }
+    for (npy_intp row = 0; row < rows; row++) {
+        double total = 0.0;
+        for (int each = 0; each < width; each++) {
+            double product = *(const double *)(pa + each * ea) * *(const double *)(pb + each * eb);
+            total += product;
+        }
+        to[row] = total;
+        pa += sa;
+        pb += sb;
+    }
+}
+
+/* `row_sums(out, first, second, count)`: the sum along the last axis of `first`, or of `first * second` element by
+ * element, into `out`, with no array of products; and each sum divided by `count` after, unless it is 0. A mean is
+ * NumPy's sum divided by the count, by `np.true_divide`. `first` and `second` are float64 arrays of one shape, of two to
+ * MOST_DIMENSIONS dimensions, whose last is 1 to LONGEST_SUMMED_ROW long, at any strides; `second` may be None.
+ * `out` is a C-contiguous float64 array of as many elements as they have rows. NumPy's `np.sum(x, axis=-1)` calls
+ * its loop once for each row of such an array, which costs more than a short row's arithmetic: 38 ms for four
+ * million rows of two. Returns the exceptions raised, or DECLINED for arrays it does not take. */
+static PyObject *
+fused_row_sums(PyObject *module, PyObject *const *args, Py_ssize_t count)
+{
+    if (count != 4 || !PyArray_CheckExact(args[0]) || !PyArray_CheckExact(args[1])
+        || (args[2] != Py_None && !PyArray_CheckExact(args[2])) || !PyLong_CheckExact(args[3])) {
+        PyErr_SetString(PyExc_TypeError, "row_sums(out, first, second, count)");
+        return NULL;
+    }
+    long divisor = PyLong_AsLong(args[3]);
+    if (divisor == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    PyArrayObject *out = (PyArrayObject *)args[0], *first = (PyArrayObject *)args[1];
+    PyArrayObject *second = args[2] == Py_None ? NULL : (PyArrayObject *)args[2];
+    int dimensions = PyArray_NDIM(first);
+    if (PyArray_TYPE(first) != NPY_DOUBLE || !PyArray_ISALIGNED(first) || dimensions < 2 || dimensions > MOST_DIMENSIONS
+        || (second != NULL && (PyArray_TYPE(second) != NPY_DOUBLE || !PyArray_ISALIGNED(second)
+                               || !PyArray_SAMESHAPE(first, second)))
+        || PyArray_TYPE(out) != NPY_DOUBLE || !PyArray_IS_C_CONTIGUOUS(out) || !PyArray_ISWRITEABLE(out)) {
+        return PyLong_FromLong(DECLINED);
+    }
+    const npy_intp *shape = PyArray_DIMS(first);
+    int last = dimensions - 1, along = dimensions - 2;
+    int width = (int)shape[last];
+    if (shape[last] < 1 || shape[last] > LONGEST_SUMMED_ROW || PyArray_SIZE(out) * shape[last] != PyArray_SIZE(first)) {
+        return PyLong_FromLong(DECLINED);
+    }
+    if (PyArray_SIZE(out) == 0) {
+        return PyLong_FromLong(0);
+    }
+    const npy_intp *sa = PyArray_STRIDES(first), *sb = second != NULL ? PyArray_STRIDES(second) : sa;
+    const char *pa = PyArray_BYTES(first), *pb = second != NULL ? PyArray_BYTES(second) : NULL;
+    double *to = (double *)PyArray_BYTES(out);
+    npy_intp rows = shape[along], position[MOST_DIMENSIONS] = {0};
+    feclearexcept(FE_ALL_EXCEPT);
+    for (;;) {
+        switch (width) {
+        case 1: sum_rows(to, pa, pb, rows, 1, sa[along], sb[along], sa[last], sb[last]); break;
+        case 2: sum_rows(to, pa, pb, rows, 2, sa[along], sb[along], sa[last], sb[last]); break;
+        case 3: sum_rows(to, pa, pb, rows, 3, sa[along], sb[along], sa[last], sb[last]); break;
+        case 4: sum_rows(to, pa, pb, rows, 4, sa[along], sb[along], sa[last], sb[last]); break;
+        case 5: sum_rows(to, pa, pb, rows, 5, sa[along], sb[along], sa[last], sb[last]); break;
+        case 6: sum_rows(to, pa, pb, rows, 6, sa[along], sb[along], sa[last], sb[last]); break;
+        default: sum_rows(to, pa, pb, rows, 7, sa[along], sb[along], sa[last], sb[last]); break;
+        }
+        to += rows;
+        int axis = along - 1;
+        for (; axis >= 0; axis--) {
+            if (++position[axis] < shape[axis]) {
+                pa += sa[axis];
+                if (pb != NULL) {
+                    pb += sb[axis];
+                }
+                break;
+            }
+            pa -= sa[axis] * (shape[axis] - 1);
+            if (pb != NULL) {
+                pb -= sb[axis] * (shape[axis] - 1);
+            }
+            position[axis] = 0;
+        }
+        if (axis < 0) {
+            break;
+        }
+    }
+    if (divisor != 0) {
+        double by = (double)divisor, *sums = (double *)PyArray_BYTES(out);
+        for (npy_intp each = 0; each < PyArray_SIZE(out); each++) {
+            sums[each] /= by;
+        }
+    }
+    int raised = fetestexcept(REPORTED);
+    if (raised) {
+        feclearexcept(FE_ALL_EXCEPT);
+    }
+    return PyLong_FromLong(raised);
+}
+
 static PyMethodDef methods[] = {
     {"assign", (PyCFunction)(void (*)(void))fused_assign, METH_FASTCALL,
      "assign(part, values) -> whether the rows of `values` were copied into `part`"},
@@ -1924,6 +2051,8 @@ static PyMethodDef methods[] = {
      "program(steps, arrays, operands, out, block) -> the exceptions raised, or DECLINED"},
     {"reduce", (PyCFunction)(void (*)(void))fused_reduce, METH_FASTCALL,
      "reduce(kernel, operands) -> (value, the exceptions raised), or DECLINED"},
+    {"row_sums", (PyCFunction)(void (*)(void))fused_row_sums, METH_FASTCALL,
+     "row_sums(out, first, second, count) -> the exceptions raised, or DECLINED"},
     {"kernels", fused_kernels, METH_NOARGS, "kernels() -> ((name, arrays, numbers, reduces), ...)"},
     {NULL, NULL, 0, NULL},
 };

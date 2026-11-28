@@ -2129,6 +2129,160 @@ def test_a_comparison_a_kernel_selects_by_waits_for_its_selection():
     assert fuse.STATS.calls == {"fuse_mul_s_v_f64": 1, "fuse_add_s_v_f64": 1, "fuse_where_le_f64": 1}
 
 
+# The shapes of the rows a sum along the last axis is tried on, by the length of the last axis: from 2 to 7 it is
+# `_fused.row_sums`, at 1, 8 and 9 NumPy's.
+ROW_SUM_LENGTHS = tuple(range(1, 10))
+ROW_SUM_OUTER = ((1,), (5,), (300,), (7, 40), (3, 4, 5))
+
+
+def row_sums_made() -> int:
+    """Return how many sums along short rows `_fused.row_sums` has made since the test began."""
+    return fuse.STATS.calls.get(fuse.ROW_SUMS_OF_PRODUCTS, 0) + fuse.STATS.calls.get(fuse.ROW_SUMS, 0)
+
+
+@pytest.mark.parametrize("width", ROW_SUM_LENGTHS)
+@pytest.mark.parametrize("special", (False, True))
+def test_a_sum_of_a_product_along_short_rows_is_numpys_at_every_length(width: int, special: bool):
+    """`np.sum(a * b, axis=-1)` and the mean, by position, by keyword, as a tuple, with `keepdims`, give NumPy's bits
+    and NumPy's layout; from two elements to seven by one pass with no array of products."""
+    spellings = (
+        lambda np, a, b: np.sum(a * b, -1),
+        lambda np, a, b: np.sum(a * b, axis=a.ndim - 1),
+        lambda np, a, b: (a * b).sum(axis=(-1,)),
+        lambda np, a, b: np.sum(a * b, axis=-1, keepdims=True),
+        lambda np, a, b: np.mean(a * b, -1),
+        lambda np, a, b: (a * b).mean(axis=-1, keepdims=True),
+    )
+    for outer in ROW_SUM_OUTER:
+        a, b = arrays(2, (*outer, width), special)
+        for spelling in spellings:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                expected = spelling(numpy, a, b)
+                got = spelling(lazy, lazy.asarray(a), lazy.asarray(b)).gather()
+            assert laid_the_same(expected, got), (outer, width)
+    made = len(ROW_SUM_OUTER) * len(spellings) if fuse.SHORTEST_SUMMED_ROW <= width <= fuse.LONGEST_SUMMED_ROW else 0
+    if not special:
+        assert fuse.STATS.calls.get(fuse.ROW_SUMS_OF_PRODUCTS, 0) == made
+
+
+@pytest.mark.parametrize("width", range(2, 8))
+def test_a_sum_along_short_rows_of_an_array_adds_from_left_to_right_from_zero(width: int):
+    """NumPy adds a short row from 0.0 and from left to right: a row of `-0.0` gives 0.0, `1 + 1e16 - 1e16` gives 0,
+    infinities of both signs a NaN, and a NaN stays a NaN. A sum of an array computed before it, and of a square, is
+    the same pass."""
+    rows = [[-0.0] * width, [1.0, 1e16, -1e16, *[0.0] * (width - 3)][:width], [numpy.inf, -numpy.inf, *[1.0] * width][:width],
+            [numpy.nan, *[-0.0] * width][:width], [*[-0.0] * (width - 1), numpy.nan], [5e-324] * width, [1e308] * width]
+    x = numpy.array(rows * 3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for write in (lambda np, v: np.sum(v + 0.0, -1), lambda np, v: np.sum(v * v, -1), lambda np, v: np.sum(np.square(v), -1),
+                      lambda np, v: np.mean(v - 1.0, axis=-1), lambda np, v: np.sum(v * 1.0, axis=-1)):
+            with numpy.errstate(all="ignore"):
+                expected = write(numpy, x)
+                got = write(lazy, lazy.asarray(x)).gather()
+            assert laid_the_same(expected, got)
+    assert row_sums_made() == 5
+
+
+def test_a_sum_along_short_rows_reads_parts_of_arrays_in_c_order():
+    """The operands of the product may be slices that cut the rows apart, or step over rows: the result is NumPy's,
+    in C order, by one pass."""
+    a, b = arrays(2, (40, 50, 6))
+    cases = (
+        (lambda np, a, b: np.sum(a[:, :30, :2] * b[:, 10:40, 4:], -1)),
+        (lambda np, a, b: np.sum(a[:39:3, :, 1:4] * b[1::3, :, :3], axis=2)),
+        (lambda np, a, b: np.mean(a[:, ::2] * b[:, 1::2], axis=-1, keepdims=True)),
+    )
+    for write in cases:
+        assert laid_the_same(write(numpy, a, b), write(lazy, lazy.asarray(a), lazy.asarray(b)).gather())
+    assert fuse.STATS.calls.get(fuse.ROW_SUMS_OF_PRODUCTS, 0) == len(cases)
+
+
+def test_a_sum_along_short_rows_of_arrays_out_of_order_is_left_to_numpy():
+    """Where NumPy would lay out the product or the sum in another order than C order, or walks an axis backwards,
+    the pass is not made: the results and their layout are NumPy's."""
+    a, b = arrays(2, (3, 40, 30))
+    cases = (
+        lambda np, a, b: np.sum(a.transpose(1, 2, 0) * b.transpose(1, 2, 0), -1),
+        lambda np, a, b: np.sum(a.transpose(2, 1, 0) * b.transpose(2, 1, 0), -1),
+        lambda np, a, b: np.sum(a[:, ::-1].transpose(1, 2, 0) * b[:, ::-1].transpose(1, 2, 0), axis=-1),
+        lambda np, a, b: np.sum(a.transpose(1, 2, 0) + b.transpose(1, 2, 0), axis=-1),
+    )
+    for write in cases:
+        assert laid_the_same(write(numpy, a, b), write(lazy, lazy.asarray(a), lazy.asarray(b)).gather())
+    assert row_sums_made() == 0
+
+
+def test_what_a_sum_along_short_rows_does_not_take_is_numpys():
+    """A sum along another axis, of rows of one or eight, of an expression the product is not, and `np.max` and
+    `np.min` along rows, are NumPy's calls, with NumPy's bits."""
+    a, b = arrays(2, (50, 4))
+    (c,) = arrays(1, (50, 8))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cases = (
+            lambda np: np.sum(np.asarray(a) * np.asarray(b), axis=0),
+            lambda np: np.sum(np.asarray(c) * np.asarray(c), axis=-1),
+            lambda np: np.sum(np.asarray(a)[:, :1] * np.asarray(b)[:, :1], axis=-1),
+            lambda np: np.max(np.asarray(a) * np.asarray(b), axis=-1),
+            lambda np: np.min(np.asarray(a) + np.asarray(b), axis=-1),
+            lambda np: np.sum(np.asarray(a) * np.asarray(b)),
+        )
+        for write in cases:
+            assert laid_the_same(numpy.asarray(write(numpy)), numpy.asarray(write(lazy).gather()))
+    assert row_sums_made() == 0
+
+
+def test_a_product_the_program_holds_is_computed_and_then_summed():
+    """A product that the program also holds is computed by its own call, and the sum adds its rows."""
+    a, b = arrays(2, (60, 3))
+    la, lb = lazy.asarray(a), lazy.asarray(b)
+    product = la * lb
+    total = numpy.sum(product, -1)
+    assert same(numpy.sum(a * b, -1), total.gather()) and same(a * b, product.gather())
+    assert fuse.STATS.calls == {fuse.ROW_SUMS: 1}
+
+
+def test_an_exception_of_a_sum_along_short_rows_is_numpys():
+    """An overflow in the products or in the sum drops the pass, and NumPy's calls warn on the line, or raise."""
+    huge = numpy.full((70, 2), 1e200)
+    near = numpy.full((70, 2), 1e308)
+    for x, write in ((huge, lambda np, v: np.sum(v * v, -1)), (near, lambda np, v: np.sum(v * 1.0, -1))):
+        fuse._flagged.clear()  # Both are written on one line, which the first would leave to NumPy.
+        with warnings.catch_warnings(record=True) as expected:
+            warnings.simplefilter("always")
+            wanted = write(numpy, x)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            got = write(lazy, lazy.asarray(x)).gather()
+        assert same(wanted, got)
+        assert [str(warning.message) for warning in caught] == [str(warning.message) for warning in expected]
+    assert fuse.STATS.flagged == 2 and row_sums_made() == 0
+    fuse._flagged.clear()
+    with numpy.errstate(over="raise"):
+        pending = numpy.sum(lazy.asarray(huge) * lazy.asarray(huge), -1)
+    with pytest.raises(FloatingPointError, match="overflow encountered in multiply"):
+        pending.gather()
+    with numpy.errstate(over="ignore"):
+        wanted = numpy.sum(huge * huge, -1)
+        pending = numpy.sum(lazy.asarray(huge) * lazy.asarray(huge), -1)
+    assert same(wanted, pending.gather()) and row_sums_made() == 1
+
+
+def test_the_noise_programs_dot_products_are_one_pass():
+    """perlin-numpy's `np.sum(np.dstack((x, y)) * g, 2)`, with `g` a slice of a larger array, by one pass."""
+    rng = numpy.random.default_rng(SEED)
+    grid, gradients = rng.random((64, 64, 2)), rng.standard_normal((72, 72, 2))
+    def ramps(np: Any, grid: Any, gradients: Any) -> Any:
+        """Two of the four ramps of one octave."""
+        n00 = np.sum(np.dstack((grid[:, :, 0], grid[:, :, 1])) * gradients[:-8, :-8], 2)
+        n10 = np.sum(np.dstack((grid[:, :, 0] - 1, grid[:, :, 1])) * gradients[8:, :-8], 2)
+        return n00 * 0.25 + n10
+    assert laid_the_same(ramps(numpy, grid, gradients), ramps(lazy, lazy.asarray(grid), lazy.asarray(gradients)).gather())
+    assert fuse.STATS.calls.get(fuse.ROW_SUMS_OF_PRODUCTS, 0) == 2
+
+
 @pytest.mark.parametrize("name", [program.name for program in corpus.programs() + codebases.programs() if program.eager])
 def test_a_program_of_the_corpus_gives_numpys_results_with_fusion(name: str):
     """Each program run with the stand-in and fusion matches the program run with NumPy, bit for bit."""
