@@ -684,6 +684,41 @@ def test_a_view_by_type_of_a_strict_array_is_strict():
             float(view[0, 0])
 
 
+# ---- `np.isscalar`: whether a lazy array stands for a number.
+
+def test_isscalar_says_of_a_lazy_array_what_numpy_says_of_its_value():
+    """A mean is a number and an array without dimensions is not: the stand-in's answer is NumPy's for each."""
+    def program(np):
+        """Ask of arrays, of numbers NumPy computes, of arrays without dimensions, and of what is no array."""
+        x = np.asarray(numpy.array([[numpy.nan, -0.0, numpy.inf], [1.0, 2.0, 3.0]]))
+        alone = np.asarray(numpy.array(3.0))
+        asked = (x, x.mean(), x.sum(axis=0), x[1, 2], alone, alone * 2, x.max() * 2, np.sum(alone, keepdims=True),
+                 x[x > 99], np.asarray(numpy.empty((0, 3))), np.asarray(numpy.array([7.0])), np.float64(3.0), 3, "a", [1], None)
+        return [np.isscalar(each) for each in asked] + [np.isscalar(element=x.mean())]
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert got == expected and all(type(answer) is bool for answer in got)
+    # Only what has no dimension is asked of NumPy: the mean twice, the element, the array without dimensions and
+    # its product, the maximum's product, and the sum that keeps its dimensions.
+    assert graph.COUNTS.at_once == {"np.isscalar": 7}
+
+
+def test_isscalar_computes_nothing_for_an_array_and_a_strict_number_refuses():
+    """The shape answers for an array with a dimension; a number's kind is its value's, which a strict array keeps."""
+    x = lazy.asarray(numpy.arange(6.0)) * 2
+    graph.COUNTS.reset()
+    assert lazy.isscalar(x) is False and x._node.pending and graph.COUNTS.at_once == {}
+    total = strict.asarray(numpy.arange(6.0)).sum()
+    with pytest.raises(NotGathered):
+        strict.isscalar(total)
+    assert strict.isscalar(strict.asarray(numpy.arange(6.0))) is False
+    for call in (lambda np: np.isscalar(), lambda np: np.isscalar(np.asarray(numpy.arange(3.0)).sum(), 1)):
+        theirs, ours = raised(lambda: call(numpy)), raised(lambda: call(lazy))
+        assert type(ours) is type(theirs) and str(ours) == str(theirs)
+
+
 def test_a_number_is_not_written_in_place():
     """`s += v` on what NumPy gives as a number makes a new lazy array, deferred, and leaves the old one alone."""
     s = (lazy.arange(4.0) * 2).sum()
