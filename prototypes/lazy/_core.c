@@ -796,6 +796,18 @@ has_value(PyObject *node)
         && SLOT(node, node_at[N_VALUE]) != Py_None;
 }
 
+/* Whether an element type holds whole numbers or booleans: `dtype.kind in fuse.WHOLE_KINDS`, by NumPy's own
+ * numbers for its types. One such number without dimensions is a number to a fused kernel beside float64. */
+static int
+whole_kind(PyObject *dtype)
+{
+    if (!PyArray_DescrCheck(dtype)) {
+        return 0;
+    }
+    int number = ((PyArray_Descr *)dtype)->type_num;
+    return PyTypeNum_ISINTEGER(number) || PyTypeNum_ISBOOL(number);
+}
+
 /* Whether a call can be made now instead of being written as a node: `small_limit` is set, every operand that is
  * a node has its value, no operand is a collection that might hold one, and the result is a view or has fewer than
  * `small_limit` elements. A view of an array that exists costs nothing to take. A small result is the other case:
@@ -834,9 +846,12 @@ ready_now(PyObject *operation, PyObject *args, PyObject *kwargs, PyObject *shape
             }
             int same_type = dtype == fusible_dtype;
             for (Py_ssize_t place = 0; same_type && place < PyTuple_GET_SIZE(args); place++) {
-                /* `abs(z)` of a complex array gives float64 and is no kernel's: every array read has to be of the type. */
+                /* `abs(z)` of a complex array gives float64 and is no kernel's: every array read has to be of the type,
+                 * or one whole number, which a kernel takes as it takes a number written in the program. */
                 PyObject *arg = PyTuple_GET_ITEM(args, place);
-                same_type = Py_TYPE(arg) != Node || SLOT(arg, node_at[N_DTYPE]) == fusible_dtype;
+                same_type = Py_TYPE(arg) != Node || SLOT(arg, node_at[N_DTYPE]) == fusible_dtype
+                            || (PyTuple_CheckExact(SLOT(arg, node_at[N_SHAPE])) && PyTuple_GET_SIZE(SLOT(arg, node_at[N_SHAPE])) == 0
+                                && whole_kind(SLOT(arg, node_at[N_DTYPE])));
             }
             if (same_type) {
                 int waits = PySet_Contains(fusible_calls, operation);
@@ -3686,7 +3701,10 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
                 goto done;
             }
             large = large || size >= small_limit;
-            other_type = other_type || (Py_TYPE(value) == Ndarray && (PyObject *)PyArray_DESCR((PyArrayObject *)value) != fusible_dtype);
+            /* An array of another type, but for one whole number: a kernel takes that as a number (`leaf_kind`). */
+            other_type = other_type || (Py_TYPE(value) == Ndarray && (PyObject *)PyArray_DESCR((PyArrayObject *)value) != fusible_dtype
+                                        && !(PyArray_NDIM((PyArrayObject *)value) == 0
+                                             && whole_kind((PyObject *)PyArray_DESCR((PyArrayObject *)value))));
             values[place] = value;
             arrays++;
         } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
@@ -4918,7 +4936,6 @@ static PyObject *f_power, *f_pow;    /* `np.power` and `operator.pow` */
 static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
 static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
 static PyObject *f_whole_scalars;    /* `fuse.WHOLE_SCALARS` */
-static PyObject *f_whole_kinds;      /* `fuse.WHOLE_KINDS` */
 static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
 static Py_ssize_t f_short_row, f_slight_row; /* `fuse.SHORT_ROW`, `fuse.SLIGHT_ROW` */
 static PyObject *f_row_operations;           /* `fuse.ROW_OPERATIONS` */
@@ -5142,17 +5159,6 @@ whole_scalar(PyObject *arg)
         return 0;
     }
     return found;
-}
-
-/* Whether an element type holds whole numbers or booleans: `dtype.kind in fuse.WHOLE_KINDS`. */
-static int
-whole_kind(PyObject *dtype)
-{
-    if (!PyArray_DescrCheck(dtype)) {
-        return 0;
-    }
-    return PyUnicode_FindChar(f_whole_kinds, (Py_UCS4)((PyArray_Descr *)dtype)->kind, 0,
-                              PyUnicode_GET_LENGTH(f_whole_kinds), 1) >= 0;
 }
 
 /* `fuse.operation_of(node)`: 1 with the operation's name in a pattern (borrowed) and its operands; 0 for None;
@@ -6035,8 +6041,7 @@ module_find_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "mul", &PyUnicode_Type, &f_mul) || take(given, "float64", NULL, &f_float64)
         || take(given, "boolean", NULL, &f_boolean) || take(given, "power", NULL, &f_power) || take(given, "pow", NULL, &f_pow)
         || take(given, "is_basic_index", NULL, &f_is_basic_index)
-        || take(given, "whole_scalars", &PyFrozenSet_Type, &f_whole_scalars)
-        || take(given, "whole_kinds", &PyUnicode_Type, &f_whole_kinds)) {
+        || take(given, "whole_scalars", &PyFrozenSet_Type, &f_whole_scalars)) {
         Py_XDECREF(expression);
         Py_XDECREF(term);
         Py_XDECREF(leaf);

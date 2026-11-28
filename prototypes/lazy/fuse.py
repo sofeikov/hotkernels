@@ -75,7 +75,7 @@ IN_PLACE = {"x += y": np.add, "x -= y": np.subtract, "x *= y": np.multiply, "x /
 # The largest whole number a float64 holds exactly: a Python integer up to it is the same number as a float.
 EXACT_INTEGER = 2 ** 53
 # The kinds of element type, by NumPy's letters for them, that hold whole numbers: booleans, and integers with a
-# sign and without.
+# sign and without. `whole_kind` of `_core.c` asks the same of NumPy's numbers for its types.
 WHOLE_KINDS = "biu"
 # NumPy's scalar types of those kinds: `np.bool_` and one for each integer type of C, `np.int64` and `np.longlong`
 # apart. Beside a float64 array NumPy gives each of them the float64 its own conversion makes, once, and then
@@ -274,6 +274,24 @@ def _is_number(arg: Any) -> bool:
             or kind in WHOLE_SCALARS)
 
 
+def is_whole_number(arg: Any) -> bool:
+    """Say whether an operand is one whole number or boolean of NumPy's, which a kernel takes as a number.
+
+    Args:
+        arg: An operand as a node has it: a node, an `ndarray`, a NumPy scalar, a Python number.
+
+    Returns:
+        True for a NumPy scalar of a whole-number or boolean type
+        (`WHOLE_SCALARS`) and for a node or an array without dimensions of
+        such an element type (`WHOLE_KINDS`). False for a Python number, a
+        float, and anything with a dimension.
+    """
+    kind = type(arg)
+    if kind in WHOLE_SCALARS:
+        return True
+    return (kind is Node or kind is np.ndarray) and not arg.shape and arg.dtype.kind in WHOLE_KINDS
+
+
 # The innermost dimension below which an expression with one value for each row (`dx[:, :, None]` beside a grid)
 # is planned a second way, with the value read as an array: `SHORTEST_RUN` of `_fused.c`. A kernel takes one
 # value for a number in a call, so a number that is another for each row makes every row a run of its own, which
@@ -305,7 +323,7 @@ def _leaf_kind(arg: Any, shape: tuple[int, ...]) -> str | None:
     if arg.dtype != FLOAT64 or not arg.dtype.isnative:
         # One whole number, `np.asarray(3)` or `counts.sum()`, is a number as its NumPy scalar is (`_is_number`).
         # With a dimension it is an array of another type, which NumPy converts element by element.
-        return SCALAR if not arg.shape and arg.dtype.kind in WHOLE_KINDS else None
+        return SCALAR if is_whole_number(arg) else None
     if not arg.shape or arg.shape[-1] == 1 != shape[-1]:
         return SCALAR
     return VECTOR if arg.shape[-1] == shape[-1] and graph.is_known(arg.shape) else None
@@ -700,7 +718,7 @@ def _reading_core() -> Any:
                         vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
                         float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
                         is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH,
-                        whole_scalars=WHOLE_SCALARS, whole_kinds=WHOLE_KINDS,
+                        whole_scalars=WHOLE_SCALARS,
                         short_row=SHORT_ROW, slight_row=SLIGHT_ROW,
                         row_operations=ROW_OPERATIONS)
         _told_core = core

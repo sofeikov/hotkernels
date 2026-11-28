@@ -542,6 +542,41 @@ def test_a_large_call_no_kernel_could_make_is_made_at_once_by_the_core():
         fuse.disable()
 
 
+def test_one_whole_number_beside_a_large_array_waits_for_a_kernel():
+    """With fusion on, `table[r, c] * x + y` past the limit is two nodes and one kernel call: one whole number is a
+    number to a kernel, not an array of another type. An array of whole numbers with a dimension still is one."""
+    if not array.core_in_use() or not fuse.enable():
+        pytest.skip("needs the C core and the fused kernels")
+    try:
+        rng = numpy.random.default_rng(SEED)
+        data, more = rng.standard_normal(2 * fuse.AT_ONCE_BELOW), rng.standard_normal(2 * fuse.AT_ONCE_BELOW)
+        table, counts = numpy.arange(12).reshape(3, 4) - 5, numpy.arange(100)
+        x, y, t, c = lazy.asarray(data), lazy.asarray(more), lazy.asarray(table), lazy.asarray(counts)
+        cases = [
+            (table[1, 2] * data + more, lambda: t[1, 2] * x + y),
+            (data * table[0, 0] + more, lambda: x * t[0, 0] + y),
+            (numpy.multiply(table[2, 3], data) + more, lambda: lazy.multiply(t[2, 3], x) + y),
+            (numpy.multiply(data, numpy.asarray(7)) + more, lambda: lazy.multiply(x, lazy.asarray(numpy.asarray(7))) + y),
+            (counts.sum() * data + more, lambda: c.sum() * x + y),
+            (data * (counts > 5).any() + more, lambda: x * (c > 5).any() + y),
+            (data * ((data * 2.0 > 0.5).sum() - 3) + more, lambda: x * ((x * 2.0 > 0.5).sum() - 3) + y),
+            (numpy.maximum(table[1, 1], data) + more, lambda: lazy.maximum(t[1, 1], x) + y),
+        ]
+        fuse.STATS.reset()
+        for place, (expected, write) in enumerate(cases):
+            deferred = graph.COUNTS.deferred
+            waits = write()
+            assert graph.COUNTS.deferred >= deferred + 2, place
+            assert same(expected, waits.gather()), place
+        assert fuse.STATS.calls == {"fuse_add_scaled_f64": 7, "fuse_max_s_v_f64": 1, "fuse_add_v_v_f64": 1}
+        made, deferred = array.at_once_counts()[0], graph.COUNTS.deferred
+        whole = x * lazy.asarray(numpy.asarray([3]))
+        assert array.at_once_counts()[0] - made == 1 and graph.COUNTS.deferred == deferred
+        assert same(data * numpy.asarray([3]), whole.gather())
+    finally:
+        fuse.disable()
+
+
 def test_an_operator_in_place_on_a_number_is_the_numpy_scalars_own(at_once: None):
     """`trace += np.tanh(a[i, i])`: a NumPy scalar cannot be written, so the operator gives a new number by the
     scalar's own arithmetic, with its type and bits, and another name for the old number keeps the old one."""
