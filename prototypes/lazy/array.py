@@ -72,7 +72,7 @@ FRESH_FUNCTIONS = frozenset({np.dot, np.matmul, np.sum, np.mean, np.max, np.min,
 # number that shares no memory with an argument when they are called without `out=`. A call of one is made at
 # once on gathered operands (`_at_once`) and counted as outside the deferred set. With small calls made at once
 # (`at_once_below`) the C core makes it, on arrays of any size that have their values, where the stand-in is called.
-NEVER_DEFERRED = frozenset({np.clip})
+NEVER_DEFERRED = frozenset({np.clip, np.average})
 # What a recording calls an element read from an array that has its values, where it is an input of a later graph.
 ELEMENT_SOURCE = "x[index]"
 # The layout a write's copy of an array is given: the array's own, as far as NumPy can keep it. A write that

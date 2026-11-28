@@ -4088,6 +4088,8 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                        && PyUnicode_Compare(PyTuple_GET_ITEM(kwnames, place - count), s_out) == 0) {
                 owned = 0;
                 into = args[place];
+            } else if (small_limit != 0 && PyObject_TypeCheck(args[place], Generic)) {
+                /* A NumPy scalar of the program's own, `np.finfo(t).eps`: a plain value, which holds no array. */
             } else {
                 int is_plain = PySet_Contains(road->name, (PyObject *)Py_TYPE(args[place]));
                 if (is_plain < 0) {
@@ -4182,7 +4184,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
              * there and then, with no rule asked. Only for the functions listed as giving one new array that
              * shares no memory with an argument, so the result is an array of its own like any call's. */
             int fresh = PySet_Contains(fresh_functions, function);
-            if (fresh < 0) {
+            /* Whether the call is made now whatever its size, as `ready_now` has it for a node: the planner has
+             * said what a kernel can make, and this function is none of it. A matrix product of a batch. */
+            int any_size = fresh > 0 && fusible_calls != NULL && PySet_Contains(fusible_calls, function) == 0;
+            if (fresh < 0 || PyErr_Occurred()) {
                 PyErr_Clear();
             } else if (fresh) {
                 PyObject *stack[8], *values[8];
@@ -4193,7 +4198,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                     if (Py_TYPE(arg) != Lazy) {
                         /* A plain value, or a plain array, which is its own: the loop above saw to that. */
                         stack[place - 1] = arg;
-                        ready = Py_TYPE(arg) != Ndarray || PyArray_SIZE((PyArrayObject *)arg) < small_limit;
+                        ready = any_size || Py_TYPE(arg) != Ndarray || PyArray_SIZE((PyArrayObject *)arg) < small_limit;
                         continue;
                     }
                     PyObject *value = value_of(arg, &strict);
@@ -4209,7 +4214,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                     }
                     values[held++] = value;
                     Py_ssize_t size = count_of(value);
-                    ready = size >= 0 && size < small_limit;
+                    ready = size >= 0 && (any_size || size < small_limit);
                     stack[place - 1] = value;
                 }
                 PyObject *made = ready ? PyObject_Vectorcall(function, stack, (size_t)(count - 1), kwnames) : Miss;
