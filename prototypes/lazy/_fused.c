@@ -607,6 +607,36 @@ gather_run(double *to, const char *from, npy_intp count, npy_intp step)
     }
 }
 
+/* Fills `rows` rows of `width` elements, one after the other, each with one value: the values lie `stride` bytes
+ * apart. It is `gather_run` with a step of no bytes for many rows at once, with nothing between two rows but the
+ * next value: for rows of a few elements the walk from one row to the next costs more than the row. The lengths a
+ * colour image has are written out so that the compiler knows the inner loop's count. */
+static void
+fill_rows(double *to, const char *from, npy_intp rows, npy_intp width, npy_intp stride)
+{
+#define FILL(count) \
+    for (npy_intp row = 0; row < rows; row++, from += stride, to += (count)) { \
+        double value = *(const double *)from; \
+        for (npy_intp each = 0; each < (count); each++) { \
+            to[each] = value; \
+        } \
+    }
+    switch (width) {
+    case 2:
+        FILL(2)
+        break;
+    case 3:
+        FILL(3)
+        break;
+    case 4:
+        FILL(4)
+        break;
+    default:
+        FILL(width)
+    }
+#undef FILL
+}
+
 /* Where the rows of one array are while the shape is walked row by row: the row the walk is at, as a position
  * along each outer dimension, where it lies in memory, and at which element of the walk it starts. */
 typedef struct {
@@ -758,6 +788,22 @@ program_flat(const program_step *steps, Py_ssize_t step_count, operand *reads, i
             npy_intp step = gathered[each]->strides[last], width = width_of[each];
             double *copy = copies + (size_t)each * (size_t)block;
             while (!walk->done && walk->start < start + length) {
+                if (step == 0 && inner_of[each] > 0 && walk->start >= start) {
+                    /* A value for each row: the whole rows that the block still holds and that come before the
+                     * last of their line, which is left to `next_row` since it carries. */
+                    int line = inner_of[each] - 1;
+                    npy_intp fit = (start + length - walk->start) / width;
+                    npy_intp left = shape[line] - 1 - walk->position[line];
+                    npy_intp many = fit < left ? fit : left;
+                    if (many > 0) {
+                        npy_intp apart = gathered[each]->strides[line];
+                        fill_rows(copy + (walk->start - start), rows[each], many, width, apart);
+                        walk->position[line] += many;
+                        rows[each] += many * apart;
+                        walk->start += many * width;
+                        continue;
+                    }
+                }
                 npy_intp from = walk->start > start ? walk->start : start;
                 npy_intp upto = walk->start + width < start + length ? walk->start + width : start + length;
                 gather_run(copy + (from - start), rows[each] + (from - walk->start) * step, upto - from, step);
@@ -1523,12 +1569,14 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
     npy_intp run = shape[outer];
     npy_intp period[MOST_OPERANDS] = {0}; /* For an array that repeats: the elements of its stretch. Else 0. */
     npy_intp longest = 0;
+    int valued = 0; /* 1 when an array is one value for each row. */
     for (int place = 0; place < arrays; place++) {
         if (reads[place].strides[outer] == 0 && shape[outer] != 1) {
             /* One value for each row (`dx[:, :, None]`): a stretch of one element. The rows it differs between do
              * not join, so each row is a run, and its value is put into the array's buffer when the run begins. */
             period[place] = 1;
             longest = 1;
+            valued = 1;
         }
     }
     while (outer > 0) {
@@ -1629,7 +1677,7 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
          * step is a call for each row down to `SHORTEST_CALL` elements, and left to NumPy below; one whose kernel
          * reads fewer than `FEWEST_READ` is left to NumPy on every row shorter than `SHORTEST_ROW`. A number that
          * is not the same for every row cannot be gathered: a call has one value for each number. */
-        if (!stepped) {
+        if (!stepped && !(valued && step_count > 1)) {
             return PyLong_FromLong(DECLINED);
         }
         for (int place = 0; place < numbers_given; place++) {
