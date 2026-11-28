@@ -159,8 +159,8 @@ static long long lent = 0;
  * where only small calls and views are made at once. */
 static PyObject *fusible_calls = NULL, *fusible_dtype = NULL;
 /* Those of `fusible_calls` whose result is a mask and not of `fusible_dtype`: the comparisons a kernel selects by
- * (`np.where(x <= 0.5, a, b)`). Such a call waits like the others when the arrays it reads are of the type; NULL
- * for none. */
+ * (`np.where(x <= 0.5, a, b)`). Such a call waits like the others when it is written as the kernel reads it, an
+ * array of the type and then a number; NULL for none. See `selected_by`. */
 static PyObject *fusible_masks = NULL;
 static PyObject *compute_small = NULL; /* `array._compute_for_small`: computes the node of a lazy array. */
 static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
@@ -819,6 +819,25 @@ whole_kind(PyObject *dtype)
     return PyTypeNum_ISINTEGER(number) || PyTypeNum_ISBOOL(number);
 }
 
+/* Whether a call is a comparison a kernel selects by, written as the kernel reads it: `callable` is one of
+ * `fusible_masks`, `first` is an array, a node or a lazy array, and `second` a number of Python's or NumPy's. `x <=
+ * 0.5` is; `0.5 <= x` and `x <= y` are not, and are made at once like any comparison, since no kernel would take
+ * them and a node would only cost. 1, or 0, also for a callable that cannot be looked up. */
+static int
+selected_by(PyObject *callable, PyObject *first, PyObject *second)
+{
+    if (fusible_masks == NULL || (Py_TYPE(first) != Node && Py_TYPE(first) != Lazy)
+        || !(PyFloat_CheckExact(second) || PyLong_CheckExact(second) || PyObject_TypeCheck(second, Generic))) {
+        return 0;
+    }
+    int found = PySet_Contains(fusible_masks, callable);
+    if (found < 0) {
+        PyErr_Clear();
+        return 0;
+    }
+    return found;
+}
+
 /* Whether a call can be made now instead of being written as a node: `small_limit` is set, every operand that is
  * a node has its value, no operand is a collection that might hold one, and the result is a view or has fewer than
  * `small_limit` elements. A view of an array that exists costs nothing to take. A small result is the other case:
@@ -856,13 +875,9 @@ ready_now(PyObject *operation, PyObject *args, PyObject *kwargs, PyObject *shape
                 return 0;
             }
             int same_type = dtype == fusible_dtype;
-            if (!same_type && fusible_masks != NULL) {
+            if (!same_type && PyTuple_GET_SIZE(args) == 2) {
                 /* A comparison a kernel selects by gives a mask: what it reads decides. */
-                same_type = PySet_Contains(fusible_masks, operation);
-                if (same_type < 0) {
-                    PyErr_Clear(); /* A callable that cannot be looked up is none of them. */
-                    same_type = 0;
-                }
+                same_type = selected_by(operation, PyTuple_GET_ITEM(args, 0), PyTuple_GET_ITEM(args, 1));
             }
             for (Py_ssize_t place = 0; same_type && place < PyTuple_GET_SIZE(args); place++) {
                 /* `abs(z)` of a complex array gives float64 and is no kernel's: every array read has to be of the type,
@@ -3773,6 +3788,10 @@ ufunc_on(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int opera
         }
         if (!other_type) {
             int waits = PySet_Contains(fusible_calls, ufunc);
+            if (waits > 0 && fusible_masks != NULL && PySet_Contains(fusible_masks, ufunc) == 1) {
+                /* A comparison waits only as a kernel reads it, an array and then a number. */
+                waits = count == 2 && selected_by(ufunc, operands[0], operands[1]);
+            }
             if (waits != 0) {
                 PyErr_Clear(); /* A callable that cannot be looked up is none of them, but is left to its node. */
                 goto done;

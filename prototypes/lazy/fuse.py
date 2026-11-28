@@ -2562,7 +2562,7 @@ _installed_here = False
 
 
 def comparisons_selected_by(library: Iterable[str]) -> frozenset:
-    """Find the comparisons a library's kernels select by, with the arrays compared read and not computed.
+    """Find the comparisons a library's kernels select by, of an array as it is read with a number.
 
     `where(le(V0,S0),V1,V2)` selects by `x <= s` on an array as it lies in
     memory. Such a comparison written by itself, `rgb <= 0.5` on an array
@@ -2570,7 +2570,9 @@ def comparisons_selected_by(library: Iterable[str]) -> frozenset:
     it, or the kernel never sees it: a comparison is otherwise made at once
     (`array.at_once_below`). A kernel whose comparison reads something
     computed, `where(gt(mul(V0,sub(V1,V2)),S0),S1,V3)`, needs no such rule:
-    its comparison reads a node that waits, and so waits itself.
+    its comparison reads a node that waits, and so waits itself. The core
+    lets a comparison found here wait when it is written that way round,
+    an array and then a number, which is all this looks for.
 
     Args:
         library: The names of the library's shapes.
@@ -2585,7 +2587,8 @@ def comparisons_selected_by(library: Iterable[str]) -> frozenset:
         while todo:
             pattern = todo.pop()
             todo.extend(pattern.parts)
-            if pattern.op == WHERE and pattern.parts[0].op in MASKS and not any(part.op for part in pattern.parts[0].parts):
+            if pattern.op == WHERE and pattern.parts[0].op in MASKS \
+                    and tuple((part.op, part.kind) for part in pattern.parts[0].parts) == (("", VECTOR), ("", SCALAR)):
                 found.add(by_name[pattern.parts[0].op])
     return frozenset(found)
 

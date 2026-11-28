@@ -2092,7 +2092,8 @@ def test_a_selection_by_a_threshold_of_data_with_a_nan_does_not_warn():
 
 def test_a_comparison_a_kernel_selects_by_waits_for_its_selection():
     """With calls made at once, `x <= s` on a large float64 array waits, so that the `np.where` written on top of it
-    is computed with it; a comparison no kernel selects by, and one on another element type, are made at once."""
+    is computed with it; a comparison no kernel selects by, one of two arrays, one written the other way round and
+    one on another element type are made at once."""
     assert fuse.comparisons_selected_by(fuse.LIBRARY) == frozenset({numpy.less_equal})
     assert fuse.comparisons_selected_by(["where(gt(mul(V0,sub(V1,V2)),S0),S1,V3)", "add(V0,V1)"]) == frozenset()
     if not array.core_in_use():
@@ -2102,12 +2103,16 @@ def test_a_comparison_a_kernel_selects_by_waits_for_its_selection():
     whole = numpy.arange(fuse.AT_ONCE_BELOW)
     x, k = lazy.asarray(values), lazy.asarray(whole)
     waiting = graph.pending_count()
-    made = [x > 0.5, x[:100] <= 0.5, k <= 5, x == 0.5]
+    made = [x > 0.5, x[:100] <= 0.5, k <= 5, x == 0.5, 0.5 <= x, x <= x]
     assert graph.pending_count() == waiting
     mask = x <= 0.5
     assert graph.pending_count() == waiting + 1
+    # `0.5 >= x` is Python's other spelling of `x <= 0.5`, and the same call.
+    also = [x <= numpy.float64(0.5), x <= 1, numpy.less_equal(x, 0.5), 0.5 >= x]
+    assert graph.pending_count() == waiting + 5 and all(same(values <= 0.5 * (1 + (each is also[1])), each.gather()) for each in also)
     assert same(values <= 0.5, mask.gather()) and graph.pending_count() == waiting
-    for ours, theirs in zip(made, (values > 0.5, values[:100] <= 0.5, whole <= 5, values == 0.5)):
+    for ours, theirs in zip(made, (values > 0.5, values[:100] <= 0.5, whole <= 5, values == 0.5, 0.5 <= values,
+                                   values <= values)):
         assert same(theirs, ours.gather())
     # What a program does with a mask that waited is NumPy's: a selection of elements, a count, another mask, a write.
     assert same(values[values <= 0.5], x[x <= 0.5].gather())

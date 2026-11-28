@@ -2450,9 +2450,9 @@ def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype 
     of such a call could be computed together with it, so its node would
     cost its writing, its planning and its turn in the computing loop, and
     buy nothing. A call a kernel can make still waits, whatever its size.
-    So does a comparison of `masks` on arrays of `dtype`, whose result is
-    a mask: a kernel selects by it, so the `np.where` written on top of it
-    can be computed with it.
+    So does a comparison of `masks` of an array of `dtype` with a number,
+    in that order, whose result is a mask: a kernel selects by it, so the
+    `np.where` written on top of it can be computed with it.
 
     Args:
         limit: A count of elements, or 0 for no call made at once.
