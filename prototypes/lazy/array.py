@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 39
+CORE_VERSION = 40
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -2425,7 +2425,8 @@ def use_core(core: Any) -> None:
     _core = core
 
 
-def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype | None = None) -> int:
+def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype | None = None,
+                  masks: frozenset = frozenset()) -> int:
     """Have small calls made as the program writes them, instead of written as nodes; or stop doing so.
 
     With a limit, a call that gives fewer elements than it is made at
@@ -2449,11 +2450,15 @@ def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype 
     of such a call could be computed together with it, so its node would
     cost its writing, its planning and its turn in the computing loop, and
     buy nothing. A call a kernel can make still waits, whatever its size.
+    So does a comparison of `masks` of an array of `dtype` with a number,
+    in that order, whose result is a mask: a kernel selects by it, so the
+    `np.where` written on top of it can be computed with it.
 
     Args:
         limit: A count of elements, or 0 for no call made at once.
         fusible: The callables a fused kernel can make, as a node has them; None for no such rule.
         dtype: The element type the kernels make them on.
+        masks: The comparisons a fused kernel selects by, which wait as the callables of `fusible` do.
 
     Returns:
         The limit this one replaces; 0 without the C core.
@@ -2464,7 +2469,8 @@ def at_once_below(limit: int, fusible: frozenset | None = None, dtype: np.dtype 
     _at_once_limit = limit
     if limit:
         _views_stand_alone = True
-    _core.fusible(fusible if limit else None, dtype if limit else None)
+    waits = limit and fusible is not None
+    _core.fusible(fusible | masks if waits else None, dtype if waits else None, masks if waits else None)
     return _core.at_once_below(limit)
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import gc
 import itertools
+import platform
 import subprocess
 import warnings
 from typing import Any, Iterator
@@ -49,6 +50,7 @@ PATTERNS = {
     "fuse_sub_scaled_f64": "sub(V0,mul(S0,V1))",
     "fuse_sum3_f64": "add(V0,add(V1,V2))",
     "fuse_sum_squares_f64": "sum(sq(V0))",
+    "fuse_where_le_f64": "where(le(V0,S0),V1,V2)",
 }
 # Lengths at which a kernel is tried through the layer: either side of its block of eight, and longer.
 LENGTHS = (1, 2, 7, 8, 9, 15, 16, 17, 64, 100, 1000)
@@ -201,6 +203,7 @@ def expressions(np: Any, a: Any, b: Any, c: Any, d: Any, e: Any, f: Any) -> dict
         "fuse_sub_scaled_f64": a - 0.1 * b,
         "fuse_sum3_f64": a + (b + c),
         "fuse_sum_squares_f64": np.sum(a ** 2),
+        "fuse_where_le_f64": np.where(a <= 0.25, b, c),
     }
 
 
@@ -1925,6 +1928,205 @@ def test_an_expression_too_deep_to_read_whole_is_read_in_pieces(depth: int):
     pieces, left = divmod(depth, fuse.MOST_DEPTH + 1)
     assert fuse.STATS.expressions == pieces + (left > 1)
     assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == depth - fuse.STATS.expressions - (left == 1)
+
+
+# The machine names of x86-64, where the kernel that selects by a threshold is assembly whose comparison raises no flag.
+X86_64_MACHINES = ("x86_64", "AMD64")
+# The row lengths a value for each row is tried beside: every one up to a kernel's block of eight, the longest that is
+# spread over its row, and the shortest that is a run of its own.
+VALUED_WIDTHS = (1, 2, 3, 4, 5, 6, 7, 8, 15, 16)
+
+
+def overlay(np: Any, colours: Any, intensity: Any) -> Any:
+    """Matplotlib's overlay blend, `LightSource.blend_overlay`, as it is written there.
+
+    Args:
+        np: The `numpy` module or the lazy stand-in.
+        colours: An array whose last axis is the colour channels.
+        intensity: One value for each row of it: the same shape but for a last axis of length one.
+
+    Returns:
+        The blend.
+    """
+    low = 2 * intensity * colours
+    high = 1 - 2 * (1 - intensity) * (1 - colours)
+    return np.where(colours <= 0.5, low, high)
+
+
+@pytest.mark.parametrize("special", (False, True))
+@pytest.mark.parametrize("width", VALUED_WIDTHS)
+def test_a_program_of_several_steps_runs_on_short_rows_with_a_value_for_each_row(width: int, special: bool):
+    """Rows of a few elements beside one value for each row, the value on either side of every operator: NumPy's bits,
+    and a program of kernels with the value spread over its row where the rows are shorter than sixteen."""
+    table, other = arrays(2, (23, 19, width), special)
+    values = arrays(1, (23, 19, 1), special)[0]
+    t, o, v = (lazy.asarray(each) for each in (table, other, values))
+    cases = (
+        (lambda: 1 - v * (1 - t), lambda: 1 - values * (1 - table)),
+        (lambda: (t - v) * o + t, lambda: (table - values) * other + table),
+        (lambda: (v - t) * o + t, lambda: (values - table) * other + table),
+        (lambda: (t / v - o) * t, lambda: (table / values - other) * table),
+        (lambda: (v / t - o) * t, lambda: (values / table - other) * table),
+        (lambda: (t + v) / o - v, lambda: (table + values) / other - values),
+        (lambda: (v + t) / o - v, lambda: (values + table) / other - values),
+        (lambda: lazy.sqrt(lazy.abs(t * v)) - o * v, lambda: numpy.sqrt(numpy.abs(table * values)) - other * values),
+        (lambda: lazy.maximum(t * 0.5, v) - lazy.minimum(v, o * 2.0),
+         lambda: numpy.maximum(table * 0.5, values) - numpy.minimum(values, other * 2.0)),
+    )
+    with numpy.errstate(all="ignore"):
+        for program, expected in cases:
+            assert same(expected(), gathered(program))
+        fuse.STATS.reset()
+        assert same(1 - values * (1 - table), gathered(cases[0][0]))
+    if 1 < width < fuse.SHORT_ROW:
+        assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == 2
+        assert fuse.STATS.calls == {"fuse_sub_s_v_f64": 2, "fuse_mul_v_v_f64": 1}
+
+
+@pytest.mark.parametrize("width", (2, 3, 4, 8))
+def test_a_value_for_each_row_is_spread_in_any_number_of_dimensions_and_blocks(width: int):
+    """The value is another along one outer axis, along two or along three, and the rows are more than a block
+    holds, a whole number of blocks and one row: each is NumPy's bits by a program."""
+    block = fuse.BLOCK_ELEMENTS
+    for shape, valued in (((3, 5, 7, width), (3, 5, 7, 1)), ((3, 5, 7, width), (1, 5, 7, 1)), ((3, 5, 7, width), (3, 1, 7, 1)),
+                          ((2 * block // width + 3, width), (2 * block // width + 3, 1)), ((block // 8, 8 // width or 1, width),) * 2,
+                          ((1, 9, width), (1, 9, 1)), ((5, 1, width), (5, 1, 1))):
+        valued = valued[:-1] + (1,)
+        table, values = arrays(1, shape)[0], arrays(1, valued)[0]
+        fuse.STATS.reset()
+        got = gathered(lambda: 1 - lazy.asarray(values) * (1 - lazy.asarray(table)))
+        assert same(1 - values * (1 - table), got), (shape, valued)
+        assert fuse.STATS.declined == 0, (shape, valued)
+
+
+def test_a_value_for_each_row_that_is_no_float64_ends_the_expression():
+    """Whole numbers for each row are no operand of a kernel: NumPy multiplies by them, and the rest is as before."""
+    table = arrays(1, (40, 30, 4))[0]
+    counts = numpy.random.default_rng(SEED).integers(-3, 4, (40, 30, 1))
+    for values in (counts, counts.astype(numpy.int8), counts.astype(numpy.float32), counts > 0):
+        got = gathered(lambda: 1 - 2 * (1 - lazy.asarray(values)) * (1 - lazy.asarray(table)))
+        assert same(1 - 2 * (1 - values) * (1 - table), got)
+        got = gathered(lambda: overlay(lazy, lazy.asarray(table), lazy.asarray(values)))
+        assert same(overlay(numpy, table, values), got)
+
+
+@pytest.mark.parametrize("width", (3, 4))
+def test_a_program_on_short_rows_with_a_value_for_each_row_is_written_into_an_array(width: int):
+    """Assigned to a whole array, to some of its rows, to itself and to the first channels of a wider one: NumPy's
+    bits each time, the last by NumPy's calls, since rows of a few elements copied out cost what the program saves."""
+    table = arrays(1, (30, 20, width))[0]
+    values = arrays(1, (30, 20, 1))[0]
+    wide = arrays(1, (30, 20, width + 1))[0]
+
+    def program(np: Any, errstate: dict) -> list:
+        """Write the blend's second half four ways, under an error state of the caller's.
+
+        Args:
+            np: The `numpy` module or the lazy stand-in.
+            errstate: What `np.errstate` is given: with everything ignored a program writes where the array is.
+
+        Returns:
+            The four arrays written into.
+        """
+        t, v = np.asarray(table), np.asarray(values)
+        whole, rows, own, channels = np.zeros(table.shape), np.zeros(table.shape), np.asarray(table.copy()), np.asarray(wide.copy())
+        with numpy.errstate(**errstate):
+            whole[:] = 1 - v * (1 - t)
+            rows[3:-2] = 1 - v[3:-2] * (1 - t[3:-2])
+            own[...] = 1 - v * (1 - own)
+            channels[..., :width] = 1 - v * (1 - t)
+        return [whole, rows, own, channels]
+
+    for errstate in ({}, {"all": "ignore"}):
+        expected = program(numpy, errstate)
+        fuse.STATS.reset()
+        got = [each.gather() for each in program(lazy, errstate)]
+        for theirs, ours in zip(expected, got):
+            assert same(theirs, ours)
+        assert fuse.STATS.fused_nodes >= 6
+
+
+@pytest.mark.parametrize("width", VALUED_WIDTHS)
+def test_a_blend_of_colours_is_one_program_with_numpys_bits(width: int):
+    """Matplotlib's overlay blend on rows of colour values with an intensity for each row: the comparison, the two
+    sides and the selection are one program, with NumPy's bits for ordinary values and for special ones."""
+    for special in (False, True):
+        colours = arrays(1, (31, 17, width), special)[0]
+        intensity = arrays(1, (31, 17, 1), special)[0]
+        with numpy.errstate(all="ignore"):
+            expected = overlay(numpy, colours, intensity)
+            fuse.STATS.reset()
+            got = gathered(lambda: overlay(lazy, lazy.asarray(colours), lazy.asarray(intensity)))
+        assert same(expected, got)
+        if 1 < width < fuse.SHORT_ROW:
+            assert fuse.STATS.declined == 0 and fuse.STATS.calls.get("fuse_where_le_f64") == 1
+            assert fuse.STATS.fused_nodes == 6  # Seven operations; the eighth, `2 * (1 - intensity)`, has another shape.
+
+
+@pytest.mark.parametrize("threshold", (0.0, -0.0, 0.5, numpy.inf, -numpy.inf, numpy.nan))
+def test_a_selection_by_a_threshold_takes_nans_and_signed_zeros_as_numpy_does(threshold: float):
+    """A NaN is not below anything, a zero of either sign is at most a zero of either sign, and what is selected
+    comes through with its bits, the sign of a zero and of a NaN included."""
+    tested, low, high = arrays(3, (40, 9, 4), special=True)
+    low[::2], high[1::3] = -low[::2], -high[1::3]  # NaNs and zeros of both signs among what is selected.
+    with numpy.errstate(all="ignore"):
+        expected = numpy.where(tested <= threshold, low * 1.0, high * 1.0)
+        got = gathered(lambda: numpy.where(lazy.asarray(tested) <= threshold, lazy.asarray(low) * 1.0, lazy.asarray(high) * 1.0))
+    assert same(expected, got) and fuse.STATS.calls.get("fuse_where_le_f64") == 1
+
+
+def test_a_selection_by_a_threshold_of_data_with_a_nan_does_not_warn():
+    """NumPy's comparison reports nothing for a NaN. Neither does the layer: by a kernel whose comparison raises no
+    flag, on x86-64, and elsewhere at the least by NumPy's calls for a result that raised one."""
+    colours = arrays(1, (50, 40, 4))[0]
+    intensity = numpy.abs(arrays(1, (50, 40, 1))[0])
+    colours[::7, ::3, 1] = numpy.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        expected = overlay(numpy, colours, intensity)
+        got = gathered(lambda: overlay(lazy, lazy.asarray(colours), lazy.asarray(intensity)))
+    assert same(expected, got)
+    if platform.machine() in X86_64_MACHINES:
+        assert fuse.STATS.flagged == 0 and fuse.STATS.calls.get("fuse_where_le_f64") == 1
+
+
+def test_a_comparison_a_kernel_selects_by_waits_for_its_selection():
+    """With calls made at once, `x <= s` on a large float64 array waits, so that the `np.where` written on top of it
+    is computed with it; a comparison no kernel selects by, one of two arrays, one written the other way round and
+    one on another element type are made at once."""
+    assert fuse.comparisons_selected_by(fuse.LIBRARY) == frozenset({numpy.less_equal})
+    assert fuse.comparisons_selected_by(["where(gt(mul(V0,sub(V1,V2)),S0),S1,V3)", "add(V0,V1)"]) == frozenset()
+    if not array.core_in_use():
+        pytest.skip("calls are made at once by the C core only")
+    assert fuse.enable()  # As a program has it: small calls and calls no kernel could make are made at once.
+    values = arrays(1, (fuse.AT_ONCE_BELOW,))[0]
+    whole = numpy.arange(fuse.AT_ONCE_BELOW)
+    x, k = lazy.asarray(values), lazy.asarray(whole)
+    waiting = graph.pending_count()
+    made = [x > 0.5, x[:100] <= 0.5, k <= 5, x == 0.5, 0.5 <= x, x <= x]
+    assert graph.pending_count() == waiting
+    mask = x <= 0.5
+    assert graph.pending_count() == waiting + 1
+    # `0.5 >= x` is Python's other spelling of `x <= 0.5`, and the same call.
+    also = [x <= numpy.float64(0.5), x <= 1, numpy.less_equal(x, 0.5), 0.5 >= x]
+    assert graph.pending_count() == waiting + 5 and all(same(values <= 0.5 * (1 + (each is also[1])), each.gather()) for each in also)
+    assert same(values <= 0.5, mask.gather()) and graph.pending_count() == waiting
+    for ours, theirs in zip(made, (values > 0.5, values[:100] <= 0.5, whole <= 5, values == 0.5, 0.5 <= values,
+                                   values <= values)):
+        assert same(theirs, ours.gather())
+    # What a program does with a mask that waited is NumPy's: a selection of elements, a count, another mask, a write.
+    assert same(values[values <= 0.5], x[x <= 0.5].gather())
+    assert numpy.sum(x <= 0.5) == numpy.sum(values <= 0.5)
+    assert same(~(values <= 0.5) | (values <= -1.0), (~(x <= 0.5) | (x <= -1.0)).gather())
+    assert same(values <= values[::-1], (x <= x[::-1]).gather())
+    written, theirs = lazy.asarray(values.copy()), values.copy()
+    written[written <= 0.0] = 0.0
+    theirs[theirs <= 0.0] = 0.0
+    assert same(theirs, written.gather())
+    fuse.STATS.reset()
+    got = numpy.where(x <= 0.5, x * 2.0, x + 1.0).gather()
+    assert same(numpy.where(values <= 0.5, values * 2.0, values + 1.0), got)
+    assert fuse.STATS.calls == {"fuse_mul_s_v_f64": 1, "fuse_add_s_v_f64": 1, "fuse_where_le_f64": 1}
 
 
 @pytest.mark.parametrize("name", [program.name for program in corpus.programs() + codebases.programs() if program.eager])

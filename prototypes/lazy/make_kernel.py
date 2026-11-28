@@ -285,12 +285,14 @@ X86_OPERATIONS = {
     "min": X86Operation("vminpd", "vminsd", 2, "extreme"),
     # A comparison is ordered and quiet, as NumPy's `>` is: false where either operand is a NaN, and no flag.
     "gt": X86Operation("vcmppd", "vcmpsd", 2, "compare"),
+    "le": X86Operation("vcmppd", "vcmpsd", 2, "compare"),
     "where": X86Operation("vblendvpd", "vblendvpd", 3, "select"),
 }
 # The operations only the x86-64 loops have a rule for, as they are written in a kernel's header comment.
-X86_ONLY_FORMS = {"gt": "({0} > {1})", "where": "({0} ? {1} : {2})"}
-# The predicates of the comparisons, as `vcmppd` takes them: greater than, ordered and quiet (_CMP_GT_OQ).
-X86_PREDICATES = {"gt": "0x1e"}
+X86_ONLY_FORMS = {"gt": "({0} > {1})", "le": "({0} <= {1})", "where": "({0} ? {1} : {2})"}
+# The predicates of the comparisons, as `vcmppd` takes them, each ordered and quiet: greater than (_CMP_GT_OQ), and
+# less than or equal (_CMP_LE_OQ).
+X86_PREDICATES = {"gt": "0x1e", "le": "0x12"}
 # The constants an operation reads, by name: the label each has in the kernel's read-only data, and its bits.
 X86_CONSTANTS = {"sign": (".Lsign", "0x8000000000000000"), "magnitude": (".Lmagnitude", "0x7fffffffffffffff")}
 # The registers the integer and pointer arguments arrive in, in order; the ones after them are on the stack, the
