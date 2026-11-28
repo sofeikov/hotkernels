@@ -13,11 +13,17 @@ The selection copies bits, so a NaN of `b` or `c` comes through with its
 sign and payload, and a zero with its sign. A NaN in `a` is not below
 anything, so `c` is taken, as NumPy's comparison and `np.where` give.
 
-The comparison is the quiet one (C's `islessequal`): it raises no flag for
-a NaN, where C's `<=` raises the invalid-operation flag. NumPy's own
-comparison clears that flag before it returns and reports nothing, so a
-kernel that never raises it is NumPy's behaviour, and the layer keeps the
-result for an image with NaNs in it. What a fused kernel may assume of its
+The comparison is meant as the quiet one, which raises no flag for a NaN,
+where C's `<=` raises the invalid-operation flag. NumPy's own comparison
+clears that flag before it returns and reports nothing, so a kernel that
+never raises it is NumPy's behaviour, and the layer keeps its result for
+an image with NaNs in it. The x86-64 assembly compares so (`vcmppd` with
+`_CMP_LE_OQ`). The C reference says so too (`islessequal`), but a compiler
+that takes the flags for unread may compile it to the signalling
+comparison, and clang does on x86-64; where the kernel is built from the
+reference and raises the flag, the layer drops its result and makes
+NumPy's calls, as for every flag NumPy would not have reported, so the
+values are NumPy's either way. What a fused kernel may assume of its
 caller is in [the kernels' README](../README.md).
 """
 import numpy as np
