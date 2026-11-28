@@ -40,10 +40,12 @@
 /* NumPy's own header, for the size and the element type of an array without a call into Python. */
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
+/* And the structure of a ufunc, for the number of inputs it takes. */
+#include <numpy/ufuncobject.h>
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 36
+#define CORE_VERSION 37
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -166,6 +168,9 @@ static PyObject *s_transpose;        /* "transpose", the method behind `x.T` */
 static PyObject *valued;             /* `array.VALUED`: what a lazy array that holds its value alone has in `_seen` */
 static PyTypeObject *Generic;        /* `np.generic`, the type of every NumPy scalar */
 static PyObject *in_place_ufuncs;    /* `array.IN_PLACE_UFUNCS`: the ufunc behind each in-place function of `operator` */
+static PyObject *never_deferred;     /* `array.NEVER_DEFERRED`: functions with no rule, whose one result is a new array */
+static PyObject *at_once_result;     /* `array._made_lazy`: what makes the result of a call made at once lazy */
+static PyObject *out_names;          /* ("out",): the keyword names of a call that names its output and nothing else */
 /* `dtype.kind` of the element types the layer defers, from `rules.DEFERRED_KINDS`, ended by a zero. */
 #define MOST_KINDS 16
 static char deferred_kinds[MOST_KINDS];
@@ -177,7 +182,7 @@ static PyObject *zero, *one, *empty_tuple;
 static PyObject *s_node, *s_made, *s_deferred, *s_observer, *s_limit, *s_settings, *s_last, *s_registry, *s_name,
     *s_unknown, *s_shape, *s_dtype, *s_doubt, *s_call, *s_getitem, *s_basic_shape, *s_out, *s_dunder_name, *s_kind, *s_b,
     *s_setitem, *s_plan, *s_origin_limit, *s_resolve, *s_spec_limit, *s_plan_limit, *s_type_limit, *s_nin, *s_nout, *s_signature,
-    *s_type;
+    *s_type, *s_fallback;
 
 /* ---- Making and freeing the layer's objects. ---- */
 
@@ -2727,6 +2732,7 @@ defer_write(PyObject *target, PyObject *name, PyObject *perform, PyObject *reads
  * `apply` is the function of the `operator` module, `perform` what makes the write. Returns `target` (new
  * reference), `Miss`, or NULL. */
 static PyObject *ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator);
+static PyObject *ufunc_on(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator, int strict);
 static PyObject *number_in_place(PyObject *ufunc, PyObject *target, PyObject *other);
 
 /* The array a write made at once goes into: the memory of `target`'s cell with the target's steps taken of it.
@@ -3667,19 +3673,32 @@ small_pending(PyObject *operand, int *strict)
 
 /* A ufunc called now on operands that have their values (`small_limit`): NumPy's own call, with no rule asked
  * and nothing made but the lazy array that holds the result. Taken when every operand is a lazy array with a value,
- * or a small one still pending, which is computed first (`small_pending`), or a Python number, one at least is an array, and either all have fewer than `small_limit` elements or the call is
- * one no kernel could make. `operator` says that the
- * callable is what an operator's road calls, which is a ufunc or `operator.pow`. Returns a new lazy array,
- * `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's at that line. */
+ * or a small one still pending, which is computed first (`small_pending`), or a plain `ndarray`, or a Python
+ * number, one at least is an array, and either all have fewer than `small_limit` elements or the call is one no
+ * kernel could make. `operator` says that the callable is what an operator's road calls, which is a ufunc or
+ * `operator.pow`; a ufunc called by name is taken only with as many operands as it has inputs, since one more by
+ * position is its output, which is a write (`np.add(a, b, c)`). `strict` says that the result is strict whatever
+ * its operands are: the stand-in that made the call is, and a plain array it is given is strict then. Returns a
+ * new lazy array, `Miss` for what the ordinary road decides, or NULL with NumPy's error, which is the program's
+ * at that line.
+ *
+ * A plain `ndarray` is an operand like a lazy array that has its values: a library's own arrays are plain
+ * whatever its `np` is, and `plain + lazy`, `np.sqrt(plain)` through the stand-in and `lazy * plain` went the
+ * ordinary road for it, which made the plain array lazy first (a node, a cell and a lazy array for each) and
+ * came back through NumPy's protocol: 0.5 to 1.3 µs a call over NumPy's own on 20,000 elements, for 0.1 µs
+ * here. Not while something observes the layer: a recording has a node for each array that came in. */
 static PyObject *
-ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator)
+ufunc_on(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator, int strict)
 {
     if (small_limit == 0 || count < 1 || count > 3 || (!operator && Py_TYPE(ufunc) != Ufunc)) {
         return Miss;
     }
+    if (!operator && ((PyUFuncObject *)ufunc)->nin != count) {
+        return Miss;
+    }
     PyObject *values[3], *held[3] = {NULL, NULL, NULL};
     PyObject *result = Miss;
-    int strict = 0, arrays = 0;
+    int arrays = 0;
     int large = 0, other_type = 0; /* Whether an operand has `small_limit` elements or more; is of another type. */
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *operand = operands[place];
@@ -3706,6 +3725,16 @@ ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int oper
                                         && !(PyArray_NDIM((PyArrayObject *)value) == 0
                                              && whole_kind((PyObject *)PyArray_DESCR((PyArrayObject *)value))));
             values[place] = value;
+            arrays++;
+        } else if (Py_TYPE(operand) == Ndarray) {
+            int observed = is_observed();
+            if (observed != 0) {
+                result = observed < 0 ? NULL : Miss;
+                goto done;
+            }
+            large = large || PyArray_SIZE((PyArrayObject *)operand) >= small_limit;
+            other_type = other_type || (PyObject *)PyArray_DESCR((PyArrayObject *)operand) != fusible_dtype;
+            values[place] = operand;
             arrays++;
         } else if (PyFloat_CheckExact(operand) || PyLong_CheckExact(operand) || PyBool_Check(operand)
                    || PyComplex_CheckExact(operand)) {
@@ -3752,6 +3781,139 @@ done:
     Py_XDECREF(held[1]);
     Py_XDECREF(held[2]);
     return result;
+}
+
+/* `ufunc_on` for operands whose strictness is all there is to say: every road but the stand-in's. */
+static PyObject *
+ufunc_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, int operator)
+{
+    return ufunc_on(ufunc, operands, count, operator, 0);
+}
+
+/* A ufunc called with `out=` made now, into the memory the output has, when nothing at all is pending
+ * (`small_limit`): NumPy's own call on the values with the output's array as `out`, which is what the eager
+ * program does at that line, whoever else knows the memory. `np.maximum(x, 0, out=x)`, `np.exp(x, out=x)`, and
+ * `a += x` on a plain `a`, which NumPy makes as `np.add(a, x, out=(a,))` and hands to the lazy `x`. `target` is
+ * a lazy array with dimensions, of an element type the layer defers, that has its values (`memory_now`), or a
+ * plain `ndarray`; every operand a lazy array that has its values, a plain `ndarray` or a number. `strict` says
+ * that what is written is strict whatever the operands are, as for `ufunc_on`.
+ *
+ * With nothing pending no operation written before the write still waits to read what the output held, so the
+ * copy a deferred write is defined by has no reader, and the write into the memory is NumPy's own meaning, views
+ * included: what `write_now` and `in_place_now` rest on. Those are reached for an in-place operator and for a
+ * write the layer may defer and has seen to fit. This is for every other: an output the program was handed, or
+ * one that is a plain array, went to `array._write` in Python, 4.5 to 6 µs a call over NumPy's own. A strict
+ * value does not go into a plain array, and nothing is done while something observes the layer: both are
+ * Python's to answer. Returns `target` (a new reference), `Miss`, or NULL with NumPy's error, which is the
+ * program's at that line and leaves the output as it was. */
+static PyObject *
+ufunc_into_now(PyObject *ufunc, PyObject *const *operands, Py_ssize_t count, PyObject *target, int strict)
+{
+    int lazy_target = Py_TYPE(target) == Lazy;
+    if (small_limit == 0 || count < 1 || count > 3 || Py_TYPE(ufunc) != Ufunc || PySet_GET_SIZE(pending) != 0
+        || (!lazy_target && Py_TYPE(target) != Ndarray)) {
+        return Miss;
+    }
+    if (((PyUFuncObject *)ufunc)->nin != count || ((PyUFuncObject *)ufunc)->nout != 1) {
+        return Miss; /* Not a call the ufunc has, or one with two outputs: NumPy's to answer, by the ordinary road. */
+    }
+    int observed = is_observed();
+    if (observed != 0) {
+        return observed < 0 ? NULL : Miss;
+    }
+    PyObject *stack[4], *values[3] = {NULL, NULL, NULL};
+    PyObject *result = Miss, *held = NULL, *view = NULL;
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *operand = operands[place];
+        if (Py_TYPE(operand) == Lazy) {
+            PyObject *value = value_of(operand, &strict);
+            if (value == NULL) {
+                result = NULL;
+                goto done;
+            }
+            if (value == Miss) {
+                goto done;
+            }
+            values[place] = value; /* Kept for the length of the call. */
+            stack[place] = value;
+        } else if (Py_TYPE(operand) == Ndarray || PyFloat_CheckExact(operand) || PyLong_CheckExact(operand)
+                   || PyBool_Check(operand) || PyComplex_CheckExact(operand) || PyObject_TypeCheck(operand, Generic)) {
+            stack[place] = operand;
+        } else {
+            goto done;
+        }
+    }
+    if (strict && !lazy_target) {
+        goto done; /* The values of a strict array would leave into a plain one: Python refuses. */
+    }
+    view = lazy_target ? memory_now(target, &held) : Py_NewRef(target);
+    if (view == NULL || view == Miss) {
+        result = view;
+        view = NULL;
+        goto done;
+    }
+    stack[count] = view;
+    PyObject *made = PyObject_Vectorcall(ufunc, stack, (size_t)count, out_names);
+    if (made == NULL) {
+        result = NULL;
+        goto done;
+    }
+    Py_DECREF(made);
+    written_at_once++;
+    result = strict && strict_now(target, held) < 0 ? NULL : Py_NewRef(target);
+done:
+    Py_XDECREF(view);
+    Py_XDECREF(values[0]);
+    Py_XDECREF(values[1]);
+    Py_XDECREF(values[2]);
+    return result;
+}
+
+/* A lazy array for an `ndarray` the program holds, as `array.wrap(value, strict=strict)` makes one: on a node that
+ * has the array for its value and says that its memory is known outside the layer (`exposed`), so that no write
+ * into it is made to wait. Not for a time when something observes the layer, which `graph.leaf` tells of the
+ * node with what made it. Returns a new reference. */
+static PyObject *
+lazy_of_handed(PyObject *value, PyObject *strict)
+{
+    PyObject *shape = PyObject_GetAttr(value, s_shape);
+    PyObject *dtype = shape ? PyObject_GetAttr(value, s_dtype) : NULL;
+    PyObject *node = dtype && PyTuple_CheckExact(shape)
+        ? value_node(Py_NewRef(value), s_array, shape, dtype, strict, zero, NULL, empty_string) : NULL;
+    Py_XDECREF(shape);
+    Py_XDECREF(dtype);
+    if (node == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError, "an array has a shape that is no tuple");
+        }
+        return NULL;
+    }
+    Py_SETREF(SLOT(node, node_at[N_EXPOSED]), Py_NewRef(Py_True));
+    PyObject *lazy = new_lazy(node);
+    Py_DECREF(node);
+    return lazy;
+}
+
+/* `graph.fallback(graph.AT_ONCE, call)`: count one call that is outside the deferred set and was made at once, by
+ * the line of the program that wrote it, and log the line the first time. The function is Python's, read each
+ * time since a test may rebind it; it finds the program's line as it does for the Python road, from the frame
+ * that called into this file. 0, or -1 with an error set. */
+static int
+count_at_once(PyObject *call)
+{
+    PyObject *fallback = PyDict_GetItemWithError(graph_names, s_fallback);
+    if (fallback == NULL) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_AttributeError, "graph.fallback is gone");
+        }
+        return -1;
+    }
+    PyObject *counted = PyObject_CallFunctionObjArgs(fallback, at_once_kind, call, NULL);
+    if (counted == NULL) {
+        return -1;
+    }
+    Py_DECREF(counted);
+    return 0;
 }
 
 /* ---- A road: what stands on `LazyArray` where a method stood, takes the calls it can, and hands the others
@@ -3895,17 +4057,39 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
     if (road->kind == STANDIN_CALL) {
         /* `LazyCallable.__call__`, for the commonest call: lazy arrays and plain values by position, plain values
          * by keyword. Nothing has to be made lazy, so the arguments go to NumPy as they came. `operation` is
-         * `namespace._made_lazy` and `name` the types of a plain value. */
+         * `namespace._made_lazy` and `name` the types of a plain value.
+         *
+         * While calls are made at once (`small_limit`) two more kinds of argument are taken, for the calls below
+         * that are made here on values: a plain `ndarray` by position, which is its own value, and `out=` with a
+         * lazy array or a plain one. Whatever is not made here goes to the Python method with them, which makes
+         * the plain arrays lazy, as it did. */
         if (Py_TYPE(args[0]) != StandInCall) {
             goto python;
         }
         int owned = 1;
         /* Whether an argument is a shape or an axis: a tuple of plain values, which holds no array. */
         int with_tuple = 0;
+        /* How many positional arguments are plain arrays, and what `out=` names when it names an array. */
+        int plain = 0;
+        PyObject *into = NULL;
         PyObject *function = SLOT(args[0], callable_at[F_FUNCTION]);
         for (Py_ssize_t place = 1; place < count + named; place++) {
             if (place < count && Py_TYPE(args[place]) == Lazy) {
                 owned = 0;
+            } else if (place < count && small_limit != 0 && Py_TYPE(args[place]) == Ndarray) {
+                if (plain == 0 && is_observed() != 0) {
+                    PyErr_Clear();
+                    goto python; /* A recording has a node for each array that comes in. */
+                }
+                owned = 0;
+                plain++;
+            } else if (place >= count && small_limit != 0 && into == NULL
+                       && (Py_TYPE(args[place]) == Lazy || Py_TYPE(args[place]) == Ndarray)
+                       && PyUnicode_Compare(PyTuple_GET_ITEM(kwnames, place - count), s_out) == 0) {
+                owned = 0;
+                into = args[place];
+            } else if (small_limit != 0 && PyObject_TypeCheck(args[place], Generic)) {
+                /* A NumPy scalar of the program's own, `np.finfo(t).eps`: a plain value, which holds no array. */
             } else {
                 int is_plain = PySet_Contains(road->name, (PyObject *)Py_TYPE(args[place]));
                 if (is_plain < 0) {
@@ -3926,15 +4110,36 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                 }
             }
         }
+        if (into != NULL) {
+            /* `np.maximum(x, 0, out=x)`, `np.exp(x, out=x)`: a ufunc that writes into an array, and names nothing
+             * else. Made here when nothing is pending. The call's result is its output: the lazy array it was
+             * given, or for a plain array a lazy array on it, which is what the Python method hands to NumPy as
+             * `out` and gets back. */
+            if (named == 1 && !with_tuple && count >= 2) {
+                int strict = plain && SLOT(args[0], callable_at[F_STRICT]) == Py_True;
+                PyObject *written = ufunc_into_now(function, args + 1, count - 1, into, strict);
+                if (written == NULL) {
+                    return NULL;
+                }
+                if (written != Miss) {
+                    if (Py_TYPE(into) == Lazy) {
+                        return written;
+                    }
+                    Py_DECREF(written);
+                    return lazy_of_handed(into, SLOT(args[0], callable_at[F_STRICT]));
+                }
+            }
+            goto python;
+        }
         if (!owned && !named && !with_tuple) {
             /* A ufunc on small arrays that have their values: made here, without NumPy's way round through
              * `__array_ufunc__`. */
-            PyObject *quick = ufunc_now(function, args + 1, count - 1, 0);
+            PyObject *quick = ufunc_on(function, args + 1, count - 1, 0, plain && SLOT(args[0], callable_at[F_STRICT]) == Py_True);
             if (quick != Miss) {
                 return quick;
             }
         }
-        if (!owned && small_limit != 0 && count >= 2 && Py_TYPE(args[1]) == Lazy && Py_TYPE(function) != Ufunc) {
+        if (!owned && !plain && small_limit != 0 && count >= 2 && Py_TYPE(args[1]) == Lazy && Py_TYPE(function) != Ufunc) {
             int alike = PySet_Contains(shaped_like, function);
             if (alike < 0) {
                 PyErr_Clear();
@@ -3979,7 +4184,10 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
              * there and then, with no rule asked. Only for the functions listed as giving one new array that
              * shares no memory with an argument, so the result is an array of its own like any call's. */
             int fresh = PySet_Contains(fresh_functions, function);
-            if (fresh < 0) {
+            /* Whether the call is made now whatever its size, as `ready_now` has it for a node: the planner has
+             * said what a kernel can make, and this function is none of it. A matrix product of a batch. */
+            int any_size = fresh > 0 && fusible_calls != NULL && PySet_Contains(fusible_calls, function) == 0;
+            if (fresh < 0 || PyErr_Occurred()) {
                 PyErr_Clear();
             } else if (fresh) {
                 PyObject *stack[8], *values[8];
@@ -3988,7 +4196,9 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                 for (Py_ssize_t place = 1; ready && place < count + named; place++) {
                     PyObject *arg = args[place];
                     if (Py_TYPE(arg) != Lazy) {
-                        stack[place - 1] = arg; /* A plain value: the loop above saw to that. */
+                        /* A plain value, or a plain array, which is its own: the loop above saw to that. */
+                        stack[place - 1] = arg;
+                        ready = any_size || Py_TYPE(arg) != Ndarray || PyArray_SIZE((PyArrayObject *)arg) < small_limit;
                         continue;
                     }
                     PyObject *value = value_of(arg, &strict);
@@ -4004,7 +4214,7 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                     }
                     values[held++] = value;
                     Py_ssize_t size = count_of(value);
-                    ready = size >= 0 && size < small_limit;
+                    ready = size >= 0 && (any_size || size < small_limit);
                     stack[place - 1] = value;
                 }
                 PyObject *made = ready ? PyObject_Vectorcall(function, stack, (size_t)(count - 1), kwnames) : Miss;
@@ -4025,6 +4235,66 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
                     return lazy;
                 }
             }
+        }
+        if (!owned && small_limit != 0 && Py_TYPE(function) != Ufunc && count + named <= 9) {
+            /* `np.clip(x, lo, hi)`: a function the rules have no rule for, so that a call of it is never a node,
+             * and whose one result is a new array (`never_deferred`). Python makes such a call at once on the
+             * values, after computing what is pending among its arguments (`array._at_once`), and so does this,
+             * for arguments that have their values, whatever their size: 0.6 µs over NumPy's call where the way
+             * through NumPy's protocol and Python took 7.5. The call is outside the deferred set, and is counted
+             * and logged as one, which is 0.4 µs of the 0.6. */
+            int never = PySet_Contains(never_deferred, function);
+            if (never < 0) {
+                PyErr_Clear();
+            } else if (never) {
+                PyObject *stack[8], *values[8];
+                Py_ssize_t held = 0;
+                int ready = 1, strict = SLOT(args[0], callable_at[F_STRICT]) == Py_True;
+                for (Py_ssize_t place = 1; ready && place < count + named; place++) {
+                    PyObject *arg = args[place];
+                    if (Py_TYPE(arg) != Lazy) {
+                        stack[place - 1] = arg; /* A plain value, or a plain array, which is its own. */
+                        continue;
+                    }
+                    PyObject *value = value_of(arg, &strict);
+                    if (value == NULL) {
+                        while (held > 0) {
+                            Py_DECREF(values[--held]);
+                        }
+                        return NULL;
+                    }
+                    if (value == Miss) {
+                        ready = 0;
+                        break;
+                    }
+                    values[held++] = value;
+                    stack[place - 1] = value;
+                }
+                PyObject *source = SLOT(args[0], callable_at[F_SOURCE]);
+                PyObject *made = Miss;
+                if (ready) {
+                    made = count_at_once(source) < 0 ? NULL : PyObject_Vectorcall(function, stack, (size_t)(count - 1), kwnames);
+                }
+                while (held > 0) {
+                    Py_DECREF(values[--held]);
+                }
+                if (made == NULL) {
+                    return NULL;
+                }
+                if (made != Miss) {
+                    if (is_arraylike(made)) {
+                        made_at_once++;
+                        return lazy_of_value(made, source, at_once_kind, strict ? Py_True : Py_False);
+                    }
+                    /* No array: `array._made_lazy` says what leaves then. */
+                    PyObject *lazy = PyObject_CallFunctionObjArgs(at_once_result, made, source, strict ? Py_True : Py_False, NULL);
+                    Py_DECREF(made);
+                    return lazy;
+                }
+            }
+        }
+        if (plain) {
+            goto python; /* Nothing above made the call: the plain arrays are made lazy, and NumPy is asked. */
         }
         if (!owned && Py_TYPE(function) != Ufunc && PyFunction_Check(function) == 0 && Py_TYPE(args[1]) == Lazy) {
             /* A function of NumPy's on a lazy array. NumPy would look through the arguments, find the lazy array
@@ -4130,7 +4400,13 @@ road_call(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kw
         }
         if (named == 1 && PyUnicode_Compare(PyTuple_GET_ITEM(kwnames, 0), s_out) == 0 && PyTuple_CheckExact(args[count])
             && PyTuple_GET_SIZE(args[count]) == 1) {
-            result = write_out(args[1], args + 3, count - 3, PyTuple_GET_ITEM(args[count], 0), frame);
+            /* Made now when nothing is pending, whatever the output is; else a node, for a lazy output the layer
+             * may defer a write into. `a += x` on a plain `a` comes here as `np.add(a, x, out=(a,))`, and what it
+             * gives is `a`. */
+            result = ufunc_into_now(args[1], args + 3, count - 3, PyTuple_GET_ITEM(args[count], 0), 0);
+            if (result == Miss) {
+                result = write_out(args[1], args + 3, count - 3, PyTuple_GET_ITEM(args[count], 0), frame);
+            }
             break;
         }
         if (named) {
@@ -6313,7 +6589,8 @@ module_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "write_kind", &PyUnicode_Type, &write_kind) || take(given, "at_once", &PyUnicode_Type, &at_once_kind) || take(given, "handled_apart", NULL, &handled_apart)
         || take(given, "shaped_like", NULL, &shaped_like) || take(given, "fresh_functions", NULL, &fresh_functions) || take(given, "LazyCallable", &PyType_Type, &standin_call)
         || take(given, "LazyNumPy", &PyType_Type, &standin_module) || take(given, "slots", &PyTuple_Type, &slots)
-        || take(given, "valued", &PyTuple_Type, &valued) || take(given, "in_place_ufuncs", &PyDict_Type, &in_place_ufuncs)) {
+        || take(given, "valued", &PyTuple_Type, &valued) || take(given, "in_place_ufuncs", &PyDict_Type, &in_place_ufuncs)
+        || take(given, "never_deferred", &PyFrozenSet_Type, &never_deferred) || take(given, "at_once_result", NULL, &at_once_result)) {
         return NULL;
     }
     PyObject *generic = PyDict_GetItemString(given, "generic"), *kinds = PyDict_GetItemString(given, "deferred_kinds");
@@ -6981,6 +7258,12 @@ PyInit__core(void)
     s_found = PyUnicode_InternFromString("found");
     s_note = PyUnicode_InternFromString("note");
     s_issue = PyUnicode_InternFromString("issue");
+    s_fallback = PyUnicode_InternFromString("fallback");
+    out_names = s_out ? PyTuple_Pack(1, s_out) : NULL;
+    if (!s_fallback || !out_names) {
+        Py_DECREF(module);
+        return NULL;
+    }
     if (!Miss || !zero || !one || !empty_tuple || !s_node || !s_made || !s_deferred || !s_observer || !s_limit || !s_settings
         || !s_last || !s_registry || !s_name || !s_unknown || !s_shape || !s_dtype || !s_doubt || !s_call || !s_getitem
         || !s_basic_shape || !s_out || !s_kind || !s_b || !s_setitem || !s_plan || !s_origin_limit || !s_resolve || !own_dtypes || !s_spec_limit || !s_plan_limit
