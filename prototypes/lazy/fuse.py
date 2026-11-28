@@ -2123,6 +2123,208 @@ def _watched_under(errstate: dict | None) -> int:
     return bits
 
 
+# The reductions along a last axis of a few elements that `_fused.row_sums` makes, by the node's name. NumPy's mean
+# is its sum divided by the count. `np.max` and `np.min` along such rows were tried and are not here: on x86-64 the
+# sign of a zero and which NaN they give depend on the row's length and the number of rows (`_short_row_sums`).
+ROW_REDUCTIONS = frozenset({"sum", "mean"})
+# The shortest and the longest last axis a sum along it is made by `_fused.row_sums`: `LONGEST_SUMMED_ROW` of
+# `_fused.c`. NumPy adds a row of fewer than eight elements from left to right, starting from 0.0, whichever order
+# its iterator walks the rows in; from eight it adds pairwise. A row of one is a copy, for which NumPy's pass is
+# quick already.
+SHORTEST_SUMMED_ROW, LONGEST_SUMMED_ROW = 2, 7
+# What a sum along rows reads to be one pass with the product: the names of `operation_of` for `a * b` and `a * a`.
+ROW_PRODUCTS = frozenset({"mul", SQUARE})
+# The name the counters give `_fused.row_sums`, with a product and without.
+ROW_SUMS_OF_PRODUCTS, ROW_SUMS = "row_sums(mul)", "row_sums"
+
+
+def _summed_along_short_rows(node: Node) -> bool:
+    """Say whether a node is a sum or a mean along a last axis of a few elements, of a float64 array.
+
+    Args:
+        node: A pending node.
+
+    Returns:
+        True for `np.sum` or `np.mean`, as a function or a method, of a
+        pending node of two dimensions or more and `MIN_ELEMENTS` elements
+        or more, along its last axis alone, by position or as `axis=`, with
+        `keepdims=` or without, whose last axis is `SHORTEST_SUMMED_ROW` to
+        `LONGEST_SUMMED_ROW` long. `dtype=`, `initial=`, `where=` and `out=`
+        are never a node's (`rules.REDUCTION_KEYWORDS`).
+    """
+    if node.kind != rules.REDUCTION or node.name not in ROW_REDUCTIONS or node.dtype != FLOAT64:
+        return False
+    args = node.args
+    reduced = args[0]
+    if type(reduced) is not Node or reduced.dtype != FLOAT64 or not graph.is_known(reduced.shape):
+        return False
+    shape = reduced.shape
+    if len(shape) < 2 or not SHORTEST_SUMMED_ROW <= shape[-1] <= LONGEST_SUMMED_ROW or _elements(shape) < MIN_ELEMENTS:
+        return False
+    axis = args[1] if len(args) > 1 else node.kwargs.get("axis")
+    if axis is None:
+        return False
+    try:
+        along = rules.normalize_axis_tuple(axis, len(shape))
+    except (TypeError, ValueError):
+        return False
+    return along == (len(shape) - 1,)
+
+
+def _short_row_sums(todo: list[Node]) -> list[tuple[Node, Node | None]]:
+    """Find the sums along rows of a few elements in one computation, and the product each may be made with.
+
+    A function of its own so that no name of it refers to a product when
+    references are counted: `held_among` would take it for one the
+    program holds.
+
+    Args:
+        todo: The pending nodes about to be computed. The caller's one list of them.
+
+    Returns:
+        (the sum or mean, the product it adds) for each, where the product
+        is a pending `a * b` or `a * a` of two float64 arrays of its shape,
+        computed here, that nothing but the sum reads and the program
+        holds no lazy array of; None for the product where there is none,
+        and the sum then adds the array it reads once that has its value.
+    """
+    sums = [node for node in todo if node.kind == rules.REDUCTION and _summed_along_short_rows(node)]
+    if not sums:
+        return []
+    taking = {node.number for node in todo}
+    unread: dict[int, int] = {}
+    uses = count_uses(todo, unread)
+    held = held_among(todo, uses, unread)
+    found = []
+    for total in sums:
+        reduced = total.args[0]
+        number = reduced.number
+        product = None
+        if reduced.operation is not None and reduced.kind == rules.ELEMENTWISE and number in taking \
+                and uses.get(number) == 1 and number not in held:
+            read = operation_of(reduced)
+            if read is not None and read[0] in ROW_PRODUCTS and all(
+                    type(arg) in (Node, np.ndarray) and arg.dtype == FLOAT64 and tuple(arg.shape) == reduced.shape
+                    for arg in read[1]):
+                product = reduced
+        found.append((total, product))
+    return found
+
+
+def _in_c_order(value: np.ndarray) -> bool:
+    """Say whether NumPy walks an array in C order: what makes the arrays it computes from it C-contiguous.
+
+    Args:
+        value: A float64 array.
+
+    Returns:
+        True when the strides of its axes longer than one are positive and
+        fall from each such axis to the next: NumPy's iterator then keeps
+        the axes in the order written, and a product or a sum it makes of
+        the array is laid out in C order, which is the layout
+        `_RowSum.run` gives.
+    """
+    before = None
+    for length, stride in zip(value.shape, value.strides):
+        if length == 1:
+            continue
+        if stride <= 0 or (before is not None and stride >= before):
+            return False
+        before = stride
+    return True
+
+
+class _RowSum:
+    """A sum or a mean along a last axis of a few elements, of an array or of a product made with it: one pass.
+
+    NumPy calls its loop once for each row of such a sum, which costs more
+    than the row's arithmetic: `np.sum(a * b, axis=-1)` on four million
+    rows of two is 38 ms of the loop's calls after an 11 ms pass for the
+    products. `_fused.row_sums` walks the rows itself, and multiplies as it
+    adds when the product is computed inside, so there is no array of
+    products. Each product is rounded and each row added from left to
+    right from 0.0, which is NumPy's order for rows this short.
+    """
+
+    __slots__ = ("sources", "members", "target", "watched", "mean")
+
+    def __init__(self, sources: list, members: list[Node], watched: int, mean: bool) -> None:
+        """Remember one planned sum.
+
+        Args:
+            sources: What is added: the array the sum reads, or the two arrays of the product computed inside;
+                nodes or `ndarray`s, of one shape.
+            members: The product, when it is computed inside; otherwise empty.
+            watched: The floating-point exceptions NumPy would report for these nodes, as `_fused`'s bits.
+            mean: Whether the node is a mean, each sum divided by the row's length.
+        """
+        self.sources, self.members, self.watched, self.mean = sources, members, watched, mean
+        # Nothing is written into part of an array here; `Plan.members` clears it with the rest.
+        self.target = None
+
+    def run(self, node: Node) -> bool:
+        """Compute the sum's node by one pass over what it adds.
+
+        Args:
+            node: The pending sum or mean.
+
+        Returns:
+            True when the node has its value. False when it does not: an
+            operand is missing, NumPy would lay out its result otherwise
+            than in C order, or the pass raised an exception NumPy would
+            have reported. The nodes are then NumPy's calls.
+        """
+        if node.origin in _flagged:
+            return False
+        values = []
+        for source in self.sources:
+            if type(source) is Node:
+                if source.operation is not None or source.failure is not None:
+                    return False
+                source = source.value
+            if type(source) is not np.ndarray or not _in_c_order(source):
+                STATS.declined += 1
+                return False
+            values.append(source)
+        first = values[0]
+        second = values[1] if len(values) > 1 else (first if self.members and len(values) == 1 else None)
+        width = first.shape[-1]
+        sums = np.empty(first.shape[:-1])
+        raised = _fused.row_sums(sums, first, second, width if self.mean else 0)
+        if raised == _fused.DECLINED:
+            STATS.declined += 1
+            return False
+        if raised & self.watched:
+            STATS.flagged += 1
+            _leave_to_numpy(node.origin)
+            return False
+        node.value = sums.reshape(node.shape) if len(node.shape) == first.ndim else sums
+        graph.settle(node)
+        name = ROW_SUMS_OF_PRODUCTS if second is not None else ROW_SUMS
+        STATS.calls[name] = STATS.calls.get(name, 0) + 1
+        STATS.fused_nodes += len(self.members)
+        self.sources, self.members = (), ()
+        return True
+
+
+def _plan_row_sum(total: Node, product: Node | None, planned: Plan) -> None:
+    """Plan a sum along rows of a few elements as one pass, with its product inside when it has one.
+
+    Args:
+        total: The sum or mean.
+        product: The `a * b` or `a * a` it adds, computed inside; None to add the array it reads.
+        planned: The computation's plan, which gains the group.
+    """
+    watched = _watched_under(total.errstate)
+    if product is None:
+        sources, members = [total.args[0]], []
+    else:
+        sources, members = list(operation_of(product)[1]), [product]
+        watched |= _watched_under(product.errstate)
+        planned.inner.add(product.number)
+    planned.groups[total.number] = _RowSum(sources, members, watched, total.name == "mean")
+
+
 def plan(todo: list[Node]) -> Plan | None:
     """Plan one computation: which of its nodes a kernel call computes together.
 
@@ -2140,9 +2342,15 @@ def plan(todo: list[Node]) -> Plan | None:
         # Nothing here is large enough to be worth reading expressions off: the computation is NumPy's calls.
         STATS.planning_ns += time.perf_counter_ns() - started
         return None
+    # Before the expressions are read: a product a sum along rows adds is computed with the sum, not by itself.
+    row_sums = _short_row_sums(todo)
     expressions, _ = find(todo, MIN_ELEMENTS)
     planned = Plan()
+    for total, product in row_sums:
+        _plan_row_sum(total, product, planned)
     for expression in expressions:
+        if expression.root.number in planned.inner:
+            continue  # A product a sum along rows makes.
         STATS.expressions += 1
         _plan_expression(expression, planned)
     STATS.planning_ns += time.perf_counter_ns() - started
