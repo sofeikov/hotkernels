@@ -56,6 +56,9 @@ WRITING_UFUNC_METHOD = "at"
 VIEW_PARAMETERS = ("dtype", "type")
 # The call a view made at once is counted and reported as.
 VIEW_CALL = "ndarray.view"
+# The index that `x.view()` is deferred as: `x[...]`, written as the tuple `_plain_item` reads, so that the view is
+# one whose shape the layer knows without asking NumPy and an assignment through it is known to fit the same way.
+WHOLE_INDEX = (Ellipsis,)
 
 
 # In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
@@ -708,6 +711,31 @@ def _view_request(args: tuple, kwargs: dict) -> tuple[bool, tuple, dict]:
     # A call `view` does not have, or an array type beside `type`: NumPy says which, of `ndarray`.
     return (False, tuple(np.ndarray if arg is LazyArray else arg for arg in args),
             {name: np.ndarray if value is LazyArray else value for name, value in kwargs.items()})
+
+
+def _is_viewed_by_index(target: "LazyArray") -> bool:
+    """Say whether `x[...]` of a lazy array is what NumPy's `x.view()` would give, and is an index the layer defers.
+
+    For an `ndarray` of one dimension or more the two are the same view.
+    They differ for a number, whose view is a number where `x[...]` is an
+    array without dimensions, and they may differ for a subclass of
+    `ndarray`, which has methods of its own for both.
+
+    Args:
+        target: The array `view` was called on.
+
+    Returns:
+        True for an array of one dimension or more, no dimension of length
+        zero and an element type the layer defers, that is pending or has
+        an exact `ndarray` for its value. Nothing is computed to answer,
+        and an array that holds its value alone is given no node for it.
+    """
+    held = target._held
+    if type(held) is not _Cell:
+        # The value alone, as the C core leaves the result of a call it made at once.
+        return type(held) is np.ndarray and held.ndim > 0 and held.dtype.kind in rules.DEFERRED_KINDS and 0 not in held.shape
+    node = target._node
+    return node.shape != () and rules.is_admissible(node) and (node.pending or type(node.value) is np.ndarray)
 
 
 def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict) -> Any:
@@ -2168,13 +2196,8 @@ class LazyArray:
             Exception: NumPy's own, for arguments `ndarray.view` does not take.
         """
         whole, args, kwargs = _view_request(args, kwargs)
-        if whole and self.shape != ():
-            node = self._node
-            if node.pending or type(node.value) is np.ndarray:
-                deferred = _try_defer(operator.getitem, "getitem", (self, Ellipsis), {}, None, sys._getframe(1))
-                # Not `deferred or ...`: a truth test of a lazy array would compute it.
-                if deferred is not None:
-                    return deferred
+        if whole and _is_viewed_by_index(self):
+            return self[WHOLE_INDEX]
         return _at_once(_method("view"), VIEW_CALL, (self,) + args, kwargs)
 
     def nonzero(self) -> "tuple[LazyArray, ...]":

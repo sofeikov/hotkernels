@@ -488,6 +488,202 @@ def test_a_write_reaches_every_view_and_a_write_through_a_view_reaches_the_array
         assert same(plain, mine.gather()), name
 
 
+# ---- `x.view(type(x))`: how NumPy code keeps the kind of array it was given.
+
+# The ways a call asks for the same elements with no change of element type: each given the array, it makes the call.
+WHOLE_VIEWS = {
+    "no argument": lambda x: x.view(),
+    "its own type": lambda x: x.view(type(x)),
+    "its own type as type": lambda x: x.view(type=type(x)),
+    "its own type as dtype": lambda x: x.view(dtype=type(x)),
+    "ndarray": lambda x: x.view(numpy.ndarray),
+    "ndarray as type": lambda x: x.view(type=numpy.ndarray),
+}
+# Calls of `view` that NumPy refuses, each given the array and its type.
+REFUSED_VIEWS = {
+    "its type and None": lambda x, kind: x.view(kind, None),
+    "its type twice": lambda x, kind: x.view(kind, kind),
+    "its type under both names": lambda x, kind: x.view(dtype=kind, type=kind),
+    "another array type beside it": lambda x, kind: x.view(numpy.matrix, kind),
+    "its type by position and dtype by name": lambda x, kind: x.view(kind, dtype=numpy.int64),
+    "a keyword view does not have": lambda x, kind: x.view(kind, order="C"),
+    "three arguments": lambda x, kind: x.view(None, kind, kind),
+    "None as type": lambda x, kind: x.view(type=None),
+    "an element type that does not fit": lambda x, kind: x.view(numpy.complex128, kind),
+}
+
+
+def laid_out_like(expected: numpy.ndarray, got: numpy.ndarray) -> bool:
+    """Say whether two arrays lie in memory the same way, beyond what `same` compares.
+
+    Args:
+        expected: What eager NumPy returned.
+        got: What `gather()` returned.
+
+    Returns:
+        True when the strides agree, and whether each is a view of other memory and may be written.
+    """
+    return (expected.strides == got.strides and (expected.base is None) == (got.base is None)
+            and expected.flags.owndata == got.flags.owndata and expected.flags.writeable == got.flags.writeable)
+
+
+@pytest.mark.parametrize("spelling", sorted(WHOLE_VIEWS))
+def test_a_view_by_the_arrays_own_type_is_a_view_of_the_array(spelling: str):
+    """`x.view(type(x))`, `x.view()` and `x.view(np.ndarray)` are deferred, and are NumPy's view: bits and layout."""
+    view = WHOLE_VIEWS[spelling]
+    special = numpy.array([[numpy.nan, -0.0, numpy.inf, 1.5], [-numpy.inf, 0.0, 5e-324, -numpy.nan]])
+
+    def program(np):
+        """View an array as it is made, one out of order, one that steps, one of one element, and one pending."""
+        made = np.asarray(special)
+        turned = np.asarray(special).T
+        stepped = np.asarray(numpy.arange(24.0).reshape(4, 6))[::2, 1::2]
+        one = np.asarray(numpy.array([7.0]))
+        pending = np.asarray(numpy.arange(6, dtype=numpy.int32)) * 3
+        return view(made), view(turned), view(stepped), view(one), view(pending), view(view(pending))
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert all(type(each) is LazyArray and each._node.pending for each in got) and graph.COUNTS.at_once == {}
+    for plain, mine in zip(expected, got, strict=True):
+        value = mine.gather()
+        assert same(plain, value) and laid_out_like(plain, value)
+
+
+def test_matplotlibs_array_of_normals_is_written_through_its_view():
+    """`np.empty(shape).view(type(x))` is an array the program fills: the writes wait, and the values are NumPy's."""
+    def program(np):
+        """Make the normals of a surface as `LightSource.hillshade` does, and scale each to length one."""
+        elevation = np.asarray(numpy.linspace(0.0, 5.0, 12).reshape(3, 4) ** 2)
+        normal = np.empty(elevation.shape + (3,)).view(type(elevation))
+        normal[..., 0] = -elevation
+        normal[..., 1] = elevation * 0.5
+        normal[..., 2] = 1
+        length = 0
+        for axis in range(3):
+            length = length + normal[..., axis, np.newaxis] ** 2
+        normal /= np.sqrt(length)
+        return normal, normal[..., 2], normal.sum()
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert all(each._node.pending for each in got) and graph.COUNTS.at_once == {}
+    for plain, mine in zip(expected, got, strict=True):
+        assert same(plain, mine.gather())
+
+
+def test_a_write_is_seen_through_a_view_by_type_both_ways():
+    """The view and the array are one memory: a write into either shows in the other, before and after computing."""
+    def program(np):
+        """Write into an array and into its view by type, in turn."""
+        base = np.zeros((2, 3)) + 1.0
+        view = base.view(type(base))
+        view[0, 1] = 5.0
+        base[1] = view[0] * 2.0
+        view *= -1.0
+        again = view.view(type(view))
+        again[1, 2] = numpy.nan
+        return base, view, again
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert all(each._node.pending for each in got) and graph.COUNTS.at_once == {}
+    for plain, mine in zip(expected, got, strict=True):
+        assert same(plain, mine.gather())
+    base, view, _ = got
+    base[0, 0] = 9.0  # After computing: the same memory still.
+    view[1, 0] = 8.0
+    assert view.gather()[0, 0] == 9.0 and base.gather()[1, 0] == 8.0
+
+
+def test_a_view_by_type_that_changes_the_elements_is_numpys_at_once():
+    """An element type beside the array's own type is NumPy's reading of the same bytes; the type itself is dropped."""
+    def program(np):
+        """Read float64 as int64 and as pairs of float32, and int64 as NumPy reads it for `None`."""
+        x = np.asarray(numpy.array([[1.5, -0.0], [numpy.nan, numpy.inf]]))
+        whole = np.asarray(numpy.arange(4))
+        return (x.view(numpy.int64, type(x)), x.view(dtype=numpy.float32, type=type(x)), x.view(numpy.int64),
+                whole.view(None, type(whole)), whole.view(None))
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert graph.COUNTS.at_once == {"ndarray.view": len(expected)}
+    for plain, mine in zip(expected, got, strict=True):
+        assert same(plain, mine.gather()) and laid_out_like(plain, mine.gather())
+
+
+def test_a_view_by_type_of_what_the_layer_does_not_defer_is_numpys_at_once():
+    """No dimension, no element, an element type outside the deferred set: NumPy's own `view` on the value."""
+    def program(np):
+        """View a number, an array without dimensions, an empty array and an array of strings by their own type."""
+        x = np.asarray(numpy.arange(6.0))
+        number = x.sum()
+        alone = np.asarray(numpy.array(3.0))
+        empty = np.asarray(numpy.empty((0, 3)))
+        words = np.asarray(numpy.array(["a", "bc"]))
+        return (number.view(type(number)), alone.view(type(alone)), empty.view(type(empty)), words.view(type(words)),
+                number.view(), alone.view(numpy.ndarray))
+
+    expected = program(numpy)
+    graph.COUNTS.reset()
+    got = program(lazy)
+    assert graph.COUNTS.at_once["ndarray.view"] == len(expected)
+    for plain, mine in zip(expected, got, strict=True):
+        assert same(plain, mine.gather())
+    # A number stays a number, as `np.float64(15.0).view()` does; `x[...]` of it would be an array.
+    assert type(got[0].gather()) is numpy.float64 and type(got[1].gather()) is numpy.ndarray
+
+
+def test_a_view_by_type_of_a_selection_by_a_mask_is_numpys():
+    """Rows a mask selects, some and none: the view is of what was selected, and a write through it reaches that."""
+    def program(np):
+        """Select rows by a mask, view each selection by its own type, and write through one view."""
+        x = np.asarray(numpy.arange(12.0).reshape(4, 3))
+        some, none = x[x[:, 0] > 2], x[x[:, 0] > 99]
+        first, second = some.view(type(some)), none.view(type(none))
+        first[0, 1] = -1.0
+        return first, second, some, first * 2, second + 1
+
+    expected = program(numpy)
+    for plain, mine in zip(expected, program(lazy), strict=True):
+        assert same(plain, mine.gather())
+
+
+def test_a_view_by_type_keeps_the_kind_of_array_the_value_is():
+    """A lazy array that holds a matrix or a masked array is viewed by NumPy's method: its own type keeps the kind."""
+    data = numpy.arange(6.0).reshape(2, 3)
+    for kind in (numpy.matrix, numpy.ma.MaskedArray):
+        held = lazy.asarray(data).view(kind)
+        plain = data.view(kind)
+        assert type(held) is LazyArray and type(held.gather()) is kind
+        own, stripped = held.view(type(held)), held.view(numpy.ndarray)
+        assert same(plain.view(type(plain)), own.gather()) and same(plain.view(numpy.ndarray), stripped.gather())
+        assert same(plain.view(), held.view().gather())
+
+
+@pytest.mark.parametrize("spelling", sorted(REFUSED_VIEWS))
+def test_a_view_numpy_refuses_is_refused_the_same_way(spelling: str):
+    """An array type given twice, a keyword `view` lacks, an element type that does not fit: NumPy's error and words."""
+    call = REFUSED_VIEWS[spelling]
+    data = numpy.arange(6.0).reshape(2, 3)
+    theirs = raised(lambda: call(data, numpy.ndarray))
+    ours = raised(lambda: call(lazy.asarray(data), LazyArray))
+    assert type(ours) is type(theirs) and str(ours) == str(theirs)
+
+
+def test_a_view_by_type_of_a_strict_array_is_strict():
+    """The view refuses its values without `gather()` as the array does, deferred or made at once."""
+    x = strict.asarray(numpy.arange(6.0).reshape(2, 3))
+    for view in (x.view(type(x)), x.view(numpy.int64, type(x))):
+        assert view._node.strict
+        with pytest.raises(NotGathered):
+            float(view[0, 0])
+
+
 def test_a_number_is_not_written_in_place():
     """`s += v` on what NumPy gives as a number makes a new lazy array, deferred, and leaves the old one alone."""
     s = (lazy.arange(4.0) * 2).sum()
