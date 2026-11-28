@@ -649,10 +649,9 @@ def _lendable(node: Node) -> Node | None:
     `a * b`, a temporary nothing else holds, and frees each temporary as
     soon as it is read, so the next array of that size is pages already in
     use. A graph's intermediates are each held by a node until their last
-    reader has run, and were each a new array: on Astropy's models, where
-    every source is a formula of a dozen operations on a million pixels,
-    the run computed node by node took 1.1x the eager program's time for
-    it. The result is the same when it is written into an operand's memory
+    reader has run, and were each a new array: computed node by node,
+    pvlib's solar position took 1.05x the eager program's time, and takes
+    0.95x with this (docs/lazy-codebases-findings.md). The result is the same when it is written into an operand's memory
     with `out=`: an operation element by element reads each element before
     it writes it. That is done when all of this holds:
 

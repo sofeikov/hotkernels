@@ -53,7 +53,7 @@ Four things to take from it:
 - **Each computation is one graph.** The nodes computed together, because one thing asked for them, are the unit that anything computing a graph differently is handed.
 - **A value needed is computed, not refused.** In *A value needed*, the `if` needs True or False on its line. The layer computes what the test reads, logs the line, and the program carries on.
 
-A node is computed once. Its value is kept for as long as the program holds the lazy array, and an intermediate that nobody holds is freed as soon as the last node that reads it has been computed, as NumPy frees a temporary.
+A node is computed once. Its value is kept for as long as the program holds the lazy array, and an intermediate that nobody holds is freed as soon as the last node that reads it has been computed, as NumPy frees a temporary. Where nothing else reads it, a large intermediate's memory takes the result of the call that reads it, as NumPy writes `a * b + c` into the memory of `a * b`.
 
 ## One line, and nothing patched
 
