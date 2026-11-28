@@ -109,24 +109,99 @@ typedef struct {
     int stepped;
 } operand;
 
+/* Finds the order in which the dimensions of `out` are walked: the order its elements lie in memory.
+ *
+ * Args:
+ *   out: The array a call fills.
+ *   dimensions: How many dimensions it has.
+ *   order: Filled in: for each dimension of the walk, outermost first, which dimension of `out` it is.
+ *   shape: Filled in: the length of each dimension of the walk.
+ *   sorted: Set to 1 when the walk is in another order than the dimensions are written in, else to 0.
+ *
+ * Returns 1, or 0 when the call is to be declined.
+ * NumPy's loops walk the operands of an operation in the order of memory: its iterator sorts the dimensions by
+ * stride, largest outermost, and leaves two of one stride in the order they are written in. So does this, for
+ * `out`: `np.mgrid[...].transpose(1, 2, 0) % 1` is an array of shape (m, n, 2) whose last dimension is the slowest
+ * in memory, and it is walked as two runs of m * n elements and not as m * n rows of two. Where the strides
+ * already fall from each dimension to the next the order is the one written, whatever the strides are, and
+ * `read_operand` has the rest of the rule. Where they do not, an empty array, a stride below zero and a dimension
+ * of length one are declined. NumPy gives a dimension of length one no stride when it sorts, the place of such a
+ * dimension in the order then depends on which of its loops an operation takes, and with it the strides of the
+ * result: not something to get nearly right.
+ */
+static int
+walk_order(PyArrayObject *out, int dimensions, int *order, npy_intp *shape, int *sorted)
+{
+    int rises = 0;
+    npy_intp previous = NPY_MAX_INTP;
+    for (int axis = 0; axis < dimensions; axis++) {
+        order[axis] = axis;
+        shape[axis] = PyArray_DIM(out, axis);
+        if (shape[axis] == 0) {
+            return 0;
+        }
+        if (shape[axis] != 1) {
+            npy_intp stride = PyArray_STRIDE(out, axis);
+            rises = rises || stride > previous;
+            previous = stride;
+        }
+    }
+    *sorted = rises;
+    if (!rises) {
+        return 1;
+    }
+    for (int axis = 0; axis < dimensions; axis++) {
+        if (shape[axis] == 1 || PyArray_STRIDE(out, axis) <= 0) {
+            return 0;
+        }
+    }
+    /* An insertion sort, largest stride first. A dimension moves only past a smaller stride, never past an equal
+     * one, so dimensions of one stride stay in the order they are written in. */
+    for (int place = 1; place < dimensions; place++) {
+        int axis = order[place], at = place;
+        npy_intp stride = PyArray_STRIDE(out, axis);
+        for (; at > 0 && PyArray_STRIDE(out, order[at - 1]) < stride; at--) {
+            order[at] = order[at - 1];
+        }
+        order[at] = axis;
+    }
+    for (int axis = 0; axis < dimensions; axis++) {
+        shape[axis] = PyArray_DIM(out, order[axis]);
+    }
+    return 1;
+}
+
 /* Reads an operand's layout against the shape walked.
  *
  * Args:
  *   object: A float64 array, or a Python float.
- *   dimensions, shape: The shape the expression runs over.
+ *   dimensions, shape: The shape the expression runs over, in the order of the walk.
+ *   order: For each dimension of the walk, which dimension of the expression it is; from `walk_order`.
+ *   sorted: 1 when that is another order than the dimensions are written in.
  *   vector: 1 for an operand the kernel reads along the innermost dimension, 0 for a number.
- *   read: Filled in.
+ *   read: Filled in, its strides in the order of the walk.
  *
  * Returns 1 when the operand can be walked, 0 when the call is to be declined.
  * An array is taken when it is a plain `ndarray` of native aligned float64
  * that broadcasts to the shape: each of its dimensions is the shape's or 1.
- * Its strides must be positive and must not grow from one dimension to the
- * next: then NumPy's own result for it is laid out in C order, as `out` is.
- * A vector moves by one element along the innermost dimension; a number
- * that is an array has length 1 there.
+ * Its strides must be positive and must not grow from one dimension of the
+ * walk to the next: then NumPy's own result for it is laid out in the order
+ * of the walk, as `out` is. A vector moves by one element along the innermost
+ * dimension; a number that is an array has length 1 there.
+ *
+ * In a walk that is sorted the rule is narrower, because the layout NumPy
+ * gives a result is then decided by every operation of the expression, of
+ * which this module sees only the arrays. An array has every dimension of the
+ * shape, or is one element. One that is the same along a dimension would
+ * leave the order of that dimension to the other operand of its operation,
+ * and `row + column` is in C order whatever a third array is. And where two
+ * dimensions are walked in the other order than they are written in, the
+ * outer one's stride is the larger and not merely as large: of two equal
+ * strides NumPy takes the order written.
  */
 static int
-read_operand(PyObject *object, int dimensions, const npy_intp *shape, int vector, operand *read)
+read_operand(PyObject *object, int dimensions, const npy_intp *shape, const int *order, int sorted, int vector,
+             operand *read)
 {
     if (PyFloat_CheckExact(object)) {
         if (vector) {
@@ -152,11 +227,13 @@ read_operand(PyObject *object, int dimensions, const npy_intp *shape, int vector
     read->stepped = 0;
     read->data = PyArray_BYTES(array);
     npy_intp previous = NPY_MAX_INTP;
+    int same = 0; /* The dimensions of the walk along which the array is one element. */
     for (int axis = 0; axis < dimensions; axis++) {
-        int theirs = axis - (dimensions - own);
+        int theirs = order[axis] - (dimensions - own);
         npy_intp length = theirs < 0 ? 1 : PyArray_DIM(array, theirs);
         if (length == 1) {
             read->strides[axis] = 0; /* Broadcast, or a dimension with nothing to step over. */
+            same++;
             continue;
         }
         if (length != shape[axis]) {
@@ -166,8 +243,14 @@ read_operand(PyObject *object, int dimensions, const npy_intp *shape, int vector
         if (stride <= 0 || stride > previous) {
             return 0;
         }
+        if (sorted && axis > 0 && stride == previous && order[axis - 1] > order[axis]) {
+            return 0;
+        }
         previous = stride;
         read->strides[axis] = stride;
+    }
+    if (sorted && same != 0 && same != dimensions) {
+        return 0; /* No dimension of a sorted walk has length one, so this array is the same along one of them. */
     }
     npy_intp inner = read->strides[dimensions - 1];
     if (vector) {
@@ -249,26 +332,24 @@ fused_elementwise(PyObject *module, PyObject *const *args, Py_ssize_t count)
         return PyLong_FromLong(DECLINED);
     }
     npy_intp shape[MOST_DIMENSIONS];
-    for (int axis = 0; axis < dimensions; axis++) {
-        shape[axis] = PyArray_DIM(out, axis);
-        if (shape[axis] == 0) {
-            return PyLong_FromLong(DECLINED);
-        }
+    int order[MOST_DIMENSIONS], sorted;
+    if (!walk_order(out, dimensions, order, shape, &sorted)) {
+        return PyLong_FromLong(DECLINED);
     }
     /* The operands, the kernel's arrays first, then `out`, then its numbers. */
     operand reads[MOST_INTEGERS + MOST_NUMBERS];
     for (int place = 0; place < vectors; place++) {
-        if (!read_operand(PyTuple_GET_ITEM(args[1], place), dimensions, shape, 1, &reads[place]) || reads[place].stepped) {
+        if (!read_operand(PyTuple_GET_ITEM(args[1], place), dimensions, shape, order, sorted, 1, &reads[place]) || reads[place].stepped) {
             return PyLong_FromLong(DECLINED);
         }
     }
     operand *target = &reads[vectors];
-    if (!read_operand((PyObject *)out, dimensions, shape, 1, target) || target->stepped) {
+    if (!read_operand((PyObject *)out, dimensions, shape, order, sorted, 1, target) || target->stepped) {
         return PyLong_FromLong(DECLINED);
     }
     operand *numbers = &reads[vectors + 1];
     for (int place = 0; place < scalars; place++) {
-        if (!read_operand(PyTuple_GET_ITEM(args[1], vectors + place), dimensions, shape, 0, &numbers[place])) {
+        if (!read_operand(PyTuple_GET_ITEM(args[1], vectors + place), dimensions, shape, order, sorted, 0, &numbers[place])) {
             return PyLong_FromLong(DECLINED);
         }
     }
@@ -1334,26 +1415,24 @@ fused_program(PyObject *module, PyObject *const *args, Py_ssize_t count)
         return PyLong_FromLong(DECLINED);
     }
     npy_intp shape[MOST_DIMENSIONS];
-    for (int axis = 0; axis < dimensions; axis++) {
-        shape[axis] = PyArray_DIM(out, axis);
-        if (shape[axis] == 0) {
-            return PyLong_FromLong(DECLINED);
-        }
+    int order[MOST_DIMENSIONS], sorted;
+    if (!walk_order(out, dimensions, order, shape, &sorted)) {
+        return PyLong_FromLong(DECLINED);
     }
     /* The operands as the walk sees them: the arrays, then `out`, then the numbers. */
     operand reads[2 * MOST_OPERANDS + 1];
     for (int place = 0; place < arrays; place++) {
-        if (!read_operand(PyTuple_GET_ITEM(args[2], place), dimensions, shape, 1, &reads[place])) {
+        if (!read_operand(PyTuple_GET_ITEM(args[2], place), dimensions, shape, order, sorted, 1, &reads[place])) {
             return PyLong_FromLong(DECLINED);
         }
     }
     operand *target = &reads[arrays];
-    if (!read_operand((PyObject *)out, dimensions, shape, 1, target)) {
+    if (!read_operand((PyObject *)out, dimensions, shape, order, sorted, 1, target)) {
         return PyLong_FromLong(DECLINED);
     }
     operand *numbers = &reads[arrays + 1];
     for (int place = 0; place < numbers_given; place++) {
-        if (!read_operand(PyTuple_GET_ITEM(args[2], arrays + place), dimensions, shape, 0, &numbers[place])) {
+        if (!read_operand(PyTuple_GET_ITEM(args[2], arrays + place), dimensions, shape, order, sorted, 0, &numbers[place])) {
             return PyLong_FromLong(DECLINED);
         }
     }

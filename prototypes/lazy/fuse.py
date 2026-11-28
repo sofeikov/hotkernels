@@ -1673,9 +1673,42 @@ def _copies(operands: tuple) -> tuple[int, int]:
         if operand.shape[-1] == 1:
             if operand.size > 1:
                 filled.add(where)
-        elif operand.strides[-1] != operand.itemsize:
+        elif operand.strides[-1] != operand.itemsize and operand.itemsize not in operand.strides:
+            # No dimension of it is a run of elements side by side. One that has such a dimension elsewhere than
+            # last is an array left out of order (`a.T`), which the module walks in the order of memory.
             seen.add(where)
     return (len(seen), len(filled)) if seen else (0, 0)
+
+
+def _out_of_order(operands: tuple, shape: tuple[int, ...]) -> np.ndarray | None:
+    """Find the array whose layout NumPy gives a program's result, where that is not C order.
+
+    NumPy gives the result of an operation the order its operands lie in
+    memory: `a.T * 2` of a C-ordered `a` is Fortran-ordered, and a later sum
+    of it adds in that order. `_fused.program` walks its arrays in the order
+    of the array it fills and declines operands that lie otherwise, so new
+    memory in C order is right for nearly every program and is what is tried
+    first. This is asked when that was declined.
+
+    Args:
+        operands: What the program reads: arrays and numbers.
+        shape: The shape of the result.
+
+    Returns:
+        The first array among the operands of the result's shape, when a
+        stride of it is larger than the one before it, so that
+        `np.empty_like` of it is memory in that array's order. None when
+        there is no array of the shape or the first lies in C order: the
+        module then declined for another reason. Whether every other
+        operand lies as this one does is the module's to say.
+    """
+    for operand in operands:
+        if type(operand) is np.ndarray and operand.shape == shape:
+            strides = operand.strides
+            if any(strides[axis] < strides[axis + 1] for axis in range(len(strides) - 1)):
+                return operand
+            return None
+    return None
 
 
 def _bytes_of(array: np.ndarray) -> tuple[int, int] | None:
@@ -1863,6 +1896,29 @@ class _Group:
             return COPIED
         return THROUGH if reading and self.watched else INTO_ARRAY
 
+    def _into_new(self, operands: tuple, shape: tuple[int, ...]) -> tuple[int, np.ndarray]:
+        """Run the group's program into new memory, laid out as NumPy lays out the result.
+
+        Args:
+            operands: What the program reads.
+            shape: The shape of the result.
+
+        Returns:
+            (what `_fused.program` returned, the memory it filled). The
+            memory is in C order, and where the module declines that and an
+            array read is left out of order by the call that made it
+            (`np.mgrid[...].transpose(1, 2, 0) % 1`), in that array's order,
+            which the module then walks if every array lies so.
+        """
+        out = np.empty(shape)
+        raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
+        if raised == _fused.DECLINED:
+            like = _out_of_order(operands, shape)
+            if like is not None:
+                out = np.empty_like(like)
+                raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
+        return raised, out
+
     def _elementwise(self, write: Node | None, operands: tuple, how: str, origin: Any = None) -> tuple[int, Any]:
         """Make the group's kernel call into the memory its result belongs in.
 
@@ -1881,19 +1937,18 @@ class _Group:
             it, or new memory where every element is written.
         """
         if write is None:
-            value = out = np.empty(self.shape)
-            return _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS), value
+            return self._into_new(operands, self.shape)
         old = write.args[0]
         if (self.result != STORE and type(old) is Node and old.operation is not None and old.failure is None
                 and any(old is member for member in self.members)):
             # What the array held is an operation this program makes itself (`e = a - b; e /= s`): there is no
             # memory of the array's yet, and the write's value is new memory, as the operation's would have been.
-            value = out = np.empty(self.shape)
-            return _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS), value
+            return self._into_new(operands, self.shape)
         if type(old) is not Node or old.operation is not None or old.failure is not None:
             return _fused.DECLINED, None
         memory = old.value
         through = self.result == STORE and how != INTO_ARRAY
+        made = None
         if self.result != STORE:
             # The whole array is written: where it is, or into new memory laid out as it is. Never a copy.
             value = out = memory if how == INTO_ARRAY else np.empty_like(memory)
@@ -1911,8 +1966,9 @@ class _Group:
             # into the array itself (`x[i] += e` where an exception may be reported), or into a copy of it when
             # something else still reads what it held. A pass more; and no array is copied for a result that
             # is dropped or a program that is declined.
-            value, out = None, np.empty(self.target.of(memory).shape)
-        raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
+            value = None
+            made, out = self._into_new(operands, self.target.of(memory).shape)
+        raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS) if made is None else made
         kept = raised != _fused.DECLINED and not raised & self.watched
         if kept and through:
             if how == THROUGH:
