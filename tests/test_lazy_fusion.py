@@ -28,7 +28,7 @@ import pytest
 
 from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, make_kernel, record_graphs
 from judge.spec import In, Scalar, load_spec
-from prototypes.lazy.programs import codebases, corpus
+from prototypes.lazy.programs import codebases, corpus, limit
 
 # Seed of every random array in these tests.
 SEED = 0
@@ -112,6 +112,30 @@ def same(expected: Any, got: Any) -> bool:
     """
     return (type(expected) is type(got) and expected.dtype == got.dtype and expected.shape == got.shape
             and expected.tobytes() == got.tobytes())
+
+
+def same_but_for_which_nan(expected: Any, got: Any) -> bool:
+    """Say whether two results are the same but for which NaN stands where both have one.
+
+    Which NaN comes of two of different sign is the one thing the design
+    leaves open (docs/lazy-fusion-design.md, "Why the bits are NumPy's").
+    On x86-64 an invalid operation makes a NaN with its sign bit set and
+    `np.nan` has it clear, so arrays that hold `np.nan` beside infinities
+    and zeros have both kinds, and NumPy's own loops do not keep to one
+    order of operands there.
+
+    Args:
+        expected: What eager NumPy returned, as an array.
+        got: What `gather()` returned, as an array.
+
+    Returns:
+        True when they have one type, element type and shape, a NaN in the
+        same places, and the same bits everywhere else.
+    """
+    if type(expected) is not type(got) or expected.dtype != got.dtype or expected.shape != got.shape:
+        return False
+    theirs, ours = numpy.isnan(expected), numpy.isnan(got)
+    return bool((theirs == ours).all()) and expected[~theirs].tobytes() == got[~ours].tobytes()
 
 
 def arrays(count: int, shape: tuple[int, ...], special: bool = False) -> list[numpy.ndarray]:
@@ -517,6 +541,339 @@ def test_other_element_types_are_not_fused():
     for expected, got in cases:
         assert same(expected, got.gather())
     assert calls() == 0
+
+
+# Whole numbers and booleans as NumPy has them, of every integer type: small ones, the ends of each type, and
+# values a float64 does not hold exactly, which NumPy's conversion rounds (2**53 + 1 down, 2**64 - 1 up to 2**64).
+WHOLE_NUMBERS = (
+    numpy.int64(3), numpy.int64(-3), numpy.int64(0), numpy.int64(2 ** 53 + 1), numpy.int64(-(2 ** 53) - 1),
+    numpy.int64(2 ** 63 - 1), numpy.int64(-(2 ** 63)), numpy.int64(2 ** 62 + 2 ** 9 + 1),
+    numpy.uint64(2 ** 64 - 1), numpy.uint64(2 ** 64 - 1025), numpy.uint64(2 ** 63 + 1025), numpy.uint64(2 ** 53 + 3),
+    numpy.int8(-128), numpy.uint8(255), numpy.int16(-7), numpy.uint16(65535), numpy.int32(-(2 ** 31)),
+    numpy.uint32(2 ** 32 - 1), numpy.longlong(2 ** 53 + 1), numpy.ulonglong(2 ** 64 - 1), numpy.intp(5),
+    numpy.bool_(True), numpy.bool_(False),
+)
+# How many of the twenty-seven expressions of `with_a_number` have a node computed inside a kernel's program, at
+# least, on either architecture. The others are those where the operation that reads the number is NumPy's call
+# for a float as well: `np.maximum(a, k)` has the number second, and x86-64 has no kernel of one operation for
+# that order; an `np.where` on `<=` is no shape of the library.
+MOSTLY_INSIDE = 20
+# The length from which that is asked. On a few elements a program of two kernels is given up, for a float as for
+# a whole number.
+LONG_ENOUGH = 64
+# Those of them a float64 does not hold: the conversion gives another number.
+INEXACT = tuple(value for value in WHOLE_NUMBERS if int(float(value)) != int(value))
+
+
+def with_a_number(np: Any, a: Any, b: Any, c: Any, k: Any) -> dict[str, Any]:
+    """Write expressions that read one number, in every place an operation of a kernel takes one.
+
+    Args:
+        np: The `numpy` module or the lazy stand-in.
+        a, b, c: Three float64 arrays of one shape, `ndarray`s or lazy.
+        k: The number: a NumPy scalar, an array without dimensions, or a Python number.
+
+    Returns:
+        A name -> the expression's result. Each operator the kernels have
+        is there with the number on either side, with `np.maximum` and
+        `np.minimum`, a comparison against it, and it as either value of
+        an `np.where`.
+    """
+    return {
+        "a * k + b": a * k + b,
+        "k * a + b": k * a + b,
+        "a + k * b": a + k * b,
+        "a - k * b": a - k * b,
+        "a - b * k": a - b * k,
+        "k * (a + b)": k * (a + b),
+        "a * (k + b)": a * (k + b),
+        "(a + k) * b": (a + k) * b,
+        "(a - k) + b": (a - k) + b,
+        "(k - a) + b": (k - a) + b,
+        "a / k + b": a / k + b,
+        "k / a + b": k / a + b,
+        "(a * b) / k": (a * b) / k,
+        "k / (a * b)": k / (a * b),
+        "maximum(k, a) + b": np.maximum(k, a) + b,
+        "maximum(a, k) + b": np.maximum(a, k) + b,
+        "minimum(k, a) + b": np.minimum(k, a) + b,
+        "minimum(a, k) + b": np.minimum(a, k) + b,
+        "maximum(k, maximum(a, minimum(k, b)))": np.maximum(k, np.maximum(a, np.minimum(k, b))),
+        "where(a * (b - c) > k, k, a)": np.where(a * (b - c) > k, k, a),
+        "where(a * (b - c) > 0, a, k)": np.where(a * (b - c) > 0, a, k),
+        "where(a * b <= k, c, a)": np.where(a * b <= k, c, a),
+        "sqrt(abs(k * a)) - b": np.sqrt(np.abs(k * a)) - b,
+        "-(a * k) + b": -(a * k) + b,
+        "k * a + k * b + k * c": k * a + k * b + k * c,
+        "sum(a * k + b)": np.sum(a * k + b),
+        "mean(a - k * b)": np.mean(a - k * b),
+    }
+
+
+def fused_with(a: numpy.ndarray, b: numpy.ndarray, c: numpy.ndarray, k: Any) -> tuple[dict[str, Any], dict[str, tuple]]:
+    """Compute the expressions of `with_a_number` lazily, one at a time, and say what fusion did for each.
+
+    Args:
+        a, b, c: Three float64 arrays of one shape.
+        k: The number.
+
+    Returns:
+        (name -> what `gather()` gave; name -> the kernel calls it took, by
+        kernel, with how many nodes were computed inside a program and how
+        many programs were given up).
+    """
+    values, did = {}, {}
+    for name in with_a_number(numpy, a, b, c, 1.0):
+        fuse.STATS.reset()
+        values[name] = gathered(lambda: with_a_number(lazy, lazy.asarray(a), lazy.asarray(b), lazy.asarray(c), k)[name])
+        did[name] = (dict(fuse.STATS.calls), fuse.STATS.fused_nodes, fuse.STATS.declined)
+    return values, did
+
+
+@pytest.mark.parametrize("length", (0, 1, 7, LONG_ENOUGH, 1000))
+@pytest.mark.parametrize("k", WHOLE_NUMBERS, ids=lambda k: f"{type(k).__name__}({k})")
+def test_a_whole_number_of_numpys_is_a_number_as_its_float_is(k: Any, length: int):
+    """`np.int64(k)` beside float64 arrays gives NumPy's bits, by the kernels `float(k)` is computed by.
+
+    NumPy converts the scalar to float64 once and runs the float64 loop, so
+    the expression is the one written with `float(k)`. NumPy itself is held
+    to that here, bit for bit; the layer's run with the whole number to its
+    run with the float, bit for bit and kernel for kernel; and the layer to
+    NumPy, bit for bit on ordinary values. On the special values, which
+    hold `np.nan` beside what makes the processor's own NaN, it is held to
+    NumPy but for which NaN of two a result is, as a float is.
+    """
+    for special in (False, True):
+        a, b, c = arrays(3, (length,), special)
+        with numpy.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # The mean of no elements.
+            expected = with_a_number(numpy, a, b, c, k)
+            as_float = with_a_number(numpy, a, b, c, float(k))
+            got, did = fused_with(a, b, c, k)
+            got_as_float, did_as_float = fused_with(a, b, c, float(k))
+        for name, wanted in expected.items():
+            wanted, value = numpy.asarray(wanted), numpy.asarray(got[name])
+            assert same(wanted, numpy.asarray(as_float[name])), name
+            assert same(numpy.asarray(got_as_float[name]), value), name
+            assert same_but_for_which_nan(wanted, value) if special else same(wanted, value), name
+            assert did[name] == did_as_float[name], name
+        if length:  # An array of no elements is NumPy's, whatever is written on it.
+            assert did["a * k + b"] == ({"fuse_add_scaled_f64": 1}, 1, 0)
+        if length >= LONG_ENOUGH:
+            assert sum(1 for _, inside, _ in did.values() if inside) >= MOSTLY_INSIDE
+
+
+def test_the_float_of_a_whole_number_is_the_float64_numpy_makes_of_it():
+    """`float(k)`, which a kernel is handed, has the bits of NumPy's own conversion, at every power of two and beside it."""
+    one = numpy.ones(1)
+    whole = [kind(sign * (2 ** power + step))
+             for kind, powers, signs in ((numpy.int64, range(63), (1, -1)), (numpy.uint64, range(64), (1,)),
+                                         (numpy.int32, range(31), (1, -1)), (numpy.uint16, range(16), (1,)))
+             for power in powers for sign in signs for step in (-1, 0, 1)
+             if numpy.iinfo(kind).min <= sign * (2 ** power + step) <= numpy.iinfo(kind).max]
+    rng = numpy.random.default_rng(SEED)
+    whole += list(rng.integers(-(2 ** 63), 2 ** 63 - 1, 500, dtype=numpy.int64))
+    whole += list(rng.integers(0, 2 ** 64 - 1, 500, dtype=numpy.uint64, endpoint=True))
+    whole += [numpy.bool_(True), numpy.bool_(False), numpy.int64(-(2 ** 63)), numpy.uint64(2 ** 64 - 1)]
+    assert len(whole) > 1500
+    for k in whole:
+        handed = numpy.float64(float(k))
+        assert same(one * k, one * handed) and (one * k)[0].tobytes() == handed.tobytes(), k
+        assert float(numpy.asarray(k)) == float(k) and same(numpy.asarray(k).astype(numpy.float64), numpy.asarray(handed)), k
+
+
+@pytest.mark.parametrize("k", INEXACT, ids=lambda k: f"{type(k).__name__}({k})")
+def test_a_whole_number_a_float64_does_not_hold_is_rounded_as_numpy_rounds_it(k: Any):
+    """`a * np.int64(2**53 + 1) + b` is one kernel call with NumPy's bits: the conversion that rounds is NumPy's own."""
+    a, b = arrays(2, (1000,))
+    # Values near the number, where another rounding of it would show: a quotient of 1.0 and a difference of 0.0.
+    near = float(k)
+    around = [near, numpy.nextafter(near, numpy.inf), numpy.nextafter(near, -numpy.inf)]
+    a[:6] = [*around, 1.0, -1.0, 0.5]
+    # And products at the number and either side of it, for the comparisons against it: `2.0 * (b - a)`, and
+    # `b * (b - a)`, which is the shape of a kernel with a mask.
+    a[6:9], b[6:9] = 0.0, [value / 2.0 for value in around]
+    a[9:12], b[9:12] = [-value for value in around], 1.0
+    assert int(near) != int(k)
+    held, other = lazy.asarray(a), lazy.asarray(b)
+    with numpy.errstate(all="ignore"):
+        cases = [
+            (a * k + b, lambda: held * k + other, {"fuse_add_scaled_f64": 1}),
+            (b - a / k, lambda: other - held / k, {"fuse_div_v_s_f64": 1, "fuse_sub_v_v_f64": 1}),
+            (k / a + b, lambda: k / held + other, {"fuse_div_s_v_f64": 1, "fuse_add_v_v_f64": 1}),
+            ((a - k) * b, lambda: (held - k) * other, {"fuse_sub_v_s_f64": 1, "fuse_mul_v_v_f64": 1}),
+            ((k - a) + b, lambda: (k - held) + other, {"fuse_sub_s_v_f64": 1, "fuse_add_v_v_f64": 1}),
+            (numpy.where(2.0 * (b - a) > k, k, a), lambda: lazy.where(2.0 * (other - held) > k, k, held), None),
+            (numpy.where(b * (b - a) > k, k, a), lambda: lazy.where(other * (other - held) > k, k, held),
+             {"fuse_flux_limit_f64": 1}),
+        ]
+        # Each comparison is false at the number and true just above it.
+        assert len(numpy.unique(2.0 * (b - a)[6:9] > k)) == 2 and len(numpy.unique((b * (b - a))[9:12] > k)) == 2
+        for expected, write, kernels in cases:
+            fuse.STATS.reset()
+            assert same(expected, gathered(write)), kernels
+            assert kernels is None or fuse.STATS.calls == kernels
+            assert fuse.STATS.fused_nodes >= 1 and fuse.STATS.declined == 0
+
+
+def test_one_whole_number_in_an_array_without_dimensions_is_a_number():
+    """`np.asarray(7)`, an element of a lazy table and a count still pending are numbers; each line is one kernel call."""
+    a, b = arrays(2, (1000,), special=True)
+    table = numpy.arange(12).reshape(3, 4) - 5
+    counts = numpy.arange(1000)
+    held, other = lazy.asarray(a), lazy.asarray(b)
+    with numpy.errstate(all="ignore"):
+        cases = [
+            (numpy.asarray(7) * a + b, lambda: numpy.asarray(7) * held + other),
+            (a * numpy.asarray(-7, dtype=numpy.int8) + b, lambda: held * numpy.asarray(-7, dtype=numpy.int8) + other),
+            (a * numpy.asarray(7, dtype=">i4") + b, lambda: held * numpy.asarray(7, dtype=">i4") + other),
+            (a * numpy.asarray(2 ** 64 - 1025, dtype=numpy.uint64) + b,
+             lambda: held * numpy.asarray(2 ** 64 - 1025, dtype=numpy.uint64) + other),
+            (a * numpy.asarray(True) + b, lambda: held * numpy.asarray(True) + other),
+            (table[1, 2] * a + b, lambda: lazy.asarray(table)[1, 2] * held + other),
+            (a * table[0, 0] + b, lambda: held * lazy.asarray(table)[0, 0] + other),
+            (counts.sum() * a + b, lambda: lazy.asarray(counts).sum() * held + other),
+            (a * (counts > 5).any() + b, lambda: held * (lazy.asarray(counts) > 5).any() + other),
+            (numpy.multiply(table[2, 3], a) + b, lambda: lazy.multiply(lazy.asarray(table)[2, 3], held) + other),
+        ]
+        for place, (expected, write) in enumerate(cases):
+            fuse.STATS.reset()
+            assert same(expected, gathered(write)), place
+            assert fuse.STATS.calls == {"fuse_add_scaled_f64": 1} and fuse.STATS.fused_nodes == 1, place
+
+
+def test_a_square_by_a_whole_number_of_numpys_is_one_multiplication():
+    """`x ** np.int64(2)` is `np.power`'s loop handed 2.0, which multiplies: the kernels' square, with `x * x`'s bits."""
+    a, b = arrays(2, (1000,), special=True)
+    held, other = lazy.asarray(a), lazy.asarray(b)
+    with numpy.errstate(all="ignore"):
+        for two in (numpy.int64(2), numpy.uint8(2), numpy.int32(2), numpy.longlong(2)):
+            fuse.STATS.reset()
+            assert same(a * a, a ** two) and same(a * a, numpy.power(a, two))
+            assert same(a ** two + b, gathered(lambda: held ** two + other))
+            assert same(numpy.power(a, two) - b, gathered(lambda: lazy.power(held, two) - other))
+            assert same(numpy.sum(a ** two), gathered(lambda: numpy.sum(held ** two)))
+            with_two = dict(fuse.STATS.calls)
+            fuse.STATS.reset()
+            assert same(a ** 2 + b, gathered(lambda: held ** 2 + other))
+            assert same(numpy.power(a, 2) - b, gathered(lambda: lazy.power(held, 2) - other))
+            assert same(numpy.sum(a ** 2), gathered(lambda: numpy.sum(held ** 2)))
+            assert with_two == fuse.STATS.calls and with_two["fuse_sum_squares_f64"] == 1 and with_two["fuse_sq_v_f64"] == 2
+        # Another exponent is the mathematics library's, a boolean is the exponent 1, and a number raised to an
+        # array is no square: NumPy's calls, and nothing inside a kernel but the addition's own.
+        fuse.STATS.reset()
+        for expected, write in [(a ** numpy.int64(3) + b, lambda: held ** numpy.int64(3) + other),
+                                (a ** numpy.bool_(True) + b, lambda: held ** numpy.bool_(True) + other),
+                                (numpy.int64(2) ** a + b, lambda: numpy.int64(2) ** held + other),
+                                (a ** numpy.asarray(2) + b, lambda: held ** numpy.asarray(2) + other)]:
+            assert same(expected, gathered(write))
+        assert fuse.STATS.fused_nodes == 0 and "fuse_sq_v_f64" not in fuse.STATS.calls
+
+
+def test_a_whole_number_is_no_number_where_numpys_result_is_not_the_float64_loops():
+    """Whole numbers with a dimension, beside other element types, of other kinds and too large a Python integer
+    are left to NumPy, with NumPy's types and bits."""
+    a, b = arrays(2, (500,))
+    single, whole = a.astype(numpy.float32), numpy.arange(500)
+    held, other = lazy.asarray(a), lazy.asarray(b)
+    cases = [
+        # An array of whole numbers with a dimension, of one element or of many: NumPy converts it element by element.
+        (a * numpy.asarray([3]) + b, lambda: held * numpy.asarray([3]) + other),
+        (a * numpy.asarray([[3]]) + b, lambda: held * lazy.asarray(numpy.asarray([[3]])) + other),
+        (a * whole + b, lambda: held * lazy.asarray(whole) + other),
+        # float32 with an int64 gives float64, but the array is not a kernel's; integers stay integers.
+        (single * numpy.int64(3) + single, lambda: lazy.asarray(single) * numpy.int64(3) + lazy.asarray(single)),
+        (whole * numpy.int64(3) + whole, lambda: lazy.asarray(whole) * numpy.int64(3) + lazy.asarray(whole)),
+        (whole / numpy.int64(3) + whole, lambda: lazy.asarray(whole) / numpy.int64(3) + lazy.asarray(whole)),
+        # Scalars that are no whole number, and arrays without dimensions of their types: a float32, a complex
+        # number, a span of time, which is an `np.signedinteger` by its class.
+        (a * numpy.float32(0.1) + b, lambda: held * numpy.float32(0.1) + other),
+        (a * numpy.asarray(0.1, dtype=numpy.float32) + b, lambda: held * numpy.asarray(0.1, dtype=numpy.float32) + other),
+        (a * single[3] + b, lambda: held * lazy.asarray(single)[3] + other),
+        (a * numpy.asarray(2j) + b, lambda: held * numpy.asarray(2j) + other),
+        (a * numpy.asarray(numpy.timedelta64(3, "s")) * 2.0, lambda: held * numpy.asarray(numpy.timedelta64(3, "s")) * 2.0),
+        (a * numpy.complex128(2j) + b, lambda: held * numpy.complex128(2j) + other),
+        (a * numpy.timedelta64(3, "s") * 2.0, lambda: held * numpy.timedelta64(3, "s") * 2.0),
+        # A Python integer beyond what a float64 holds exactly is not taken, as before.
+        (a * (2 ** 53 + 1) + b, lambda: held * (2 ** 53 + 1) + other),
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for place, (expected, write) in enumerate(cases):
+            assert same(expected, gathered(write)), place
+    assert calls() == 0 and fuse.STATS.fused_nodes == 0
+
+
+def test_a_write_with_a_whole_number_of_numpys_is_fused_as_one_with_a_float():
+    """`w *= np.int64(3)`, `u[1:-1] += np.int64(2) * u[:-2]` and `np.multiply(x, np.int64(5), out=x)` are kernels' work."""
+    start, gradient = arrays(2, (1000,))
+    w, expected = lazy.array(start), start.copy()
+    for step in range(3):
+        w -= numpy.int64(2 ** 53 + 1) * lazy.asarray(gradient)
+        w *= numpy.uint8(3)
+        w += numpy.bool_(True)
+        w /= numpy.int16(-7)
+        expected -= numpy.int64(2 ** 53 + 1) * gradient
+        expected *= numpy.uint8(3)
+        expected += numpy.bool_(True)
+        expected /= numpy.int16(-7)
+    assert same(expected, w.gather())
+    assert fuse.STATS.whole_writes == 12 and fuse.STATS.fused_nodes == 14
+    grid, other = arrays(2, (30, 40))
+    u, wanted = lazy.array(grid), grid.copy()
+    fuse.STATS.reset()
+    u[1:-1] += numpy.int64(2) * u[:-2]
+    wanted[1:-1] += numpy.int64(2) * wanted[:-2]
+    u[1:-1, 1:-1] = lazy.asarray(other)[1:-1, 1:-1] + numpy.uint64(2 ** 64 - 1) * u[2:, 1:-1]
+    wanted[1:-1, 1:-1] = other[1:-1, 1:-1] + numpy.uint64(2 ** 64 - 1) * wanted[2:, 1:-1]
+    assert same(wanted, u.gather())
+    assert fuse.STATS.calls == {"fuse_add_scaled_f64": 2}
+    x = lazy.zeros(200)
+    fuse.STATS.reset()
+    numpy.add(lazy.asarray(start[:200]), lazy.asarray(gradient[:200]), out=x)
+    numpy.multiply(x, numpy.int64(5), out=x)
+    assert same((start[:200] + gradient[:200]) * numpy.int64(5), x.gather())
+    assert fuse.STATS.calls == {"fuse_scaled_sum_f64": 1}
+
+
+def test_the_limit_tool_counts_an_operation_on_a_whole_number_of_numpys_as_arithmetic():
+    """`limit` puts `a * np.int64(3)` with the operations a kernel makes, and a whole-number array under other types."""
+    (data,) = arrays(1, (100,))
+    a, whole = lazy.asarray(data), lazy.asarray(numpy.arange(100))
+    cases = [
+        (a * numpy.int64(3), limit.ARITHMETIC), (numpy.uint8(2) / a, limit.ARITHMETIC),
+        (a * numpy.bool_(True), limit.ARITHMETIC), (a - numpy.asarray(7), limit.ARITHMETIC),
+        (a + whole.sum(), limit.ARITHMETIC), (a ** numpy.int64(2), limit.ARITHMETIC),
+        (a ** numpy.int64(3), limit.LIBRARY), (a > numpy.int64(3), limit.MASKS),
+        (a * whole, limit.OTHER_TYPES), (whole * numpy.int64(3), limit.OTHER_TYPES),
+        (a * numpy.float32(0.5), limit.OTHER_TYPES), (a * numpy.asarray([3]), limit.OTHER_TYPES),
+    ]
+    for place, (written, wanted) in enumerate(cases):
+        assert limit.classify(written._node) == wanted, place
+
+
+def test_both_readers_take_a_whole_number_of_numpys_alike(lazy_core: str, monkeypatch: pytest.MonkeyPatch):
+    """The core's reader and `_Finder` find the same expressions on every line that reads a whole number."""
+    if lazy_core != "c":
+        pytest.skip("one reader only without the C core")
+    compared = _read_both_ways(monkeypatch)
+    a, b, c = arrays(3, (64,), special=True)
+    table = numpy.arange(12).reshape(3, 4) - 5
+    held, other = lazy.asarray(a), lazy.asarray(b)
+    with numpy.errstate(all="ignore"):
+        for k in (numpy.int64(2 ** 53 + 1), numpy.uint64(2 ** 64 - 1), numpy.bool_(True), numpy.asarray(7),
+                  numpy.float32(0.5), numpy.timedelta64(3, "s"), 2 ** 53 + 1, numpy.asarray([3])):
+            for name in with_a_number(numpy, a, b, c, 1.0):
+                try:
+                    expected = numpy.asarray(with_a_number(numpy, a, b, c, k)[name])
+                except TypeError:
+                    continue  # A span of time is no operand of most of these, for NumPy and so for the layer.
+                got = gathered(lambda: with_a_number(lazy, held, other, lazy.asarray(c), k)[name])
+                assert same(expected, numpy.asarray(got)), (k, name)
+        for write in (lambda: lazy.asarray(table)[1, 2] * held + other, lambda: held ** numpy.int64(2) + other,
+                      lambda: held ** numpy.int64(3) + other, lambda: lazy.asarray(numpy.arange(64)).sum() * held + other):
+            gathered(write)
+    assert sum(compared) > 100
 
 
 def test_an_array_read_twice_is_one_kernel_call():
@@ -1087,17 +1444,18 @@ def _described(expressions: list) -> list:
 # The programs whose computations both readers of expressions are run on: the ones with the most to read, of
 # every kind an expression has (an array, a sum, a part written into, a mask).
 READ_BOTH_WAYS = ("cavity_flow", "hdiff", "veros_eos", "veros_isoneutral", "veros_tke", "particle_filter", "regression",
-                  "black_scholes")
+                  "black_scholes", "pvlib_solar")
 
 
-@pytest.mark.parametrize("name", READ_BOTH_WAYS)
-def test_the_core_reads_the_expressions_python_reads(name: str, lazy_core: str, monkeypatch: pytest.MonkeyPatch):
-    """With the C core `fuse.find` is the core's; on every computation of a program it finds what `_Finder` finds."""
-    if lazy_core != "c":
-        pytest.skip("one reader only without the C core")
-    (program,) = corpus.by_name([name])
-    if not program.available:
-        pytest.skip(f"needs {', '.join(program.requires)}")
+def _read_both_ways(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Have every computation's expressions read by `_Finder` and by the C core, and the two compared.
+
+    Args:
+        monkeypatch: The test's, which puts `fuse.find` back afterwards.
+
+    Returns:
+        A list that gains, for each computation read from now on, how many expressions both readers found.
+    """
     find, reading = fuse.find, fuse._reading_core
     compared: list[int] = []
 
@@ -1126,6 +1484,18 @@ def test_the_core_reads_the_expressions_python_reads(name: str, lazy_core: str, 
         return found, inside
 
     monkeypatch.setattr(fuse, "find", both)
+    return compared
+
+
+@pytest.mark.parametrize("name", READ_BOTH_WAYS)
+def test_the_core_reads_the_expressions_python_reads(name: str, lazy_core: str, monkeypatch: pytest.MonkeyPatch):
+    """With the C core `fuse.find` is the core's; on every computation of a program it finds what `_Finder` finds."""
+    if lazy_core != "c":
+        pytest.skip("one reader only without the C core")
+    (program,) = corpus.by_name([name])
+    if not program.available:
+        pytest.skip(f"needs {', '.join(program.requires)}")
+    compared = _read_both_ways(monkeypatch)
     inputs = program.make(corpus.SMALL)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

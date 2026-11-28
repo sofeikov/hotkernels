@@ -263,7 +263,10 @@ def classify(node: Node) -> str:
     if node.kind != rules.ELEMENTWISE:
         return REST
     read = fuse.operation_of(node)
-    types = [arg.dtype for arg in node.args if isinstance(arg, (Node, numpy.ndarray, numpy.generic))]
+    # One whole number of NumPy's beside float64 is a number to a kernel, as one written in the program is, and
+    # its type does not make the operation another type's.
+    types = [arg.dtype for arg in node.args
+             if isinstance(arg, (Node, numpy.ndarray, numpy.generic)) and not fuse.is_whole_number(arg)]
     if node.dtype == fuse.BOOLEAN or any(kind == fuse.BOOLEAN for kind in types) or (read is not None and read[0] == fuse.WHERE):
         return MASKS
     if node.dtype != fuse.FLOAT64 or any(kind != fuse.FLOAT64 for kind in types):

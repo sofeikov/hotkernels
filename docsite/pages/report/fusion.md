@@ -40,12 +40,12 @@ Everything else ends an expression, and each ending has a reason:
 | What ends an expression | Why |
 |---|---|
 | `np.exp`, `np.log`, `np.tanh`, `np.arctan2`, `x ** 3`, any power but 2, `%` | NumPy calls the platform's mathematics library for these. A kernel is a leaf function that calls nothing, and a second implementation of `exp` would not have the library's bits |
-| An array of any element type but float64 | The kernels are for float64 |
+| An array of any element type but float64, a NumPy scalar that is neither float64 nor a whole number | The kernels are for float64 |
 | An intermediate read twice, or one the program still holds a name for | Its value is wanted again, so it has to exist; computing past it would compute it twice. It becomes an operand of the expressions that read it |
 | An intermediate of another shape than the result | It belongs to another loop |
 | The matrix product, a reduction along an axis, indexing by arrays | Not element by element. NumPy computes each, and the result is an operand of what reads it |
 
-Each thing an expression reads, an **operand**, is one of two kinds along the innermost axis. A **V** is an array as long as the result. An **S** is the same number for the whole row: a Python number, a float64 scalar, an array with no dimensions, or an array of length one along that axis, such as a row mean kept with `keepdims=True`. Along the outer axes an operand may broadcast in any way.
+Each thing an expression reads, an **operand**, is one of two kinds along the innermost axis. A **V** is an array as long as the result. An **S** is the same number for the whole row: a Python number, a float64 scalar, a whole number of NumPy's such as the `np.int64` that indexing a table of integers gives, an array with no dimensions, or an array of length one along that axis, such as a row mean kept with `keepdims=True`. NumPy converts a whole number to float64 before its float64 loop runs, and the kernel is handed the same float64. Along the outer axes an operand may broadcast in any way.
 
 A pattern's **name** writes its tree out with numbered leaves. `a + s * b` is `add(V0,mul(S0,V1))`. Two rules make one name stand for every way a program might write the same shape:
 

@@ -7,7 +7,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 ## Summary
 
 - **All ten give NumPy's results bit for bit,** node by node and fused, with the kernels installed and without. One library had to be handed a plain `ndarray`, and one seed had to be other than zero ([What got in the way of running them](#what-got-in-the-way-of-running-them)).
-- **Fusion gains on three, by 1.08x to 1.14x, is level on five, and loses on two.** Against plain NumPy at the large size: Astropy's models 1.14x, prysm's Zernike wavefront 1.10x, scikit-image's colour difference 1.08x; the book's convolutional network 1.07x, which is `install()`'s gain and not fusion's; SALib 1.02x; perlin-numpy, Matplotlib's hill shading and the speech features 1.00x; pvlib's solar position 0.97x; scikit-learn's perceptron 0.88x. Nothing like the 2x to 3x of the corpus's stencils.
+- **Fusion gains on three, by 1.08x to 1.14x, is level on five, and loses on two.** Against plain NumPy at the large size: Astropy's models 1.14x, prysm's Zernike wavefront 1.10x, scikit-image's colour difference 1.08x; the book's convolutional network 1.07x, which is `install()`'s gain and not fusion's; SALib 1.02x; perlin-numpy, Matplotlib's hill shading and the speech features 1.00x; pvlib's solar position 0.97x; scikit-learn's perceptron 0.88x. Nothing like the 2x to 3x of the corpus's stencils. pvlib's is 1.02x to 1.05x since a whole number from its tables is a number of an expression ([issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression)).
 - **`install()` alone gains on one of the ten,** the convolutional network, 1.08x, from its kernels for `x[mask] = 0` and for `argmax` and sums along rows. On the other nine it is within 2% of NumPy either way: their time is not in calls the package has kernels for.
 - **A third of all the time in the ten programs is a mathematics library's functions:** `cos`, `sin`, `x ** 3`, `x ** 2.4`, `%`, `cbrt`, `hypot`, `arctan2`, `exp`. 2.6 s of 7.9 s. No kernel of either kind may touch them, because the result has to be the library's bits. This is the largest thing the ten programs have that the corpus did not show at this weight.
 - **The float64 arithmetic that fusion is for is 30% of the time, and a fifth of that was found and then given up for how the arrays lie.** An array left transposed by the call that made it, 300 ms; rows of four colour values with one value for each pixel, 100 ms; and arrays that step, a channel of an image (`lab[..., 0]`), a column of a table (`AB[:, j]`), every eighth element (`Y[::8]`), 30 ms in three programs. Each is how these codebases hold their data, and none is a missing pattern.
@@ -225,7 +225,7 @@ The Fourier transform, the table of positions the sound is cut into frames by (i
 - **It is the program with the most to fuse, and gains nothing.** 2,520 operations in one graph; 290 expressions, all planned, 684 kernel calls, 638 nodes computed inside a program, and no program given up. The kernels take 291 ms for what NumPy's passes took 814 ms.
 - **63% of it is the library.** The algorithm is sums of `a * np.cos(b + c * x)` over the rows of a table, 64 terms for one quantity: `np.cos` alone is 1,229 ms, `np.sin` 339 ms, `x ** 3` and `x ** 4` 158 ms.
 - **The eager program is already near what fusion makes of the rest.** `s += arr[row, 0] * np.cos(arr[row, 1] + arr[row, 2] * x)` makes few arrays as NumPy computes it, because NumPy reuses a temporary's memory and `+=` adds in place. The lazy run writes 18.5 GB of new arrays for it and the fused run 13.7 GB; node by node the program is 5% slower than eagerly, and fusion takes back 2%.
-- **A whole number from a table ends an expression.** The nutation terms are `NUTATION_YTERM_ARRAY[row, 0]*x0 + ... + NUTATION_YTERM_ARRAY[row, 4]*x4`, and that table is int64. A NumPy scalar of another type than float64 is not an operand a kernel takes, so each of the 315 products is NumPy's pass, 176 ms that the limit tool counts under other element types, and only the sum of five is a program, where the whole line is nine operations. `np.int64(k) * x` and `float(k) * x` have the same bits.
+- **A whole number from a table ended an expression.** The nutation terms are `NUTATION_YTERM_ARRAY[row, 0]*x0 + ... + NUTATION_YTERM_ARRAY[row, 4]*x4`, and that table is int64. A NumPy scalar of another type than float64 was not an operand a kernel took, so each of the 315 products was NumPy's pass, 176 ms that the limit tool counted under other element types, and only the sum of five was a program, where the whole line is nine operations. `np.int64(k) * x` and `float(k) * x` have the same bits. It is a number now, and the line one program of nine operations: [issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression).
 
 ### `sklearn_mlp`, 0.88x
 
@@ -243,7 +243,7 @@ The question this was run to answer: where a program does not gain, is it an ope
 | Reductions along an axis | 1,200 | `perlin_noise` (754, rows of two), `salib_sobol` (265), `dlfs_convnet` (182, rows of four) | Fusion reduces over every element only; the package's kernels for sums along rows are for other shapes | `np.sum(a * b, axis=-1)` on rows of two or three is a dot product at each row, three operations on arrays that step. A kernel for rows of a few elements would be 38% of the noise program |
 | Indexing by positions, writes into slices | 900 | `salib_sobol` (457, `A[r]`), `dlfs_convnet` (196, `im2col`), `pvlib_solar` (160, `s += ...`) | Not element by element | Taking by positions is a kernel of the package's, not of fusion: [issue 232](https://github.com/sofeikov/hotkernels/issues/232) is its sibling for scattering |
 | An expression on an array left out of order by the call that made it | 300 | `perlin_noise` | The module takes the last axis for the rows; NumPy walks the array as it lies in memory | By walking a program's arrays in the order of memory when all of them share it, as NumPy's iterator does. No kernel changes |
-| A whole-number NumPy scalar as an operand | 176 | `pvlib_solar` | Only float64 scalars and Python numbers are numbers to a kernel | Yes, with the bits: the conversion is the one NumPy makes. A table of whole-number coefficients is common in such series |
+| A whole-number NumPy scalar as an operand | 176 | `pvlib_solar` | Only float64 scalars and Python numbers were numbers to a kernel | Yes, with the bits: the conversion is the one NumPy makes. A table of whole-number coefficients is common in such series. Built: [issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression) |
 | Rows of three or four values with one value for each row, in a program of several steps | 100 | `mpl_hillshade` | One operation on such rows is a loop of the module's; a program of several is declined | It is the shape of every blend of a colour image with a mask or an intensity, `(H, W, 1)` beside `(H, W, 3)` |
 | Whole-number arrays as the first operand | 38 | `astropy_models` (28), `speech_mfcc` (10) | The kernels are float64 | A cast is "a kernel nobody wrote" already in the design's list |
 | Expressions given up for arrays that step: a channel, a column, every eighth element | 30 | `mpl_hillshade` (24), `skimage_delta_e` (7), `salib_sobol` (under 1) | A kernel reads arrays whose elements are next to each other. Copying each array first costs what the passes saved for a short program | By kernels that take a step for each array, which [the design names](lazy-fusion-design.md#what-a-pattern-could-still-take) and did not build for two programs' sake. Here it is three more programs, since it is how they hold their data, an image read by channel and a table by column; but it weighs little in them |
@@ -387,6 +387,56 @@ So the two plain columns were of another state of the process than the four befo
 
 **What is not settled.** A program of large temporaries has two times, with pages given back and with pages kept, and they differ by a quarter. The tools now time the first, which is what a program run by itself gets from glibc. A program inside a longer process, with arrays alive above its own, gets the second. Which the layer should be judged by, and whether a fused run should keep the memory of its results itself, since that alone took the equation of state from 138 ms to 99 ms, is [issue 321](https://github.com/sofeikov/hotkernels/issues/321)'s question from another side; [issue 326](https://github.com/sofeikov/hotkernels/issues/326) has the figures and the two decisions.
 
+### Issue 318: a whole number of NumPy's is a number of an expression
+
+[Issue 318](https://github.com/sofeikov/hotkernels/issues/318) asked that `np.int64(k) * x` on a float64 array be an operation of an expression, as `float(k) * x` is, since the two have the same bits.
+
+**What changed.**
+
+- **A NumPy scalar of a boolean or whole-number type is a number to a kernel,** of any integer type and any value, and so is an array or a pending result without dimensions of such a type (`np.asarray(3)`, `counts.sum()`). It is one wherever a float is: either side of `+`, `-`, `*`, `/`, `np.maximum`, `np.minimum` and a comparison, either value of `np.where`, an in-place operator and a write into part of an array. Both readers of expressions, `fuse.py`'s and the C core's, take it, and a test holds one to the other.
+- **`x ** np.int64(2)` is the square.** What NumPy does for it was measured, not assumed: `np.power(x, np.int64(2))` takes 0.29 ns an element on a million, as `np.power(x, 2)` and `np.square(x)` do, where `np.power(x, np.int64(3))` takes 9.0 ns; and it has the bits of `x * x` on a million values with infinities, NaN, zeros of both signs and denormals among them, on every third element of an array, and on arrays of 1 to 17 elements. The loop is handed the exponent as the float64 2.0 and multiplies. A boolean exponent is 1, and any other is the library's.
+- **One whole number waits for a kernel.** With fusion on, a large call that reads an array of another type is made at once. A lazy array around one whole number, `table[i, j]` of a lazy table, was such an array; it is a number there now.
+- **`limit` counts an operation on such a number as arithmetic,** where it counted it under other element types.
+
+**Why the bits are NumPy's.** For a float64 array and a whole-number scalar NumPy's result is float64 for every one of these operations, and it gets there by converting the scalar once, with C's conversion, and running the float64 loop. A kernel is handed `float(k)`, the same conversion. A value a float64 does not hold is rounded to the nearest by both: `np.int64(2**53 + 1)` to 2**53, `np.uint64(2**64 - 1)` to 2**64. The tests hold `float(k)` to NumPy's conversion on 1,500 values, every power of two of int64 and uint64 and either side of it among them; twenty-three scalars in twenty-seven expressions at five lengths to the real `numpy` and to the same expression written with `float(k)`, which has to be computed by the same kernels to the same bits; ten values a float64 does not hold with the number itself and its two neighbours in the arrays, under a division, a subtraction and a comparison; and eleven wrong versions of the core's part, each one changed line, each fail a test.
+
+**What is still left to NumPy,** each by a test: a whole-number array with a dimension, of one element as of many; float32 and integer arrays beside such a scalar, whose result is float64 or int64 and not a kernel's; an `np.float32` or complex scalar; an `np.timedelta64`, which is an `np.signedinteger` by its class; a Python integer beyond 2**53, as before.
+
+**One thing the tests met that is not this change's.** With `np.nan` and infinities among the values, `0 * a + 0 * b + 0 * c` came out with another NaN than NumPy's in one element of a thousand, for a Python `0.0` as for `np.int64(0)`: `0 * inf` is the processor's NaN, with its sign bit set, `np.nan` has it clear, and which of two NaNs an addition returns is which operand comes first. That is what [the design leaves open](lazy-fusion-design.md#why-the-bits-are-numpys) on x86-64. So on arrays with such values the tests ask for a NaN wherever NumPy has one and NumPy's bits everywhere else, and for the bits of the layer's own run with `float(k)`.
+
+**Before and after.** `pvlib_solar` and `prysm_zernike` at the large size, the quickest of 7 rounds, the ways in turn, one performance core, one BLAS thread, milliseconds. Each pair is the base branch and then this change, minutes apart, with two other sessions working on the machine at load averages of 1.7 to 3.4:
+
+| Program | Take | | NumPy | Installed | Lazy | Fused | Fused against NumPy |
+|---|---|---|---|---|---|---|---|
+| `pvlib_solar` | 16:01, with the other nine | before | 2,739.41 | 2,715.42 | 2,855.62 | 2,787.30 | 0.98x |
+| | 16:08 | after | 2,644.01 | 2,647.46 | 2,775.71 | 2,584.49 | 1.02x |
+| | 16:17 | before | 2,797.12 | 2,827.71 | 2,967.68 | 2,857.80 | 0.98x |
+| | 16:20 | after | 2,703.90 | 2,708.84 | 2,821.68 | 2,607.62 | 1.04x |
+| | 16:23 | before | 2,752.77 | 2,733.65 | 2,865.26 | 2,815.64 | 0.98x |
+| | 16:26 | after | 2,693.37 | 2,693.02 | 2,778.34 | 2,574.06 | 1.05x |
+| `prysm_zernike` | 16:01 | before | 411.66 | 416.41 | 421.26 | 379.92 | 1.08x |
+| | 16:08 | after | 408.28 | 414.17 | 416.05 | 369.13 | 1.11x |
+| | 16:17 | before | 408.61 | 406.44 | 417.71 | 375.92 | 1.09x |
+| | 16:20 | after | 399.51 | 401.56 | 419.39 | 365.11 | 1.09x |
+| | 16:23 | before | 392.21 | 388.87 | 405.01 | 365.85 | 1.07x |
+| | 16:26 | after | 387.37 | 389.16 | 399.11 | 352.79 | 1.10x |
+
+What the fused run did, which does not move from take to take:
+
+| Program | | Expressions, all planned | Kernel calls | Nodes inside a program | Given up | New arrays written |
+|---|---|---|---|---|---|---|
+| `pvlib_solar` | before | 290 | 684 | 638 | 0 | 13,663.5 MB |
+| | after | 290 | 873 | 953 | 0 | 11,014.5 MB |
+| `prysm_zernike` | before | 45 | 86 | 93 | 0 | 805.3 MB |
+| | after | 45 | 98 | 105 | 0 | 704.6 MB |
+
+- **pvlib's fused run is 7% to 9% quicker, and ahead of NumPy where it was behind.** 203 ms, 250 ms and 242 ms less in the three pairs, and 0.98x of NumPy made 1.02x to 1.05x. The eager runs of each later take were 2% to 3.5% quicker as well, which is the machine, so the pairs overstate it; a first pair, taken the other way round by the machine, NumPy 1% slower in the later take, had 2,757 ms made 2,651 ms, 4%, and 0.97x made 1.02x. Against the lazy run of the same take, which the change does not touch, the fused run went from 1.02x to 1.04x to 1.07x to 1.08x in all four.
+- **The nutation series is 63 programs of nine operations.** `mine` reads each line as `add(add(add(add(mul(S0,V0),mul(S1,V1)),mul(S2,V2)),mul(S3,V3)),mul(S4,V4))`, where it was the 315 products alone and 63 sums of five arrays. The 315 products are the 315 more nodes inside a program, and 2.6 GB of arrays that are no longer written. A program is five kernel calls a block, one `s * a` and four `a + s * b`: the library has no kernel of the whole line.
+- **prysm's is 11 to 13 ms quicker in each pair, 3%,** which is at what two takes differ by here. It has 27 such operations. The first polynomial of a recurrence, `alpha + 1 + (alpha + beta + 2) * ((x - 1) / 2)` with `alpha` an `np.int64`, is one program of four operations, six times, with two more nodes inside each. The others are `m * t` and `r ** m`, single operations that feed `np.sin`, `np.cos` and a power the library makes.
+- **The other eight of the ten, and the corpus, have nothing for it.** Every float64 element-by-element operation of the thirty-six programs was looked at for such an operand, at the large size: 315 in pvlib, 27 in prysm, and 152 on arrays of one element in the two networks. The eight's counts of expressions, kernel calls and fused nodes are what they were, and the time to plan pvlib's 290 expressions is 10.9 ms before and after. Their times in the take with all ten moved by up to 6% either way, NumPy's with them.
+
+**What was not built.** A kernel for the whole line, or for `a + s * b + t * c`, which `mine` now puts first of the shapes these two programs would gain from: the five calls of a program already keep what passes between them in the cache. An `np.float32` scalar and a Python integer beyond 2**53 beside float64, which have the bits by the same argument: no program of the thirty-six has one. The tables from an ARM64 machine: there is none here, and nothing in the change is the processor's.
+
 ## What is open
 
 Each of these is a measurement above and a decision not taken here, with the issue it is parked in.
@@ -394,7 +444,7 @@ Each of these is a measurement above and a decision not taken here, with the iss
 - **A mathematics library's functions under fusion,** [issue 315](https://github.com/sofeikov/hotkernels/issues/315). A third of these programs. The package has a kind of kernel that is not bit-identical, off unless asked for; the lazy layer has no such kind, and its design rests on NumPy's bits. Whether `fuse.enable(inexact=True)` should exist is a design question, and `cos`, `sin` and powers by a whole number are what it would be for. `x % 1.0` as `x - np.floor(x)` is in [issue 222](https://github.com/sofeikov/hotkernels/issues/222), which was open for the remainder already.
 - **Walking a program's arrays in the order of memory,** [issue 316](https://github.com/sofeikov/hotkernels/issues/316).
 - **Rows of three or four with a value for each row, in a program of several steps,** [issue 317](https://github.com/sofeikov/hotkernels/issues/317).
-- **Whole-number NumPy scalars as numbers,** [issue 318](https://github.com/sofeikov/hotkernels/issues/318).
+- **Whole-number NumPy scalars as numbers,** [issue 318](https://github.com/sofeikov/hotkernels/issues/318). Built ([above](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression)). Left as they were: an `np.float32` scalar and a Python integer beyond 2**53 beside float64, which no program of the corpus or of these ten has, and a kernel for the whole line of the nutation series.
 - **A sum of a product along a short last axis,** [issue 319](https://github.com/sofeikov/hotkernels/issues/319).
 - **`out=`, `np.clip` and plain operands on the core's quick road,** [issue 320](https://github.com/sofeikov/hotkernels/issues/320).
 - **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): whether a node's value can be released, or its memory used again, as soon as its last reader has run.
