@@ -74,6 +74,15 @@ OPERATIONS = {**ARITHMETIC, **UNARY, **COMPARISONS, np.where: "where"}
 IN_PLACE = {"x += y": np.add, "x -= y": np.subtract, "x *= y": np.multiply, "x /= y": np.true_divide}
 # The largest whole number a float64 holds exactly: a Python integer up to it is the same number as a float.
 EXACT_INTEGER = 2 ** 53
+# The kinds of element type, by NumPy's letters for them, that hold whole numbers: booleans, and integers with a
+# sign and without.
+WHOLE_KINDS = "biu"
+# NumPy's scalar types of those kinds: `np.bool_` and one for each integer type of C, `np.int64` and `np.longlong`
+# apart. Beside a float64 array NumPy gives each of them the float64 its own conversion makes, once, and then
+# runs the float64 loop, so such a scalar is a number to a kernel by that value (`_is_number`). The types are
+# listed and not asked for by `isinstance(x, np.integer)`: `np.timedelta64` is an `np.signedinteger` too, and is
+# no number.
+WHOLE_SCALARS = frozenset({np.bool_} | {np.dtype(code).type for code in np.typecodes["AllInteger"]})
 # The exponents of `np.power` that NumPy computes as one multiplication, `x * x`.
 SQUARE_EXPONENTS = (2, 2.0)
 # The name of the operation that is one multiplication of a value by itself.
@@ -247,9 +256,22 @@ def held_among(todo: list[Node], uses: dict[int, int], unread: dict[int, int] | 
 
 
 def _is_number(arg: Any) -> bool:
-    """Say whether an operand is a number a kernel can take in a register: a Python float or integer, or a float64."""
+    """Say whether an operand is a number a kernel can take in a register.
+
+    Args:
+        arg: An operand as the program wrote it.
+
+    Returns:
+        True for a Python float, a Python integer a float64 holds exactly,
+        an `np.float64`, and a NumPy scalar of a whole-number or boolean
+        type (`WHOLE_SCALARS`) of any value. NumPy converts such a scalar
+        to float64 before the float64 loop runs, rounding a value beyond
+        2**53 to the nearest float64, and `float()` of the scalar is that
+        same conversion, which is what `_Group.operands` hands a kernel.
+    """
     kind = type(arg)
-    return kind is float or kind is np.float64 or (kind is int and -EXACT_INTEGER <= arg <= EXACT_INTEGER)
+    return (kind is float or kind is np.float64 or (kind is int and -EXACT_INTEGER <= arg <= EXACT_INTEGER)
+            or kind in WHOLE_SCALARS)
 
 
 # The innermost dimension below which an expression with one value for each row (`dx[:, :, None]` beside a grid)
@@ -271,7 +293,8 @@ def _leaf_kind(arg: Any, shape: tuple[int, ...]) -> str | None:
 
     Returns:
         VECTOR for a float64 array as long as the shape along the innermost
-        axis, SCALAR for a number or a float64 array of length one along it,
+        axis, SCALAR for a number, a float64 array of length one along it,
+        or an array without dimensions of a whole-number or boolean type,
         and None for anything a fused kernel does not read: another element
         type, a length that is not known.
     """
@@ -280,7 +303,9 @@ def _leaf_kind(arg: Any, shape: tuple[int, ...]) -> str | None:
     if type(arg) is not Node and type(arg) is not np.ndarray:
         return None
     if arg.dtype != FLOAT64 or not arg.dtype.isnative:
-        return None
+        # One whole number, `np.asarray(3)` or `counts.sum()`, is a number as its NumPy scalar is (`_is_number`).
+        # With a dimension it is an array of another type, which NumPy converts element by element.
+        return SCALAR if not arg.shape and arg.dtype.kind in WHOLE_KINDS else None
     if not arg.shape or arg.shape[-1] == 1 != shape[-1]:
         return SCALAR
     return VECTOR if arg.shape[-1] == shape[-1] and graph.is_known(arg.shape) else None
@@ -334,8 +359,10 @@ def operation_of(node: Node) -> tuple[str, tuple] | None:
     name = OPERATIONS.get(operation)
     if name is not None:
         return name, args
-    if (operation is np.power or operation is operator.pow) and type(args[1]) in (int, float) \
-            and args[1] in SQUARE_EXPONENTS:
+    # `x ** np.int64(2)` is `np.power(x, np.int64(2))`, whose loop is handed the exponent as the float64 2.0 and
+    # multiplies, as it does for a Python 2: the same bits as `x * x`, at a multiplication's speed.
+    if (operation is np.power or operation is operator.pow) \
+            and (type(args[1]) in (int, float) or type(args[1]) in WHOLE_SCALARS) and args[1] in SQUARE_EXPONENTS:
         return SQUARE, args[:1]
     return None
 
@@ -673,6 +700,7 @@ def _reading_core() -> Any:
                         vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
                         float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
                         is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH,
+                        whole_scalars=WHOLE_SCALARS, whole_kinds=WHOLE_KINDS,
                         short_row=SHORT_ROW, slight_row=SLIGHT_ROW,
                         row_operations=ROW_OPERATIONS)
         _told_core = core

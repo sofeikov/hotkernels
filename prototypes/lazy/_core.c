@@ -4917,6 +4917,8 @@ static PyObject *f_float64, *f_boolean; /* `fuse.FLOAT64` and `fuse.BOOLEAN` */
 static PyObject *f_power, *f_pow;    /* `np.power` and `operator.pow` */
 static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
 static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
+static PyObject *f_whole_scalars;    /* `fuse.WHOLE_SCALARS` */
+static PyObject *f_whole_kinds;      /* `fuse.WHOLE_KINDS` */
 static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
 static Py_ssize_t f_short_row, f_slight_row; /* `fuse.SHORT_ROW`, `fuse.SLIGHT_ROW` */
 static PyObject *f_row_operations;           /* `fuse.ROW_OPERATIONS` */
@@ -5130,6 +5132,29 @@ call_of(PyObject *node, PyObject **operation, PyObject ***items, Py_ssize_t *cou
     return 0;
 }
 
+/* Whether an object is a NumPy scalar of a whole-number or boolean type: `type(arg) in fuse.WHOLE_SCALARS`. */
+static int
+whole_scalar(PyObject *arg)
+{
+    int found = PySet_Contains(f_whole_scalars, (PyObject *)Py_TYPE(arg));
+    if (found < 0) {
+        PyErr_Clear(); /* A type that cannot be looked up is none of them. */
+        return 0;
+    }
+    return found;
+}
+
+/* Whether an element type holds whole numbers or booleans: `dtype.kind in fuse.WHOLE_KINDS`. */
+static int
+whole_kind(PyObject *dtype)
+{
+    if (!PyArray_DescrCheck(dtype)) {
+        return 0;
+    }
+    return PyUnicode_FindChar(f_whole_kinds, (Py_UCS4)((PyArray_Descr *)dtype)->kind, 0,
+                              PyUnicode_GET_LENGTH(f_whole_kinds), 1) >= 0;
+}
+
 /* `fuse.operation_of(node)`: 1 with the operation's name in a pattern (borrowed) and its operands; 0 for None;
  * -1 with an error set. */
 static int
@@ -5149,7 +5174,7 @@ operation_of(PyObject *node, PyObject **name, PyObject ***items, Py_ssize_t *cou
     }
     if ((operation == f_power || operation == f_pow) && *count >= 2) {
         PyObject *exponent = (*items)[1];
-        if (PyLong_CheckExact(exponent) || PyFloat_CheckExact(exponent)) {
+        if (PyLong_CheckExact(exponent) || PyFloat_CheckExact(exponent) || whole_scalar(exponent)) {
             int square = PySequence_Contains(f_square_exponents, exponent);
             if (square < 0) {
                 return -1;
@@ -5176,6 +5201,9 @@ leaf_kind(PyObject *arg, PyObject *shape)
         long long value = PyLong_AsLongLongAndOverflow(arg, &overflow);
         return !overflow && value >= -f_exact_integer && value <= f_exact_integer ? f_scalar : Miss;
     }
+    if (whole_scalar(arg)) {
+        return f_scalar; /* `np.int64(3)`: the float64 NumPy's conversion gives, whatever its value. */
+    }
     long long wanted = last_length(shape), own;
     if (Py_TYPE(arg) == Node) {
         PyObject *dtype = SLOT(arg, node_at[N_DTYPE]), *has = SLOT(arg, node_at[N_SHAPE]);
@@ -5186,7 +5214,8 @@ leaf_kind(PyObject *arg, PyObject *shape)
             Py_XDECREF(native);
             PyErr_Clear();
             if (!is_native) {
-                return Miss;
+                /* One whole number is a number, as its NumPy scalar is; with a dimension it is another type's array. */
+                return PyTuple_GET_SIZE(has) == 0 && whole_kind(dtype) ? f_scalar : Miss;
             }
         }
         if (PyTuple_GET_SIZE(has) == 0) {
@@ -5203,7 +5232,7 @@ leaf_kind(PyObject *arg, PyObject *shape)
         PyArray_Descr *descr = PyArray_DESCR(array);
         if ((PyObject *)descr != f_float64 && !(descr->type_num == NPY_DOUBLE && PyArray_ISNBO(descr->byteorder)
                                                 && dtype_is((PyObject *)descr, f_float64))) {
-            return Miss;
+            return PyArray_NDIM(array) == 0 && whole_kind((PyObject *)descr) ? f_scalar : Miss;
         }
         if (PyArray_NDIM(array) == 0) {
             return f_scalar;
@@ -6005,7 +6034,9 @@ module_find_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "array", &PyUnicode_Type, &f_array) || take(given, "store", &PyUnicode_Type, &f_store)
         || take(given, "mul", &PyUnicode_Type, &f_mul) || take(given, "float64", NULL, &f_float64)
         || take(given, "boolean", NULL, &f_boolean) || take(given, "power", NULL, &f_power) || take(given, "pow", NULL, &f_pow)
-        || take(given, "is_basic_index", NULL, &f_is_basic_index)) {
+        || take(given, "is_basic_index", NULL, &f_is_basic_index)
+        || take(given, "whole_scalars", &PyFrozenSet_Type, &f_whole_scalars)
+        || take(given, "whole_kinds", &PyUnicode_Type, &f_whole_kinds)) {
         Py_XDECREF(expression);
         Py_XDECREF(term);
         Py_XDECREF(leaf);
