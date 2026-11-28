@@ -50,7 +50,7 @@ Each program has two sizes. At the **large** size its arrays are large enough to
 Three things about the corpus are worth knowing before reading its results.
 
 - **A program that is calls into a library changes its one line like any other.** The `np` of the module that calls pandas or scikit-learn is the stand-in, and the arrays it hands over are lazy. The library has its own `numpy` and asks for `ndarray`s, so each array is computed where it is handed over, and what the library does is in no graph. These programs say what the layer costs a program it can do nothing for.
-- **One library does not take a lazy array.** scikit-image's `regionprops_table` asks `np.isscalar` of the mean of an image it was given. For a lazy image that mean is a lazy array without dimensions, not a number, and the library fails. `skimage_pipeline` is therefore handed plain arrays, and nothing of it is deferred.
+- **One library does not take a lazy array.** scikit-image's `regionprops_table` asks `np.isscalar` of the mean of an image it was given, with its own `numpy`. For a lazy image that mean is a lazy array without dimensions, not a number, and the library fails. `skimage_pipeline` is therefore handed plain arrays, and nothing of it is deferred.
 - **One program needed the layer to learn something.** `mandelbrot2` assigns to `x.shape`, which a lazy array now accepts.
 
 ## Where NumPy's time goes

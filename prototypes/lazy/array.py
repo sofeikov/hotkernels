@@ -696,7 +696,8 @@ def _view_request(args: tuple, kwargs: dict) -> tuple[bool, tuple, dict]:
     named = args + tuple(kwargs.values())
     # By identity: `==` on an element type or an array would ask them to compare themselves with a class.
     if not any(value is LazyArray for value in named):
-        return not named or (len(named) == 1 and named[0] is np.ndarray and set(kwargs) <= set(VIEW_PARAMETERS)), args, kwargs
+        whole = not named or (len(named) == 1 and named[0] is np.ndarray and set(kwargs) <= set(VIEW_PARAMETERS))
+        return whole, args, kwargs
     given = dict(zip(VIEW_PARAMETERS, args))
     proper = len(args) <= len(VIEW_PARAMETERS) and not set(given) & set(kwargs) and set(kwargs) <= set(VIEW_PARAMETERS)
     given.update(kwargs)
@@ -733,7 +734,8 @@ def _is_viewed_by_index(target: "LazyArray") -> bool:
     held = target._held
     if type(held) is not _Cell:
         # The value alone, as the C core leaves the result of a call it made at once.
-        return type(held) is np.ndarray and held.ndim > 0 and held.dtype.kind in rules.DEFERRED_KINDS and 0 not in held.shape
+        return (type(held) is np.ndarray and held.ndim > 0 and held.dtype.kind in rules.DEFERRED_KINDS
+                and 0 not in held.shape)
     node = target._node
     return node.shape != () and rules.is_admissible(node) and (node.pending or type(node.value) is np.ndarray)
 

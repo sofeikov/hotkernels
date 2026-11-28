@@ -380,8 +380,10 @@ def _run_options(np: Any, inputs: tuple) -> Any:
 
 
 # Applications given plain `ndarray`s whatever module they run with. scikit-image's `regionprops_table` asks
-# `np.isscalar` of the mean of an image it was handed; for a lazy image that mean is a lazy array without
-# dimensions, not a number, and the library fails on it. With plain inputs nothing of the program is deferred.
+# `np.isscalar` of the mean of an image it was handed, with its own `numpy`, whose function looks at the type of
+# its argument; for a lazy image that mean is a lazy array without dimensions, not a number, and the library
+# fails on it. With plain inputs nothing of the program is deferred. The stand-in's `np.isscalar` answers for the
+# value, which would serve only if the library's module computed with the stand-in.
 PLAIN_INPUTS = frozenset({"skimage_pipeline"})
 
 

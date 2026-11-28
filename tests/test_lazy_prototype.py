@@ -693,7 +693,8 @@ def test_isscalar_says_of_a_lazy_array_what_numpy_says_of_its_value():
         x = np.asarray(numpy.array([[numpy.nan, -0.0, numpy.inf], [1.0, 2.0, 3.0]]))
         alone = np.asarray(numpy.array(3.0))
         asked = (x, x.mean(), x.sum(axis=0), x[1, 2], alone, alone * 2, x.max() * 2, np.sum(alone, keepdims=True),
-                 x[x > 99], np.asarray(numpy.empty((0, 3))), np.asarray(numpy.array([7.0])), np.float64(3.0), 3, "a", [1], None)
+                 x[x > 99], np.asarray(numpy.empty((0, 3))), np.asarray(numpy.array([7.0])), np.float64(3.0), 3, "a",
+                 [1], None)
         return [np.isscalar(each) for each in asked] + [np.isscalar(element=x.mean())]
 
     expected = program(numpy)
