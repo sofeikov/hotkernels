@@ -1437,6 +1437,11 @@ _fused: Any = None
 LIBRARY: dict[str, Kernel] = {}
 # The same arranged for `tile`.
 _BY_TOP: dict[str, list[Entry]] = {}
+# The calls that wait for a kernel, worked out once when the library is loaded and handed to the core at every
+# `enable`: (the callables a kernel makes, those of them that are comparisons a kernel selects by). `enable` is
+# called for every run of a program that is timed, and reading the comparisons off the library's eighty names
+# took 0.26 ms each time, which was a fifth of a program that takes 1.3 ms.
+_WAITS: tuple[frozenset, frozenset] = (frozenset(), frozenset())
 
 
 def load_library(module: Any) -> dict[str, Kernel]:
@@ -2856,7 +2861,7 @@ def enable(install: bool = True) -> bool:
         module that calls them is not built (`python -m
         prototypes.lazy.build_fused`): nothing changes then.
     """
-    global _fused
+    global _fused, _WAITS
     if _fused is None:
         try:
             from . import _fused as module
@@ -2867,12 +2872,13 @@ def enable(install: bool = True) -> bool:
         LIBRARY.update(load_library(module))
         LIBRARY_VECTORS.update({kernel.index: len(kernel.vectors) for kernel in LIBRARY.values()})
         _BY_TOP.update(index(LIBRARY))
+        # What may wait for a kernel: the arithmetic a kernel makes, on float64, and the comparisons a kernel
+        # selects by. Everything else on arrays that have their values is made at once, whatever its size.
+        _WAITS = (frozenset(ARITHMETIC) | frozenset(UNARY) | frozenset(SCALED) | {operator.pow, np.power},
+                  comparisons_selected_by(LIBRARY))
     evaluate.planner = plan
     array.assign_rows = assign_rows
-    # What may wait for a kernel: the arithmetic a kernel makes, on float64, and the comparisons a kernel selects
-    # by. Everything else on arrays that have their values is made at once, whatever its size.
-    array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | frozenset(SCALED) | {operator.pow, np.power},
-                        FLOAT64, comparisons_selected_by(LIBRARY))
+    array.at_once_below(AT_ONCE_BELOW, _WAITS[0], FLOAT64, _WAITS[1])
     if install and not _installed_here:
         _install_package()
     return True
