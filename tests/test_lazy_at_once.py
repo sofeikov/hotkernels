@@ -361,6 +361,31 @@ def test_a_view_taken_at_once_holds_numpys_view(at_once: None):
     assert same(numpy.array([1.0, 1.0, 7.0, 8.0, 1.0]), (row * 1.0).gather())
 
 
+def test_a_view_by_the_arrays_own_type_taken_at_once_is_numpys_view(at_once: None):
+    """`x.view(type(x))` of an array that has its values is NumPy's view of it, and a write into it does not wait."""
+    def program(np: Any) -> Any:
+        """Fill an array through its view by type, as Matplotlib fills its array of normals, and scale it in place."""
+        slope = np.asarray(numpy.arange(12.0).reshape(3, 4)) * 0.25
+        normal = np.empty(slope.shape + (3,)).view(type(slope))
+        normal[..., 0] = -slope
+        normal[..., 1] = slope * slope
+        normal[..., 2] = 1
+        normal /= np.sqrt((normal * normal).sum())
+        return normal, normal.view(type(normal))[..., 0], slope.view(type(slope)) + 1.0
+
+    expected = program(numpy)
+    got = program(lazy)
+    for theirs, ours in zip(expected, got, strict=True):
+        assert same(theirs, ours.gather())
+    whole = lazy.zeros((4, 5)) + 1.0
+    view = whole.view(type(whole))
+    assert type(view._held) is numpy.ndarray and view._held.base is whole._held
+    waiting = lazy.asarray(numpy.arange(200.0)) * 1.0
+    array.at_once_below(100)
+    view[1, 2] = 7.0  # Made at once, in the memory both look at, after what was waiting.
+    assert not waiting._node.pending and whole.gather()[1, 2] == 7.0 and view.gather().base is whole.gather()
+
+
 def test_a_view_of_a_strict_array_is_strict(at_once: None):
     """What is taken of a strict array refuses its values without `gather()`."""
     data = numpy.arange(12.0).reshape(3, 4)

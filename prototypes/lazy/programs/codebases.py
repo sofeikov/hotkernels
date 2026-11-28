@@ -218,16 +218,16 @@ def _terrain(size: str) -> tuple:
 def _run_hillshade(np: Any, inputs: tuple) -> Any:
     """Shade an elevation model with Matplotlib's `LightSource`, coloured by height.
 
-    The model is handed over as a plain `ndarray`. `LightSource.hillshade` makes its array of normals with
-    `np.empty(...).view(type(elevation))`, to keep a masked array masked; the type of a lazy array is not an array
-    type, and NumPy takes it for an element type and raises. So only what the module's own `np` calls return is lazy.
+    The model is handed over as the stand-in's array, like every other program's input.
+    `LightSource.hillshade` makes its array of normals with `np.empty(...).view(type(elevation))`, to keep a masked
+    array masked; on a lazy array that is a view by the array's own type, which the layer takes for `x.view()`.
     """
     import matplotlib
     from matplotlib import colors
     heights, cell = inputs
     with numpy_of(np, colors):
         return colors.LightSource(azdeg=315, altdeg=45).shade(
-            heights, cmap=matplotlib.colormaps[HILLSHADE_COLOURS], blend_mode="overlay",
+            np.asarray(heights), cmap=matplotlib.colormaps[HILLSHADE_COLOURS], blend_mode="overlay",
             vert_exag=HILLSHADE_EXAGGERATION, dx=cell, dy=cell)
 
 

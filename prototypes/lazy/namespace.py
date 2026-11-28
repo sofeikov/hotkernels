@@ -38,6 +38,10 @@ from .array import LazyArray, _at_once, wrap
 CONVERTERS = frozenset({"array", "asarray", "asanyarray", "ascontiguousarray", "asfortranarray"})
 # The converters that return their argument unchanged when it is an array already.
 PASS_THROUGH = frozenset({"asarray", "asanyarray"})
+# The function that asks whether its argument is a number and not an array. It is plain Python that looks at the
+# argument's type, so NumPy never asks a lazy array, and one type serves a lazy number and a lazy array alike:
+# `numpy.isscalar` says False of both. The stand-in answers it itself. Its parameter's name, for a call by keyword.
+SCALAR_QUESTION, SCALAR_QUESTION_PARAMETER = "isscalar", "element"
 # NumPy's random generators, whose methods make arrays out of the module's sight.
 RANDOM_GENERATORS = (np.random.Generator, np.random.RandomState)
 # The objects of the module that make arrays when they are indexed, not called: `np.mgrid[0:4, 0:3]`,
@@ -121,6 +125,35 @@ def _made_lazy(result: Any, source: str, strict: bool, owned: bool = False) -> A
     if isinstance(result, RANDOM_GENERATORS):
         return LazyRandom(result, strict)
     return result
+
+
+def _scalar_question(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap `np.isscalar`, so that it says of a lazy array what NumPy says of the value it stands for.
+
+    Args:
+        function: `numpy.isscalar`.
+
+    Returns:
+        A function that answers False for a lazy array with a dimension,
+        from its shape, with nothing computed. For one without dimensions
+        the answer is NumPy's for the value: True for a number, as the mean
+        of an array is, and False for an array without dimensions. Which of
+        the two a pending result is, is known for certain only once it is
+        computed, so it is computed, as `float(x)` computes it: the log and
+        `lazy_report()` say so, and a strict array raises `NotGathered`.
+        Anything that is not a lazy array is NumPy's to answer.
+    """
+    def isscalar(*args: Any, **kwargs: Any) -> bool:
+        """Say whether the argument is a number, as `np.isscalar` does."""
+        element = args[0] if args else kwargs.get(SCALAR_QUESTION_PARAMETER)
+        if not isinstance(element, LazyArray):
+            return function(*args, **kwargs)
+        if len(args) + len(kwargs) != 1:
+            return function(*args, **kwargs)  # Not a call the function has: NumPy's error.
+        if element._node.shape != ():
+            return False
+        return _at_once(function, f"np.{SCALAR_QUESTION}", args, kwargs)
+    return isscalar
 
 
 class LazyCallable:
@@ -370,6 +403,8 @@ class LazyNumPy:
             return attribute
         if self._module is np and name in CONVERTERS:
             return self._converter(attribute, name)
+        if self._module is np and name == SCALAR_QUESTION:
+            return _scalar_question(attribute)
         return LazyCallable(attribute, self._strict)
 
     def _converter(self, function: Callable[..., Any], name: str) -> Callable[..., Any]:

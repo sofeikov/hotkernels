@@ -52,6 +52,13 @@ WRITING_FUNCTIONS = frozenset({np.copyto, np.putmask, np.place, np.put, np.fill_
 WRITING_METHODS = frozenset({"sort", "fill", "put", "partition", "resize", "itemset", "setfield", "byteswap"})
 # The one ufunc method that writes into its first argument.
 WRITING_UFUNC_METHOD = "at"
+# `ndarray.view(dtype, type)`: its two parameters by name, in the order they are given by position.
+VIEW_PARAMETERS = ("dtype", "type")
+# The call a view made at once is counted and reported as.
+VIEW_CALL = "ndarray.view"
+# The index that `x.view()` is deferred as: `x[...]`, written as the tuple `_plain_item` reads, so that the view is
+# one whose shape the layer knows without asking NumPy and an assignment through it is known to fit the same way.
+WHOLE_INDEX = (Ellipsis,)
 
 
 # In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
@@ -657,6 +664,80 @@ def _view(function: Callable[..., Any], args: tuple, frame: FrameType) -> Any:
     deferred = _try_defer(function, function.__name__, args, {}, None, frame)
     # Not `deferred or ...`: a truth test of a lazy array would compute it.
     return deferred if deferred is not None else _at_once(function, f"np.{function.__name__}", args, {})
+
+
+def _view_request(args: tuple, kwargs: dict) -> tuple[bool, tuple, dict]:
+    """Read the arguments of `x.view(...)` on a lazy array, with the lazy array's own type taken out.
+
+    `np.empty(shape).view(type(x))` is how NumPy code keeps the kind of
+    array it was given: a masked array stays masked. The type of a lazy
+    array is `LazyArray`, which NumPy does not know: it would take the class
+    for an element type and raise. To `view` the class means what it means
+    in that line, the kind of array the receiver already is, so it is taken
+    out: `x.view(type(x))` is `x.view()`, and `x.view(dtype, type(x))` is
+    `x.view(dtype)`.
+
+    NumPy takes a subclass of `ndarray` for the array type wherever it is
+    given, as `dtype` too, and raises for a call that gives `type` beside
+    it. The same holds here with `LazyArray` as an array type: any other
+    call that names the class is handed to NumPy with `ndarray` in its
+    place, and NumPy raises what it raises for `ndarray` there.
+
+    Args:
+        args: The positional arguments of the call, without the array.
+        kwargs: Its keyword arguments.
+
+    Returns:
+        (whether the call is `x.view()` or names `ndarray` and nothing
+        else, so that it asks for the same elements with no change of
+        element type; the positional arguments to give NumPy if the call is
+        made at once; the keyword arguments for the same).
+    """
+    named = args + tuple(kwargs.values())
+    # By identity: `==` on an element type or an array would ask them to compare themselves with a class.
+    if not any(value is LazyArray for value in named):
+        whole = not named or (len(named) == 1 and named[0] is np.ndarray and set(kwargs) <= set(VIEW_PARAMETERS))
+        return whole, args, kwargs
+    given = dict(zip(VIEW_PARAMETERS, args))
+    proper = len(args) <= len(VIEW_PARAMETERS) and not set(given) & set(kwargs) and set(kwargs) <= set(VIEW_PARAMETERS)
+    given.update(kwargs)
+    dtype_name, type_name = VIEW_PARAMETERS
+    if proper and len(given) == 1:
+        # `x.view(type(x))`, by position or under either name.
+        return True, (), {}
+    if proper and given[type_name] is LazyArray and not (isinstance(given[dtype_name], type)
+                                                         and issubclass(given[dtype_name], (np.ndarray, LazyArray))):
+        # `x.view(dtype, type(x))`: a change of element type, NumPy's.
+        return False, (given[dtype_name],), {}
+    # A call `view` does not have, or an array type beside `type`: NumPy says which, of `ndarray`.
+    return (False, tuple(np.ndarray if arg is LazyArray else arg for arg in args),
+            {name: np.ndarray if value is LazyArray else value for name, value in kwargs.items()})
+
+
+def _is_viewed_by_index(target: "LazyArray") -> bool:
+    """Say whether `x[...]` of a lazy array is what NumPy's `x.view()` would give, and is an index the layer defers.
+
+    For an `ndarray` of one dimension or more the two are the same view.
+    They differ for a number, whose view is a number where `x[...]` is an
+    array without dimensions, and they may differ for a subclass of
+    `ndarray`, which has methods of its own for both.
+
+    Args:
+        target: The array `view` was called on.
+
+    Returns:
+        True for an array of one dimension or more, no dimension of length
+        zero and an element type the layer defers, that is pending or has
+        an exact `ndarray` for its value. Nothing is computed to answer,
+        and an array that holds its value alone is given no node for it.
+    """
+    held = target._held
+    if type(held) is not _Cell:
+        # The value alone, as the C core leaves the result of a call it made at once.
+        return (type(held) is np.ndarray and held.ndim > 0 and held.dtype.kind in rules.DEFERRED_KINDS
+                and 0 not in held.shape)
+    node = target._node
+    return node.shape != () and rules.is_admissible(node) and (node.pending or type(node.value) is np.ndarray)
 
 
 def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict) -> Any:
@@ -2088,6 +2169,39 @@ class LazyArray:
     searchsorted = _reduction(np.searchsorted, "searchsorted")
     round = _reduction(np.round, "round")
     astype = _reduction(np.ndarray.astype, "astype")
+
+    def view(self, *args: Any, **kwargs: Any) -> "LazyArray":
+        """Give a new array on the same memory: `ndarray.view`, with a lazy array's own type understood.
+
+        `x.view()`, `x.view(np.ndarray)` and `x.view(type(x))` ask for the
+        same elements with no change of element type. On an array of one
+        dimension or more that is the view `x[...]`, which NumPy lays out
+        the same way, and it is deferred as that index is: the result
+        shares the array's cell, so a write into either is seen through the
+        other and can wait in the graph. `type(x)` is `LazyArray`; see
+        `_view_request` for what it means here.
+
+        Args:
+            *args: `dtype` and `type`, when given by position.
+            **kwargs: `dtype` and `type`, when given by keyword.
+
+        Returns:
+            A lazy array that is a view of this one, for the three calls
+            above: pending, or NumPy's view where the index `x[...]` would
+            be taken at once. For anything else the call is made at once, by
+            NumPy's own method on the computed array: a change of element
+            type, another array type (`np.matrix`, a masked array), an
+            array without dimensions, whose view is a number when the value
+            is one, an array whose value is of a subclass of `ndarray`, and
+            an array the layer defers no operation on.
+
+        Raises:
+            Exception: NumPy's own, for arguments `ndarray.view` does not take.
+        """
+        whole, args, kwargs = _view_request(args, kwargs)
+        if whole and _is_viewed_by_index(self):
+            return self[WHOLE_INDEX]
+        return _at_once(_method("view"), VIEW_CALL, (self,) + args, kwargs)
 
     def nonzero(self) -> "tuple[LazyArray, ...]":
         """Give the positions of the elements that are not zero, deferred.

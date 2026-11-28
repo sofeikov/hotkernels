@@ -6,7 +6,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 
 ## Summary
 
-- **All ten give NumPy's results bit for bit,** node by node and fused, with the kernels installed and without. One library had to be handed a plain `ndarray`, and one seed had to be other than zero ([What got in the way of running them](#what-got-in-the-way-of-running-them)).
+- **All ten give NumPy's results bit for bit,** node by node and fused, with the kernels installed and without. When they were measured one library, Matplotlib, had to be handed a plain `ndarray`; it takes a lazy one since ([`np.empty(...).view(type(x))`](#npemptyviewtypex-issue-322)). One seed had to be other than zero ([What got in the way of running them](#what-got-in-the-way-of-running-them)).
 - **Fusion gains on three, by 1.08x to 1.14x, is level on five, and loses on two.** Against plain NumPy at the large size: Astropy's models 1.14x, prysm's Zernike wavefront 1.10x, scikit-image's colour difference 1.08x; the book's convolutional network 1.07x, which is `install()`'s gain and not fusion's; SALib 1.02x; perlin-numpy, Matplotlib's hill shading and the speech features 1.00x; pvlib's solar position 0.97x; scikit-learn's perceptron 0.88x. Nothing like the 2x to 3x of the corpus's stencils. pvlib's is 1.02x to 1.05x since a whole number from its tables is a number of an expression ([issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression)).
 - **`install()` alone gains on one of the ten,** the convolutional network, 1.08x, from its kernels for `x[mask] = 0` and for `argmax` and sums along rows. On the other nine it is within 2% of NumPy either way: their time is not in calls the package has kernels for.
 - **A third of all the time in the ten programs is a mathematics library's functions:** `cos`, `sin`, `x ** 3`, `x ** 2.4`, `%`, `cbrt`, `hypot`, `arctan2`, `exp`. 2.6 s of 7.9 s. No kernel of either kind may touch them, because the result has to be the library's bits. This is the largest thing the ten programs have that the corpus did not show at this weight. What a kind that is not bit-identical would be worth was measured ([issue 315](#issue-315-what-an-inexact-kind-would-be-worth)): glibc's vector functions in place of NumPy's loops make pvlib 2.17x with no graph, and the decision is left open.
@@ -215,6 +215,7 @@ The CIEDE2000 formula is long, and its two largest expressions, of 24 and 16 ope
 
 - **81% of the nodes' time is expressions, and the two that matter are given up.** The overlay blend is `np.where(rgb <= 0.5, 2 * intensity * rgb, 1 - 2 * (1 - intensity) * (1 - rgb))`, 101 ms, on rows of four colour values with one `intensity` for each pixel, an array of shape (2048, 2048, 1) beside one of (2048, 2048, 4). And the length of each normal, `sum_sq += arr[..., i, np.newaxis] ** 2` for each of three components and then `np.sqrt(sum_sq)`, 24 ms, reads three arrays that each step over three elements. One program of four is kept.
 - **`install()` serves `np.clip`, `np.where` and the colour map's `x[mask] = v`,** and the program is level with it and without: those calls are 2% of it.
+- **These figures are of the elevation model handed over as a plain `ndarray`,** which `np.empty(...).view(type(elevation))` required then. Handed over lazy, as it is now, the program is level with this: [`np.empty(...).view(type(x))`](#npemptyviewtypex-issue-322).
 
 ### `speech_mfcc`, 1.00x
 
@@ -284,7 +285,9 @@ What a call costs over NumPy's own, on arrays of 200 × 100, with fusion on:
 
 ### The type of a lazy array
 
-`LightSource.hillshade` makes its array of normals with `np.empty(elevation.shape + (3,)).view(type(elevation))`, so that a masked array stays masked. The type of a lazy array is not an array type; NumPy takes it for an element type and raises `TypeError: Cannot change data-type for array of references`. The program hands Matplotlib a plain `ndarray`, as the corpus does for scikit-image, which fails on `np.isscalar` of a lazy mean. It is the second library to ask what a lazy array is.
+`LightSource.hillshade` makes its array of normals with `np.empty(elevation.shape + (3,)).view(type(elevation))`, so that a masked array stays masked. The type of a lazy array is not an array type; NumPy takes it for an element type and raises `TypeError: Cannot change data-type for array of references`. When the tables above were taken the program handed Matplotlib a plain `ndarray` for that, as the corpus does for scikit-image, which fails on `np.isscalar` of a lazy mean. It is the second library to ask what a lazy array is.
+
+Both questions have an answer now, where they reach the layer: `x.view(type(x))` on a lazy array is `x.view()`, and `np.isscalar` of the stand-in says what NumPy says of the value. Matplotlib is handed the lazy elevation model. scikit-image asks its own `numpy.isscalar`, which no lazy array can answer, and is still handed plain arrays. [`np.empty(...).view(type(x))`](#npemptyviewtypex-issue-322) has what was built and measured, and [the design](lazy-design.md#what-a-library-asks-a-lazy-array) the rule.
 
 ### The order of timing
 
@@ -300,7 +303,7 @@ Timing in turn, every way once a round, round after round, with the quickest of 
 
 ### What got in the way of running them
 
-- **Matplotlib,** as above.
+- **Matplotlib,** as above, until the layer took `x.view(type(x))`.
 - **SALib seeds its resampling with `if seed:`,** so a seed of 0 is no seed, and two eager runs differ. The program's seed is 1.
 - **Nothing else.** `np.random` under the stand-in, a module that calls NumPy `numpy` and not `np`, a book's modules that append to `sys.path` and import each other by a bare name, a network that updates its weights in place through a second name for each array: all ran as written.
 
@@ -455,6 +458,41 @@ What the fused run did, which does not move from take to take:
 - **Built, since they need no decision:** `np.radians`, `np.degrees`, `np.deg2rad` and `np.rad2deg` are `mul` of their operand and NumPy's constant, with NumPy's bits on 100 million values. pvlib computes 66 more nodes inside a program and writes 0.55 GB less; in time it is level, at load averages of 3.5 to 5.6, where the conversions weigh at most 2.5%.
 - **Shown and not built:** `x % 1.0` has the bits of `x - np.floor(x)` on every value tried, but needs a `floor` the kernels do not have, and perlin-numpy's `grid % 1` is on an array the module declines for its layout.
 
+### `np.empty(...).view(type(x))`, issue 322
+
+**What was built.**
+
+- **`x.view(type(x))` on a lazy array is `x.view()`.** Given to `view`, `LazyArray` means the kind of array the receiver is. `x.view()`, `x.view(np.ndarray)` and `x.view(type(x))` of an array with a dimension are the view `x[...]`, deferred as that index is, so a write through the view is a write into the array and can wait in the graph. Before, each was NumPy's method made at once, and a write into its result was made at once as well. A change of element type, another array type and an array without dimensions are still NumPy's at once.
+- **`np.isscalar` of the stand-in answers for the value:** True for a lazy mean, where NumPy's function, which looks at the type alone, said False.
+- **`mpl_hillshade` hands Matplotlib the lazy elevation model.** `LightSource.shade` runs to its end on it, lazily and fused, with NumPy's bits and NumPy's layout of the result. Nothing else stopped it: no masked array, no `isinstance`.
+
+**What it measured.** `mpl_hillshade` before and after, one after the other three times at the large size and twice at the small, the quickest of 7 rounds (15 at the small size), the ways in turn, one performance core, one BLAS thread, with the kernels installed. Two other sessions were building and timing on the machine (load 4.1 to 4.4), and NumPy's own time moved by 3% between tables, so each row is to be read against its own NumPy column.
+
+| Size | Taken | NumPy ms | lazy ms | fused ms | fused vs NumPy |
+|---|---|---|---|---|---|
+| large | before | 332.1, 330.8, 336.0 | 332.6, 330.2, 327.2 | 335.2, 332.1, 324.5 | 0.99x, 1.00x, 1.04x |
+| large | after | 326.4, 334.7, 337.0 | 341.1, 331.3, 333.3 | 334.7, 330.1, 331.1 | 0.98x, 1.01x, 1.02x |
+| small | before | 4.80, 4.83 | 5.57, 5.57 | 5.22, 5.17 | 0.92x, 0.93x |
+| small | after | 4.82, 4.72 | 5.51, 5.51 | 5.28, 5.26 | 0.91x, 0.90x |
+
+- **Level.** The fused run was at NumPy's time before and is at NumPy's time after, and the small size is within 3% of where it was.
+- **Ten more operations are deferred, and none of them is fused.** The second table of `fusion_time`, at the large size:
+
+  | | deferred ops | graphs | deferred fused | at once fused | expr. | tiled | kernel calls | fused nodes | given up | lazy MB | fused MB |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | before | 145 | 20 | 19 | 79 | 4 | 4 | 3 | 1 | 2 | 1,073.9 | 973.1 |
+  | after | 155 | 21 | 20 | 81 | 4 | 4 | 3 | 1 | 2 | 1,107.4 | 1,006.6 |
+
+- **Three of the ten are the elevation model's:** `vert_exag * elevation`, which `np.gradient` then needs at once, and `data.min()` and `data.max()`, which the colour map's norm needs at once. They were NumPy's calls on a plain array before, outside every count; the 33.5 MB more of new arrays is that product, now counted.
+- **Seven are the array of normals.** `np.empty(...).view(np.ndarray)` gave a lazy array before as well, but one made at once, which a write does not wait for. Node by node, the view, the three assignments `normal[..., i] = ...` and `normal /= _vector_magnitude(normal)` are nodes now. With fusion on a view of an array that has its values is NumPy's view, taken at once, and a write into it is made at once ([the design](lazy-fusion-design.md#as-the-graph-is-built)), so the fused run makes those writes where the program wrote them, as before.
+- **What they feed is not a kernel's.** The normals are written into every third element, and read back the same way by the length of each normal: arrays that step, which a kernel does not read ([What is not supported](#what-is-not-supported)). The rest of what the elevation model reaches is `np.gradient`, `ndarray.dot` on three dimensions and `np.clip`, made at once, and the colour map's norm, which makes a masked array of the model with `np.ma.array`, a conversion to an `ndarray`, and computes on plain arrays from there.
+- **No other program is reached.** Of the corpus's twenty-six and these ten, run lazily and fused at the small size with both new answers watched, only `mpl_hillshade` calls `view` on a lazy array, and none asks the stand-in's `np.isscalar`. So no other program was timed again.
+
+**What was not done.**
+
+- **scikit-image's `regionprops_table` is still handed plain arrays** (`corpus.PLAIN_INPUTS`). It asks `np.isscalar` of each region's mean with its own `numpy`, and that function looks at the type of its argument and calls nothing of it. With the stand-in as the `np` of `skimage.measure._regionprops` as well, the corpus's `skimage_pipeline` runs on lazy images and gives NumPy's bits, lazily and fused; the program was left as it is, a library that keeps its own `numpy`. For the real `numpy.isscalar` to say True, a lazy number would have to be of a class of its own, registered as a number: [the design](lazy-design.md#types-what-changes-for-the-user) says what that takes and why it is not proposed.
+- **`a.view(type(x))` on a plain `ndarray` `a` still raises.** It is NumPy's method. Matplotlib's line is reached because `np.empty` of the stand-in makes a lazy array.
+
 ## What is open
 
 Each of these is a measurement above and a decision not taken here, with the issue it is parked in.
@@ -466,7 +504,7 @@ Each of these is a measurement above and a decision not taken here, with the iss
 - **A sum of a product along a short last axis,** [issue 319](https://github.com/sofeikov/hotkernels/issues/319).
 - **`out=`, `np.clip` and plain operands on the core's quick road,** [issue 320](https://github.com/sofeikov/hotkernels/issues/320).
 - **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): whether a node's value can be released, or its memory used again, as soon as its last reader has run.
-- **A library that keeps the type of what it is given,** [issue 322](https://github.com/sofeikov/hotkernels/issues/322).
+- **A library that keeps the type of what it is given,** [issue 322](https://github.com/sofeikov/hotkernels/issues/322): built for `x.view(type(x))` and for `np.isscalar` of the stand-in ([above](#npemptyviewtypex-issue-322)). What is left is a library that asks with its own `numpy`, which is handed plain arrays.
 - **The design's ARM64 tables taken again in turn,** [issue 323](https://github.com/sofeikov/hotkernels/issues/323). The tools time in turn by default now and the x86-64 tables were taken again ([below](#issue-323-the-ways-timed-in-turn-by-default)); the tables from the Apple M1 Pro were not, for want of the machine.
 - **Which state of the allocator a program is timed in, and whether a fused run should keep the memory of its results,** [issue 326](https://github.com/sofeikov/hotkernels/issues/326): new pages from the system are a quarter of the equation of state's time.
 - **Taking by a table of positions,** which is half of SALib's analysis: [issue 224](https://github.com/sofeikov/hotkernels/issues/224), open already for `a[idx]`.

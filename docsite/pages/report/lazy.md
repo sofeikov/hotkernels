@@ -110,7 +110,7 @@ The deferred set is narrow in kinds and wide in count:
 | Matrix product | `@`, `np.matmul`, `np.dot` of one or two dimensions |
 | Reductions | `sum`, `mean`, `max`, `min`, `prod`, `var`, `std`, `any`, `all`, `argmax`, `argmin`, `np.nanargmax`, `np.count_nonzero`, with an axis and `keepdims` |
 | Running totals and searches | `np.cumsum`, `np.cumprod`, `np.searchsorted` |
-| Views | `x.T`, `reshape`, `ravel`, `np.transpose`, `np.swapaxes`, `np.expand_dims`, `np.squeeze`, slicing |
+| Views | `x.T`, `reshape`, `ravel`, `np.transpose`, `np.swapaxes`, `np.expand_dims`, `np.squeeze`, slicing, `x.view()` and `x.view(type(x))` |
 | Indexing by arrays | `x[rows]`, `x[rows, columns]`, `x[mask]`, also with an index that is itself pending: `x[np.argmax(w)]`, `x[speed > limit]` |
 | Ordering and positions | `np.partition`, `np.nonzero`, `np.flatnonzero`, `np.argwhere` |
 
@@ -221,7 +221,9 @@ Where that shows in a program:
 | `type(x)`, `print(x)` | `hotkernels.LazyArray`; a description, without values | None |
 | An annotation, `def step(w: np.ndarray)` | Python does not enforce it, so the function runs | None to run |
 | `isinstance(x, np.ndarray)` | False | Yes: `isinstance(x, (np.ndarray, hotkernels.LazyArray))`. The one place a program has to change, and the one place it can take another branch without a word |
+| `x.view(type(x))`, how NumPy code keeps the kind of array it was given | The view `x.view()`, deferred | None where the array viewed is lazy |
 | A reduction's result, `loss = (r ** 2).mean()` | A `LazyArray` of shape `()`; `loss.gather()` is an `np.float64` | None: `float(loss)` and `f"{loss:.3f}"` compute it |
+| `np.isscalar(loss)` | With the stand-in, NumPy's answer for the value. The real `numpy.isscalar` says False of every lazy array | None in a module whose `np` is the stand-in; a library that asks with its own `numpy` is handed `loss.gather()` |
 | A library that takes an array: pandas, matplotlib | It asks NumPy for an array and gets an `ndarray`, computed on the spot | None |
 | Code that reads memory directly: Cython's `double[:]`, `memoryview(x)` | `TypeError`: a lazy array has no buffer to give | Pass `x.gather()` |
 
