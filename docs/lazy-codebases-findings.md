@@ -8,6 +8,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 
 - **All ten give NumPy's results bit for bit,** node by node and fused, with the kernels installed and without. When they were measured one library, Matplotlib, had to be handed a plain `ndarray`; it takes a lazy one since ([`np.empty(...).view(type(x))`](#npemptyviewtypex-issue-322)). One seed had to be other than zero ([What got in the way of running them](#what-got-in-the-way-of-running-them)).
 - **Fusion gains on three, by 1.08x to 1.14x, is level on five, and loses on two.** Against plain NumPy at the large size: Astropy's models 1.14x, prysm's Zernike wavefront 1.10x, scikit-image's colour difference 1.08x; the book's convolutional network 1.07x, which is `install()`'s gain and not fusion's; SALib 1.02x; perlin-numpy, Matplotlib's hill shading and the speech features 1.00x; pvlib's solar position 0.97x; scikit-learn's perceptron 0.88x, and 0.95x since the calls it loses on were given a quick road ([`out=`, `np.clip` and plain operands](#out-npclip-and-plain-operands-issue-320)). Nothing like the 2x to 3x of the corpus's stencils. pvlib's is 1.02x to 1.05x since a whole number from its tables is a number of an expression ([issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression)). Since then perlin-numpy's arrays are walked in the order they lie in memory, and it gains as well, at 1.13x; and its sums along rows of two are one pass with their products, and it is at 2.0x: [What was built on it](#what-was-built-on-it).
+- **With the nine issues it filed built, six of the ten gain, three are level and one loses.** Fused against plain NumPy at the large size: perlin-numpy 2.04x, Matplotlib's hill shading 1.23x, prysm 1.15x, the convolutional network 1.12x, scikit-image 1.12x, pvlib 1.10x, Astropy's models 1.08x (it was 1.14x), the speech features 1.04x, SALib 1.02x, the perceptron 0.94x. [The nine together](#the-nine-together) has the tables; the bullets below are the study as it was measured.
 - **`install()` alone gains on one of the ten,** the convolutional network, 1.08x, from its kernels for `x[mask] = 0` and for `argmax` and sums along rows. On the other nine it is within 2% of NumPy either way: their time is not in calls the package has kernels for.
 - **A third of all the time in the ten programs is a mathematics library's functions:** `cos`, `sin`, `x ** 3`, `x ** 2.4`, `%`, `cbrt`, `hypot`, `arctan2`, `exp`. 2.6 s of 7.9 s. No kernel of either kind may touch them, because the result has to be the library's bits. This is the largest thing the ten programs have that the corpus did not show at this weight. What a kind that is not bit-identical would be worth was measured ([issue 315](#issue-315-what-an-inexact-kind-would-be-worth)): glibc's vector functions in place of NumPy's loops make pvlib 2.17x with no graph, and the decision is left open.
 - **The float64 arithmetic that fusion is for is 30% of the time, and a fifth of that was found and then given up for how the arrays lie.** An array left transposed by the call that made it, 300 ms; rows of four colour values with one value for each pixel, 100 ms; and arrays that step, a channel of an image (`lab[..., 0]`), a column of a table (`AB[:, j]`), every eighth element (`Y[::8]`), 30 ms in three programs. Each is how these codebases hold their data, and none is a missing pattern. The first of the three is walked since, and the second is one program since, with the selection written on it: Matplotlib's hill shading went from level to 1.3x of NumPy ([What was built on it](#what-was-built-on-it)).
@@ -819,6 +820,48 @@ Each ratio is against NumPy as timed in the same run, 144 to 148 ms and 112 to 1
   The hill shading's and the particle filter's ratios moved by 4% to 5% with nothing changed in what they do: their fused times are within 0.5% of each other, and it is NumPy's own time that moved.
 - **The network and SALib are not served.** The network's reductions are `np.max` and `np.argmax` along rows of four, and `np.sum(dout, axis=0)`; SALib's are `np.var` and `np.mean` along the first axis of (32768, 100). Down the columns NumPy adds in another order, a row of the output at a time, and that is not this loop.
 - **The package's half is not built.** A kernel behind `hotkernels.install()` for `np.sum(x, axis=-1)` on short rows needs a design document first. Its likely worth is the loop's by itself above: 2.8 to 3.4 ms for NumPy's 12.9 to 37.0 ms on 8.4 million elements. In the fused run a sum of an array that has its values is made at once by NumPy, since no kernel takes it; only a sum of something still pending is a node the loop can serve.
+
+### The nine together
+
+The nine pull requests as one line, timed against the study's layer with one timing tool: before is the branch of issue 323 (the tool as the line has it, the layer as the study measured it), after is the top of the line with its two follow-ups. One performance core, one BLAS thread, the ways in turn, the quickest of 7 rounds at the large size and of 25 at the small; load average 0.7 to 3.0 with nothing else of this work running. The large pair was taken three times, the first two before the follow-up to issue 317, which changes nothing at that size; the three agree to 0.04x on every program, and the last is given.
+
+```text
+                      before: the study's layer                  after: the nine together
+program             NumPy ms   lazy ms  fused ms  vs NumPy     NumPy ms   lazy ms  fused ms  vs NumPy
+perlin_noise         1964.42   2280.28   1966.32     1.00x      1960.75   2131.18    959.66     2.04x
+dlfs_convnet          787.75    701.69    738.51     1.07x       786.16    683.56    702.80     1.12x
+mpl_hillshade         286.03    286.18    285.40     1.00x       275.43    262.38    223.42     1.23x
+pvlib_solar          2653.40   2775.78   2723.00     0.97x      2652.17   2539.75   2421.66     1.10x
+skimage_delta_e       395.85    375.88    354.24     1.12x       408.56    378.05    363.36     1.12x
+sklearn_mlp           222.92    270.33    251.12     0.89x       230.32    275.14    244.51     0.94x
+salib_sobol           998.07   1396.63    973.46     1.03x       978.98   1064.11    960.72     1.02x
+prysm_zernike         383.13    396.49    355.35     1.08x       384.93    342.76    334.84     1.15x
+astropy_models        190.78    213.47    167.84     1.14x       190.45    173.53    176.55     1.08x
+speech_mfcc            59.20     81.73     59.95     0.99x        64.17     68.99     61.77     1.04x
+```
+
+At the small size:
+
+```text
+program             NumPy ms   lazy ms  fused ms  vs NumPy     NumPy ms   lazy ms  fused ms  vs NumPy
+perlin_noise           21.38     24.80     23.67     0.90x        21.69     24.85     13.78     1.57x
+dlfs_convnet          112.81    154.24    106.53     1.06x       113.35    127.14    102.74     1.10x
+mpl_hillshade           4.80      4.98      4.96     0.97x         4.89      4.90      4.52     1.08x
+pvlib_solar            19.62     21.77     19.73     0.99x        19.24     21.94     19.35     0.99x
+skimage_delta_e         5.40      6.21      5.84     0.92x         5.37      6.21      5.91     0.91x
+sklearn_mlp             5.63     12.80      8.59     0.66x         5.65     13.08      5.75     0.98x
+salib_sobol            14.72     32.25     17.65     0.83x        14.26     21.21     17.20     0.83x
+prysm_zernike           2.67      3.09      2.90     0.92x         2.67      3.11      2.92     0.91x
+astropy_models          1.24      1.43      1.28     0.97x         1.27      1.45      1.30     0.97x
+speech_mfcc             7.02     14.11      8.65     0.81x         6.65     11.26      6.81     0.98x
+```
+
+- **Six of the ten gain at the large size, three are level and one loses.** perlin-numpy 1.00x to 2.04x (the sum along rows of two, [issue 319](#a-sum-along-a-short-last-axis), on top of the array walked as it lies, [issue 316](#arrays-walked-in-the-order-of-memory)); Matplotlib's hill shading 1.00x to 1.23x ([rows with a value for each row](#rows-of-three-or-four-with-a-value-for-each-row)); pvlib 0.97x to 1.10x (whole numbers of NumPy's, `np.radians`, and a call writing into its operand's memory); prysm 1.08x to 1.15x (the last of those); the convolutional network 1.07x to 1.12x; scikit-learn's perceptron 0.89x to 0.94x ([the quick roads](#out-npclip-and-plain-operands-issue-320)). scikit-image, SALib and the speech features are level fused.
+- **Astropy's models lose, 1.14x to 1.08x,** 168 ms to 177 ms: where the allocator puts one result once calls lend their operands' memory, which [issue 321's subsection](#memory-a-graph-holds-issue-321) measures and leaves as it is, since the same lending is worth 90 ms to pvlib and 20 ms to prysm.
+- **Node by node the lazy run is quicker on seven of the ten,** SALib 1,397 ms to 1,064 ms, pvlib 2,776 ms to 2,540 ms, Astropy 213 ms to 174 ms, prysm 396 ms to 343 ms, the speech features 82 ms to 69 ms, and level on the convolutional network, scikit-image and the perceptron. Four are still behind the eager program by more than a few percent: the perceptron, 275 ms for 230 ms, and SALib, perlin-numpy and the speech features, each 8% to 9%.
+- **At the small size four gain and none loses:** perlin-numpy 0.90x to 1.57x, the perceptron 0.66x to 0.98x, the speech features 0.81x to 0.98x, the hill shading 0.97x to 1.08x. Seven of the ten are still behind NumPy there, at 0.83x to 0.99x.
+- **Timing the line together found two things no single pull request had seen.** `fuse.enable()` had come to take 0.26 ms, which the timing tool pays in every run and which showed as 0.3 ms on each small program ([the follow-up to issue 317](#rows-of-three-or-four-with-a-value-for-each-row)); and Astropy's loss above. Each branch of the line was checked out, rebuilt and timed in order to find which change each came from.
+- **The corpus shows no loss that is the layer's.** All twenty-six programs, timed the same way twice. The programs fusion gains on are where they were: the cavity flow 3.07x and 3.08x, the equation of state 1.68x and 1.70x, isoneutral mixing 1.28x and 1.28x, the particle filter 1.17x and 1.17x. The transformer block is 4% quicker fused in both takes, 0.99x to 1.04x. `hdiff` read 2.21x before and 2.09x after in both takes, and timed by itself it is 2.10x to 2.12x on every branch of the line, the first and the last. In the second process `veros_tke` ran 15% slower in every column, plain NumPy's among them; `empyrical_stats`, a program of pandas' in which the layer does nothing, 13% slower eagerly with the kernels installed, 430 ms and 486 ms; `sklearn_metrics` 3%; and `black_scholes` had NumPy at 78 ms and 86 ms with its fused run level at 70 ms. A process that has run other programs first is not the same process, which is [issue 326](https://github.com/sofeikov/hotkernels/issues/326)'s question and is not answered here.
 
 ## What is open
 
