@@ -35,12 +35,19 @@ of writing a node, how many deferred writes it made in place, and how many
 bytes of results were written to memory each way.
 
 The ways are timed in turn: each round runs the program once every way, in
-the order above, and the quickest run of each way counts. A process that
-has run a program before runs it faster; timed one way after another, the
-first way, NumPy's, pays for that and the others do not, by several percent
-on programs of large temporaries. `--one-after-another` asks for that
-order, every run of one way before the first of the next; it is how the
-tables taken before issue 323 were timed.
+the order above, and the quickest run of each way counts. Timed one way
+after another, whatever lasts a few seconds falls on all the runs of one
+way and none of the next: a slow stretch of a machine that is doing
+something else, or a state of the process, which made the way timed first,
+NumPy's, the slowest by 5% to 14% on some programs of large temporaries.
+`--one-after-another` asks for that order, every run of one way before the
+first of the next; it is how the tables taken before issue 323 were timed.
+
+Nothing of a program's results is kept while a run is timed. On Linux the C
+library gives freed memory back to the system, and a program of large
+temporaries spends a quarter of its time on new pages; one array left alive
+above the rest keeps the memory under it, and every run after that is as
+much quicker. docs/lazy-codebases-findings.md has the figures.
 
 Timings are only meaningful on a machine that is doing nothing else.
 """
@@ -296,11 +303,11 @@ def alternately(program: corpus.Program, inputs: tuple, runs: int, enabled: Call
                 plain: bool) -> tuple[dict[str, Timing], dict[str, Timing]]:
     """Time a program every way in turn, round after round, and keep the quickest run of each way.
 
-    A process that has run a program several times runs it faster, most likely because the allocator has kept
-    the memory of the earlier runs and a large array is no longer new pages from the system. Timed one way after
-    another, the way timed first pays for that and the ways after it do not, which on programs of large
-    temporaries is several percent: pvlib's solar position ran 10% faster "installed" with no call taken by a
-    kernel (docs/lazy-codebases-findings.md). In turn, every way meets the process in the same state.
+    Timed one way after another, whatever lasts a few seconds falls on all the runs of one way: a slow stretch
+    of a machine that is doing something else, or a state of the process and its allocator. The way timed first,
+    NumPy's, was 5% to 14% slower for it on prysm's program and on `veros_tke`, and the eager program read as
+    gaining from kernels that took none of its calls (docs/lazy-codebases-findings.md, "Issue 323"). In turn,
+    every way meets the same machine and the same process in every round.
 
     Args:
         program: The program.

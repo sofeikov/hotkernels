@@ -126,7 +126,7 @@ uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_
 
 `--program` takes a program's name, several times if wanted, and `codebases` for the ten of `codebases.py`, which need `--group codebases` and are not among the programs run by default. What they showed is in [docs/lazy-codebases-findings.md](../../docs/lazy-codebases-findings.md).
 
-`fusion_time` and `limit` time their ways in turn: each round runs the program once every way, and the quickest run of each way counts. A process that has run a program before runs it faster, so timed one way after another the way timed first, NumPy's, is the slowest by several percent on programs of large temporaries, and every figure against NumPy is too high by as much. `--one-after-another` asks either tool for that order.
+`fusion_time` and `limit` time their ways in turn: each round runs the program once every way, and the quickest run of each way counts. Timed one way after another, a slow stretch of the machine or a state of the process falls on all the runs of one way; the way timed first, NumPy's, was the slowest by 5% to 14% for it on some programs of large temporaries. `--one-after-another` asks either tool for that order. Neither tool keeps a result of a program while it times: on Linux one array left alive keeps the C library from giving the memory under it back to the system, and a program of large temporaries then runs a fifth to a quarter quicker ([the figures](../../docs/lazy-codebases-findings.md#issue-323-the-ways-timed-in-turn-by-default)).
 
 The timing tools run the lazy layer with `hotkernels.install()` in effect, since that is how the package is used, and measure against the program on plain NumPy.
 

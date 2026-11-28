@@ -25,11 +25,11 @@ For each program of `corpus.py` this tool:
   each against what its loop costs in the cache.
 
 The four ways are timed in turn: each round runs the program once every
-way, and the quickest run of each way counts. A process that has run a
-program before runs it faster, so timed one way after another the way timed
-first, NumPy's, is the slowest by several percent on programs of large
-temporaries, and the floor's `at best` and `now`, which are against NumPy,
-are too high by as much. `--one-after-another` asks for that order.
+way, and the quickest run of each way counts. Timed one way after another,
+a slow stretch of the machine or a state of the process falls on all the
+runs of one way, and `at best` and `now`, which are against NumPy's run,
+timed first, are too high by what that run lost. `--one-after-another` asks
+for that order.
 
 The values matter: what `erf` or `exp` costs depends on its argument, so an
 operation is timed on the program's own numbers, not on made-up ones, and
@@ -486,7 +486,7 @@ def _installed_ways(program: corpus.Program, inputs: tuple, runs: int) -> dict[s
 def one_after_another(program: corpus.Program, inputs: tuple, runs: int, enabled: Callable[[], Any]) -> dict[str, int]:
     """Time a program one way after another: every run of NumPy's first, then every run of the next way.
 
-    The way timed first meets a process that has not run the program, and is the slowest for it; see `in_turn`.
+    What lasts a few seconds then falls on one way and not on the next; see `in_turn`.
 
     Args:
         program: The program.
@@ -506,9 +506,9 @@ def one_after_another(program: corpus.Program, inputs: tuple, runs: int, enabled
 def in_turn(program: corpus.Program, inputs: tuple, runs: int, enabled: Callable[[], Any]) -> dict[str, int]:
     """Time a program every way in turn, round after round, and keep the quickest run of each way.
 
-    A process that has run a program several times runs it faster, most likely because the allocator has kept
-    the memory of the earlier runs. In turn, every way meets the process in the same state, as
-    `fusion_time.alternately` has it; docs/lazy-codebases-findings.md has what the order was worth.
+    Timed one way after another, a slow stretch of the machine or a state of the process falls on all the runs
+    of one way. In turn it falls on a round of every way, as in `fusion_time.alternately`;
+    docs/lazy-codebases-findings.md, "Issue 323", has what the order was worth.
 
     Args:
         program: The program.
