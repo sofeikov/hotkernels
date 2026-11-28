@@ -557,8 +557,10 @@ def test_a_long_expression_is_one_program_with_no_array_between_its_kernels():
                                 + 0.5 * (lazy.asarray(b) + numpy.sqrt(numpy.abs(lazy.asarray(c))) * lazy.asarray(d))
                                 / (lazy.asarray(a) * lazy.asarray(a) + 1.0)) - numpy.maximum(lazy.asarray(a), 0.25) * lazy.asarray(b))
     assert same(expected, got)
-    # Sixteen operations, one group: fifteen nodes have no array of their own.
-    assert fuse.STATS.fused_nodes == 15 and fuse.STATS.declined == 0 and calls() < 16
+    # Sixteen operations, one group: fifteen nodes have no array of their own. On x86-64 `np.maximum(a, 0.25)` is
+    # not a kernel's: its operands are taken only in the order written there, and the library has `max(S0,V0)`.
+    inside = 15 if "max" in fuse.COMMUTATIVE else 14
+    assert fuse.STATS.fused_nodes == inside and fuse.STATS.declined == 0 and calls() < 16
 
 
 @pytest.mark.parametrize("length", (1, 7, 8, 9, 31, 32, 33, 1023, 1024, 1025, 4095, 4096, 4097, 9000))
@@ -744,16 +746,27 @@ def test_a_kernel_written_from_its_shape_is_called_for_it_and_gives_numpys_bits(
 
 
 def test_the_kernels_in_the_repository_are_what_the_tool_writes(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
-    """Every written kernel's spec and reference are the tool's, and so is its assembly until its log has a second attempt."""
+    """Every written kernel's spec and reference are the tool's, and so is its assembly until its log has a second attempt.
+
+    An x86-64 loop that was timed against the compiled C and not kept has a log and no `kernel.s`.
+    """
     kept = make_kernel.KERNELS
     monkeypatch.setattr(make_kernel, "KERNELS", tmp_path)
     for shape in make_kernel.SHAPES:
         written = make_kernel.write(shape)
         theirs = kept / written.name
-        tuned = "\n## 2." in (theirs / make_kernel.ARCH / "attempts.md").read_text()
         for path in sorted(written.rglob("*")):
-            if path.is_file() and path.name != "attempts.md" and not (tuned and path.name == "kernel.s"):
-                assert path.read_text() == (kept / path.relative_to(tmp_path)).read_text(), path.name
+            if not path.is_file() or path.name == make_kernel.LOG_NAME:
+                continue
+            ours = kept / path.relative_to(tmp_path)
+            if path.name == "kernel.s":
+                log = (theirs / path.parent.name / make_kernel.LOG_NAME).read_text()
+                if not ours.exists():
+                    assert "- **Kept:** no" in log, path.parent.name
+                    continue
+                if "\n## 2." in log:
+                    continue
+            assert path.read_text() == ours.read_text(), path.name
     assert make_kernel.name_of("sub(V0,mul(S0,V1))") == "fuse_sub_v_mul_s_v_f64"
     with pytest.raises(make_kernel.CannotWrite):
         make_kernel.write("where(gt(V0,S0),V1,V2)")

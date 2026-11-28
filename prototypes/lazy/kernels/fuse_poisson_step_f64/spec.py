@@ -18,8 +18,19 @@ Each element goes through the same eight IEEE operations in the same order
 as in NumPy's passes, each rounded by itself: the division is a division,
 not a product with a reciprocal. What that leaves open, and what a fused
 kernel may assume of its caller, is in [the kernels' README](../README.md).
+
+**The domain** is inputs whose NaNs all have the bits of the NaN this
+processor's invalid operations give (`one_nan`), so that every NaN of the
+computation is one NaN and which of two an operation returns does not show.
+That is NumPy's `np.nan` on ARM64; on x86-64 it has the sign bit set as well.
 """
+import numpy as np
+
 from judge.spec import In, Kernel, Out, Scalar, ScalarSet, Size
+
+# The NaN this processor's invalid operations give: `np.nan`'s bits on ARM64, those with the sign bit set on x86-64.
+with np.errstate(invalid="ignore"):
+    DEFAULT_NAN = np.float64(np.inf) - np.float64(np.inf)
 
 # The default numbers: none a power of two, so every product and the quotient are rounded.
 S0, S1, S2, S3 = 0.37, 0.71, 2.3, 0.11
@@ -37,8 +48,8 @@ SCALAR_SETS = [
     ScalarSet("tiny", {"s0": TINY, "s1": TINY, "s2": HUGE, "s3": TINY}),
     ScalarSet("tiny_divisor", {"s2": TINY}),
     ScalarSet("infinite", {"s0": float("inf"), "s2": float("inf")}),
-    ScalarSet("nan", {"s1": float("nan")}),
-    ScalarSet("nan_divisor", {"s2": float("nan")}),
+    ScalarSet("nan", {"s1": DEFAULT_NAN}),
+    ScalarSet("nan_divisor", {"s2": DEFAULT_NAN}),
 ]
 
 
@@ -62,10 +73,31 @@ def oracle(a, b, c, d, e, s0, s1, s2, s3):
     return ((a + b) * s0 + (c + d) * s1) / s2 - s3 * e
 
 
+def one_nan(x):
+    """Bring an input into the domain: every NaN in it the NaN this processor's invalid operations give.
+
+    Of two NaNs an operation returns one, chosen by the order of its operands, which a compiler is free to
+    swap in a sum or a product, and which NumPy's own loops on x86-64 take one way in blocks of eight and
+    the other way in the elements left over. With one NaN the choice does not show.
+
+    Args:
+        x: A generated float64 array.
+
+    Returns:
+        `x` itself when it holds no NaN; else a copy in which every NaN is DEFAULT_NAN.
+    """
+    nan = np.isnan(x)
+    if not nan.any():
+        return x
+    y = x.copy()
+    y[nan] = DEFAULT_NAN
+    return y
+
+
 KERNEL = Kernel(
     name="fuse_poisson_step_f64",
     returns="void",
-    args=[In("a", "f64"), In("b", "f64"), In("c", "f64"), In("d", "f64"), In("e", "f64"), Out("out", "f64"), Size("n"),
+    args=[In("a", "f64", prepare=one_nan), In("b", "f64", prepare=one_nan), In("c", "f64", prepare=one_nan), In("d", "f64", prepare=one_nan), In("e", "f64", prepare=one_nan), Out("out", "f64"), Size("n"),
           Scalar("s0", "f64", S0), Scalar("s1", "f64", S1), Scalar("s2", "f64", S2), Scalar("s3", "f64", S3)],
     oracle=oracle,
     scalar_sets=SCALAR_SETS,

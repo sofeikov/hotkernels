@@ -116,7 +116,7 @@ uv run python -m prototypes.lazy.make_kernel "mul(V0,add(S0,mul(S1,V1)))"
 uv run judge check fuse_mul_v_add_s_mul_s_v_f64 --unlocked
 ```
 
-That shape is a line of the Veros equation of state, `sa * (v15 + v16 * ct)`, which the figure above shows. The tool writes the four files every kernel has:
+That shape is a line of the Veros equation of state, `sa * (v15 + v16 * ct)`, which the figure above shows. The tool writes the files every kernel has:
 
 - **`spec.py`**, whose oracle is the shape as a NumPy expression, `a * (s0 + (s1 * b))`, and whose sets of numbers try each of them at zero of either sign, at a value that overflows, a denormal, an infinity and a NaN.
 - **`naive.c`**, the C reference, the same loop in one line. It starts with `#pragma STDC FP_CONTRACT OFF`, for the reason of [the hazards below](#why-the-bits-are-numpys).
@@ -138,6 +138,7 @@ That shape is a line of the Veros equation of state, `sa * (v15 + v16 * ct)`, wh
   ```
 
 - **`arm64/attempts.md`**, the first entry of the log every kernel keeps.
+- **`x86_64/kernel.s`** and **`x86_64/attempts.md`**, the same loop in AVX2, eight elements a step in two `ymm` registers of four, and its log. On x86-64 a kernel's assembly is kept only where it beats its compiled C, which it does for two kernels ([Another processor]([[ root ]]report/fusion-results/#another-processor)).
 
 The rest of the loop is the same for every shape. Every load of a step comes before its store, so the output may be exactly one of the inputs ([Writes](#writes-cost-less-with-fusion)). A remainder of one to seven elements is one more step that ends exactly at the end of the arrays and overlaps the step before it, and fewer than eight elements are done one at a time. Registers are given to the tree by the usual rule, the operand that needs more of them computed first, four registers to a value, and each number is held in every lane of one register. Shapes of up to six arrays and eight numbers fit.
 
@@ -149,7 +150,7 @@ Which sixty-six: the eighteen **single operations** (the four of arithmetic on t
 The miner asked for `div(add(S0,neg(abs(V0))),S1)`, which is `(s0 + (-|a|)) / s1`, from the isoneutral mixing routine of Veros. The assembly the tool wrote makes exactly those operations, and is NumPy's. The judge failed the kernel anyway, and it was right to: the *C reference* was wrong. The compiler had turned the reference's `s0 + (-|a|)` into `s0 - |a|`. For ordinary numbers the two are equal. For a NaN they are not: negating a NaN flips its sign bit, while a subtraction passes the NaN it is given through with its sign, so the reference gave a NaN of the other sign from NumPy's. A kernel whose reference is wrong is not kept, so this shape has no kernel. It is a small instance of the whole chapter's point: two ways of writing the same arithmetic are not the same program, and only a check against NumPy's bits tells.
 :::
 
-`np.maximum` and `np.minimum` need the same care. On ARM64 NumPy's loops execute the processor's `fmax` and `fmin`, under which a NaN wins over a number and the maximum of two zeros is the positive one. C's `fmax` function is something else, so the reference spells the rule out.
+`np.maximum` and `np.minimum` need the same care. On ARM64 NumPy's loops execute the processor's `fmax` and `fmin`, under which a NaN wins over a number and the maximum of two zeros is the positive one. On x86-64 they execute `vmaxpd` and `vminpd` with a NaN of the first operand carried through, under which a NaN still wins but the maximum of two zeros is the second operand, whatever its sign; there `np.maximum(x, 0.0)` and `np.maximum(0.0, x)` differ, and the layer matches a maximum's operands only in the order the program wrote them. C's `fmax` function is something else, so the reference spells out each architecture's rule.
 
 ## A whole expression, block by block
 

@@ -1,0 +1,10 @@
+# {{ name }} attempts (x86_64)
+
+The kernel's spec is not on `main` yet, so the judge is run with `--unlocked`.
+
+## 1. The loop `make_kernel.py` writes for the shape
+
+- **Idea:** `{{ shape }}` as {{ operations }} operation{{ "s" if operations > 1 }} on two ymm registers of four per iteration, each rounding once, in the order of NumPy's passes; every load of an iteration before its store, every address the array's base plus one index. A remainder of 1 to 7 elements is one more block that ends exactly at the end of the arrays, and fewer than 8 elements are done one at a time. Written by `prototypes/lazy/make_kernel.py`, not by hand.
+- **check:** pass
+- **compare:** n/a (first version)
+- **Kept:** yes
