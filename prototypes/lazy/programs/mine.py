@@ -162,7 +162,8 @@ class _Miner:
 
 
 # The names of the nodes whose operation a fused kernel can make.
-_SIMPLE_NAMES = frozenset(ufunc.__name__ for table in (fuse.ARITHMETIC, fuse.UNARY, fuse.COMPARISONS) for ufunc in table)
+_SIMPLE_NAMES = frozenset(ufunc.__name__ for table in (fuse.ARITHMETIC, fuse.UNARY, fuse.COMPARISONS, fuse.SCALED)
+                          for ufunc in table)
 
 
 def _detached(name: str, top: fuse.Term) -> _Mined:
