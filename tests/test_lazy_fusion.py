@@ -876,6 +876,149 @@ def test_both_readers_take_a_whole_number_of_numpys_alike(lazy_core: str, monkey
     assert sum(compared) > 100
 
 
+# The conversions between degrees and radians, by the module of the caller's choice: name -> (function of the
+# module, the constant NumPy's loop multiplies by).
+CONVERSIONS = ("radians", "deg2rad", "degrees", "rad2deg")
+
+
+def converted(np: Any, a: Any, b: Any, name: str) -> dict[str, Any]:
+    """Write expressions around one conversion between degrees and radians, as pvlib's solar position does.
+
+    Args:
+        np: The `numpy` module or the lazy stand-in.
+        a, b: Two float64 arrays of one shape.
+        name: One of CONVERSIONS.
+
+    Returns:
+        Each expression by a name for it.
+    """
+    convert = getattr(np, name)
+    return {
+        "convert(a)": convert(a),
+        "convert(a) + b": convert(a) + b,
+        "b * convert(a)": b * convert(a),
+        "3.5 * convert(a - b)": 3.5 * convert(a - b),
+        "convert(convert(a))": convert(convert(a)),
+        "convert(a) * convert(b) - 1": convert(a) * convert(b) - 1.0,
+        "sum(convert(a) + b)": np.sum(convert(a) + b),
+    }
+
+
+def awkward(length: int) -> numpy.ndarray:
+    """Draw float64 values of every class: random bit patterns, NaNs with payloads of both signs, the special values.
+
+    Args:
+        length: How many.
+
+    Returns:
+        The array. Its signalling NaNs make the processor report an invalid operation, as NumPy's loop does.
+    """
+    rng = numpy.random.default_rng(SEED + length)
+    values = rng.integers(0, 2 ** 64, length, dtype=numpy.uint64).view(numpy.float64)
+    special = numpy.array([*SPECIAL, 1e-320, -5e-324, 1.7e308, -1e306], dtype=numpy.float64)
+    nans = numpy.array([0x7FF8000000000123, 0xFFF8DEAD00000000], dtype=numpy.uint64).view(numpy.float64)
+    pool = numpy.concatenate([special, nans])
+    places = rng.random(length) < 0.3
+    values[places] = rng.choice(pool, int(places.sum()))
+    return values
+
+
+def test_numpys_conversions_between_degrees_and_radians_are_one_multiplication():
+    """`np.radians(x)` has the bits of `x * (np.pi / 180)`, and `np.degrees(x)` of `x * (180 / np.pi)`, on every class.
+
+    That is what lets a kernel make them: NumPy's loops multiply by a
+    constant the compiler folded in double, and `fuse.SCALED` holds the same
+    constant. Held on random bit patterns of every exponent, the special
+    values, NaNs with payloads, every power of two and the numbers beside it.
+    """
+    powers = numpy.ldexp(1.0, numpy.arange(-1074, 1024))
+    values = numpy.concatenate([awkward(200_000), powers, -powers, numpy.nextafter(powers, 0), numpy.nextafter(-powers, 0)])
+    with numpy.errstate(all="ignore"):
+        for name in CONVERSIONS:
+            function = getattr(numpy, name)
+            factor = fuse.SCALED[function]
+            assert function(values).tobytes() == (values * factor).tobytes() == (factor * values).tobytes(), name
+    assert fuse.RADIANS == numpy.radians(1.0) and fuse.DEGREES == numpy.degrees(1.0)
+
+
+@pytest.mark.parametrize("length", (1, 7, LONG_ENOUGH, 1000))
+@pytest.mark.parametrize("name", CONVERSIONS)
+def test_a_conversion_between_degrees_and_radians_is_a_multiplication_of_an_expression(name: str, length: int):
+    """`np.radians(a) + b` is one kernel call with NumPy's bits, and every expression around a conversion is fused."""
+    a, b = awkward(length), arrays(1, (length,), special=True)[0]
+    with numpy.errstate(all="ignore"):
+        expected = converted(numpy, a, b, name)
+        got, inside = {}, 0
+        for written in expected:
+            fuse.STATS.reset()
+            got[written] = gathered(lambda: converted(lazy, lazy.asarray(a), lazy.asarray(b), name)[written])
+            inside += fuse.STATS.fused_nodes
+            if written == "convert(a) + b":
+                assert fuse.STATS.calls == {"fuse_add_scaled_f64": 1}, name
+    for written, wanted in expected.items():
+        wanted, value = numpy.asarray(wanted), numpy.asarray(got[written])
+        assert same_but_for_which_nan(wanted, value), written
+        if written in ("convert(a)", "convert(convert(a))", "b * convert(a)"):
+            assert same(wanted, value), written  # One kind of NaN in, one kind out: the bits, NaN's too.
+    if length >= LONG_ENOUGH:
+        assert inside >= 6
+
+
+def test_a_conversion_that_overflows_warns_as_numpys_does():
+    """`np.degrees` of a huge value is computed by NumPy's own calls, and its warning names `degrees` and the line."""
+    huge = numpy.full(64, 1e307)
+    with warnings.catch_warnings(record=True) as expected:
+        warnings.simplefilter("always")
+        wanted = numpy.degrees(huge) + huge
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pending = lazy.degrees(lazy.asarray(huge)) + lazy.asarray(huge); line = pending._node.origin.lineno  # noqa: E702
+        got = pending.gather()
+    assert same(wanted, got)
+    assert [str(warning.message) for warning in caught] == [str(warning.message) for warning in expected]
+    assert "degrees" in str(caught[0].message) and caught[0].lineno == line
+    assert fuse.STATS.flagged == 1 and calls() == 0
+
+
+def test_a_conversion_is_left_to_numpy_where_its_operand_is_no_kernels():
+    """`np.radians` of float32 or whole numbers, and with two operands, is NumPy's, with its type and bits."""
+    (a,) = arrays(1, (500,))
+    single, whole = a.astype(numpy.float32), numpy.arange(500)
+    cases = [
+        (numpy.radians(single) + single, lambda: lazy.radians(lazy.asarray(single)) + lazy.asarray(single)),
+        (numpy.degrees(whole) + a, lambda: lazy.degrees(lazy.asarray(whole)) + lazy.asarray(a)),
+        (numpy.radians(whole) * 2.0, lambda: lazy.radians(lazy.asarray(whole)) * 2.0),
+    ]
+    for place, (expected, write) in enumerate(cases):
+        assert same(expected, gathered(write)), place
+    assert fuse.STATS.fused_nodes == 0
+
+
+def test_the_limit_tool_counts_a_conversion_between_degrees_and_radians_as_arithmetic():
+    """`limit` puts `np.radians(a)` with the operations a kernel makes, and `np.cos(a)` with the library's."""
+    (data,) = arrays(1, (100,))
+    a = lazy.asarray(data)
+    for written in (lazy.radians(a), lazy.deg2rad(a), lazy.degrees(a), lazy.rad2deg(a)):
+        assert limit.classify(written._node) == limit.ARITHMETIC
+    assert limit.classify(lazy.cos(a)._node) == limit.LIBRARY
+
+
+def test_both_readers_take_a_conversion_between_degrees_and_radians_alike(lazy_core: str, monkeypatch: pytest.MonkeyPatch):
+    """The core's reader and `_Finder` find the same expressions around `np.radians` and `np.degrees`, nested too."""
+    if lazy_core != "c":
+        pytest.skip("one reader only without the C core")
+    compared = _read_both_ways(monkeypatch)
+    a, b = awkward(64), arrays(1, (64,), special=True)[0]
+    with numpy.errstate(all="ignore"):
+        for name in CONVERSIONS:
+            for written in converted(numpy, a, b, name):
+                gathered(lambda: converted(lazy, lazy.asarray(a), lazy.asarray(b), name)[written])
+        held, other = lazy.asarray(a), lazy.asarray(b)
+        gathered(lambda: lazy.radians(lazy.degrees(held) + lazy.radians(other)) * lazy.degrees(other - held))
+        gathered(lambda: lazy.radians(lazy.asarray(numpy.arange(64))) + other)
+    assert sum(compared) > 20
+
+
 def test_an_array_read_twice_is_one_kernel_call():
     """`a + s * a` is served by the kernel of `a + s * b`, given the same array twice."""
     a, b = arrays(2, (300,))

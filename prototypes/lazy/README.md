@@ -105,7 +105,7 @@ fuse.STATS                      # what was planned, which kernels ran, what was 
 fuse.disable()
 ```
 
-- **What is fused** is an expression of additions, subtractions, multiplications, divisions, maxima, minima, square roots, comparisons under `np.where` and a few more on float64 arrays, whose intermediates nothing else reads. Everything else is computed by NumPy's own calls, as before.
+- **What is fused** is an expression of additions, subtractions, multiplications, divisions, maxima, minima, square roots, comparisons under `np.where`, `np.radians` and `np.degrees` (each a multiplication by a constant) and a few more on float64 arrays, whose intermediates nothing else reads. Everything else is computed by NumPy's own calls, as before.
 - **An expression is a program of kernel calls,** run a block of 4,096 elements at a time, so that what one kernel gives the next stays in the cache and only the result is written to memory.
 - **Rows of a few elements are walked as one run,** where NumPy's loop is called for each row: `table - row` on rows of 2 to 15 elements is one kernel call, 1.8 to 9 times as fast as NumPy's; a slice with elements between its rows is walked straight through them; and one operation of arithmetic on such rows, at any pitch or with a value for each row, is a loop of the module's own, 1.1 to 5.4 times NumPy's call. A product of three arrays stored into short rows of a result that steps over elements, `Ai[..., ip, kr] = a * b * mask[...]`, is such a loop too, 1.5 times NumPy's.
 - **`hotkernels.install()` is in effect with it.** `fuse.enable()` installs the package's single-operation kernels unless told not to (`install=False`), so a program gains from both, and `fuse.disable()` takes them out again if it was what installed them.
