@@ -4936,6 +4936,7 @@ static PyObject *f_power, *f_pow;    /* `np.power` and `operator.pow` */
 static PyObject *f_is_basic_index;   /* `rules.is_basic_index` */
 static long long f_exact_integer;    /* `fuse.EXACT_INTEGER` */
 static PyObject *f_whole_scalars;    /* `fuse.WHOLE_SCALARS` */
+static PyObject *f_scaled;           /* `fuse.SCALED`: `np.radians` and the others, by the constant each multiplies by */
 static Py_ssize_t f_most_depth;      /* `fuse.MOST_DEPTH` */
 static Py_ssize_t f_short_row, f_slight_row; /* `fuse.SHORT_ROW`, `fuse.SLIGHT_ROW` */
 static PyObject *f_row_operations;           /* `fuse.ROW_OPERATIONS` */
@@ -5162,9 +5163,11 @@ whole_scalar(PyObject *arg)
 }
 
 /* `fuse.operation_of(node)`: 1 with the operation's name in a pattern (borrowed) and its operands; 0 for None;
- * -1 with an error set. */
+ * -1 with an error set. The operands are borrowed from the node, except for a conversion of `fuse.SCALED`, which is
+ * `mul` of its one operand and its constant: those two are written into `spare`, two places the caller keeps for
+ * as long as it reads the operands, since reading them may read another node with another `spare`. */
 static int
-operation_of(PyObject *node, PyObject **name, PyObject ***items, Py_ssize_t *count)
+operation_of(PyObject *node, PyObject **name, PyObject ***items, Py_ssize_t *count, PyObject **spare)
 {
     PyObject *operation;
     if (!call_of(node, &operation, items, count)) {
@@ -5173,6 +5176,21 @@ operation_of(PyObject *node, PyObject **name, PyObject ***items, Py_ssize_t *cou
     PyObject *found = PyDict_GetItemWithError(f_operations, operation);
     if (found != NULL) {
         *name = found;
+        return 1;
+    }
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    PyObject *factor = PyDict_GetItemWithError(f_scaled, operation);
+    if (factor != NULL) {
+        if (*count != 1) {
+            return 0;
+        }
+        spare[0] = (*items)[0];
+        spare[1] = factor; /* Kept alive by `fuse.SCALED`. */
+        *items = spare;
+        *count = 2;
+        *name = f_mul;
         return 1;
     }
     if (PyErr_Occurred()) {
@@ -5469,9 +5487,9 @@ read_operand(Finder *finder, PyObject *arg, PyObject *shape, PyObject *operands,
     if (Py_TYPE(arg) == Node && finder->depth < f_most_depth) {
         Taken *taken = inner_of(finder, arg, shape);
         if (taken != NULL) {
-            PyObject *name, **items;
+            PyObject *name, **items, *spare[2];
             Py_ssize_t count;
-            int read = operation_of(arg, &name, &items, &count);
+            int read = operation_of(arg, &name, &items, &count, spare);
             if (read < 0) {
                 return NULL;
             }
@@ -5559,9 +5577,9 @@ read_operation(Finder *finder, PyObject *node, PyObject *name, PyObject **writte
 static PyObject *
 read_term(Finder *finder, PyObject *node, PyObject *shape, PyObject *operands, int inner)
 {
-    PyObject *name, **items;
+    PyObject *name, **items, *spare[2];
     Py_ssize_t count;
-    int read = operation_of(node, &name, &items, &count);
+    int read = operation_of(node, &name, &items, &count, spare);
     if (read <= 0) {
         return read < 0 ? NULL : Miss;
     }
@@ -6041,7 +6059,8 @@ module_find_setup(PyObject *module, PyObject *args, PyObject *given)
         || take(given, "mul", &PyUnicode_Type, &f_mul) || take(given, "float64", NULL, &f_float64)
         || take(given, "boolean", NULL, &f_boolean) || take(given, "power", NULL, &f_power) || take(given, "pow", NULL, &f_pow)
         || take(given, "is_basic_index", NULL, &f_is_basic_index)
-        || take(given, "whole_scalars", &PyFrozenSet_Type, &f_whole_scalars)) {
+        || take(given, "whole_scalars", &PyFrozenSet_Type, &f_whole_scalars)
+        || take(given, "scaled", &PyDict_Type, &f_scaled)) {
         Py_XDECREF(expression);
         Py_XDECREF(term);
         Py_XDECREF(leaf);

@@ -30,7 +30,8 @@ it is a single IEEE operation that NumPy makes with the same instruction,
 in the order the program wrote them. Then each element goes through the
 same roundings as in NumPy's separate passes, and the bits are NumPy's. The
 operations of `ARITHMETIC`, `UNARY`, `COMPARISONS` and `np.where` are such
-operations; `np.exp`, `np.tanh` and a power other than 2 are calls into a
+operations, and so are those of `SCALED`, `np.radians` and `np.degrees`,
+each a multiplication by a constant; `np.exp`, `np.tanh` and a power other than 2 are calls into a
 mathematics library, which a kernel cannot make, and end an expression.
 """
 from __future__ import annotations
@@ -57,6 +58,14 @@ ARITHMETIC = {np.add: "add", np.subtract: "sub", np.multiply: "mul", np.true_div
               np.maximum: "max", np.minimum: "min"}
 # The same of one operand. `np.square` is one multiplication.
 UNARY = {np.negative: "neg", np.absolute: "abs", np.sqrt: "sqrt", np.square: "sq"}
+# Conversions between degrees and radians, each a multiplication by a constant. NumPy's loop for `np.radians` and
+# `np.deg2rad` is `npy_deg2rad`, `x * (NPY_PI / 180.0)`, and for `np.degrees` and `np.rad2deg` `npy_rad2deg`,
+# `x * (180.0 / NPY_PI)`, the constant folded in double by the compiler: one IEEE multiplication each, so a kernel's
+# product by the same float64 has its bits (issue 315). `np.pi / 180.0` is that same division of the same two
+# doubles. Each is read as `mul` with its constant as a number; `operation_of` writes the constant second, as NumPy
+# multiplies, though a product's order does not change its bits.
+RADIANS, DEGREES = np.pi / 180.0, 180.0 / np.pi
+SCALED = {np.radians: RADIANS, np.deg2rad: RADIANS, np.degrees: DEGREES, np.rad2deg: DEGREES}
 # Comparisons. Their result is a mask, which a pattern reads only as the condition of a `where`.
 COMPARISONS = {np.greater: "gt", np.greater_equal: "ge", np.less: "lt", np.less_equal: "le",
                np.equal: "eq", np.not_equal: "ne"}
@@ -369,6 +378,8 @@ def operation_of(node: Node) -> tuple[str, tuple] | None:
 
     Returns:
         (the operation's name in a pattern, its operands as written), or None.
+        `np.radians(x)` and the other conversions of `SCALED` are `mul` of
+        `x` and their constant, which the program did not write.
     """
     call = call_of(node)
     if call is None:
@@ -377,6 +388,9 @@ def operation_of(node: Node) -> tuple[str, tuple] | None:
     name = OPERATIONS.get(operation)
     if name is not None:
         return name, args
+    factor = SCALED.get(operation)
+    if factor is not None and len(args) == 1:
+        return ARITHMETIC[np.multiply], (args[0], factor)
     # `x ** np.int64(2)` is `np.power(x, np.int64(2))`, whose loop is handed the exponent as the float64 2.0 and
     # multiplies, as it does for a Python 2: the same bits as `x * x`, at a multiplication's speed.
     if (operation is np.power or operation is operator.pow) \
@@ -718,7 +732,7 @@ def _reading_core() -> Any:
                         vector=VECTOR, scalar=SCALAR, array=ARRAY, store=STORE, mul=ARITHMETIC[np.multiply],
                         float64=FLOAT64, boolean=BOOLEAN, power=np.power, pow=operator.pow,
                         is_basic_index=rules.is_basic_index, exact_integer=EXACT_INTEGER, most_depth=MOST_DEPTH,
-                        whole_scalars=WHOLE_SCALARS,
+                        whole_scalars=WHOLE_SCALARS, scaled=SCALED,
                         short_row=SHORT_ROW, slight_row=SLIGHT_ROW,
                         row_operations=ROW_OPERATIONS)
         _told_core = core
@@ -2535,7 +2549,8 @@ def enable(install: bool = True) -> bool:
     array.assign_rows = assign_rows
     # What may wait for a kernel: the arithmetic a kernel makes, on float64. Everything else on arrays that have
     # their values is made at once, whatever its size.
-    array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | {operator.pow, np.power}, FLOAT64)
+    array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | frozenset(SCALED) | {operator.pow, np.power},
+                       FLOAT64)
     if install and not _installed_here:
         _install_package()
     return True
