@@ -629,6 +629,28 @@ Six programs of the corpus, at the large size with the kernels installed, the fu
 - **The issue's "Done when".** Node by node the noise program is 0.95x of the eager program and SALib 0.89x. What SALib is still behind by, 84 ms in the second take, is not new pages (it has as many faults and as much memory at its peak as the eager program) and was not looked into further. The noise program's is the 2.2 GB its pending octaves hold, and the faults of it: 84,197 a run where the eager program has 70,277, from 113,237 before.
 - **Nothing was measured on ARM64.** There is no such machine here.
 
+**What the stack timed together found.** Timed branch by branch along the joined line of these issues, Astropy's models ran 25% faster node by node with lending and 4 to 5% slower fused: 170.5 and 171.6 ms before, 178.7 and 178.7 ms after, in two pairs, with the same expressions, kernel calls and calls at once.
+
+- **It is not lending's work.** The fused run's only lends are eight calls of `np.exp` into the operand it reads, and `np.exp` into its own operand is quicker than into new memory. What lost was `(1 + rr_gg) ** (-alpha)` of the Moffat profile, a node that lends nothing: 10.4 ms a call with lending and 7.0 ms without, with no page fault in either.
+- **It is where the allocator put that node's result.** With lending it lay 8 MiB and 16 bytes after its operand; without, 16 MiB and 32 bytes. Measured alone on the Intel Core i5-14600KF, a result 8 to 24 bytes after its operand, counted within a MiB, slows NumPy's loops, whatever the whole MiBs between them. It is the stall `AGENTS.md` describes for a kernel whose output lies just behind its input, met here by NumPy's own loops:
+
+  | Result after operand, within a MiB | `x ** -2.5` | `np.exp` | `np.sin` | `x * 3.0` |
+  |---|---|---|---|---|
+  | 0 bytes, or 128 and more | 7.0 ms | 2.4 ms | 6.3 ms | 0.29 ms |
+  | 8 bytes | 22.1 ms | 10.8 ms | 15.4 ms | 0.64 ms |
+  | 16 bytes | 11.4 ms | 5.5 ms | 8.4 ms | 0.63 ms |
+  | 24 bytes | 7.8 ms | 3.8 ms | 6.8 ms | 0.63 ms |
+  | 32 to 96 bytes | 7.0 ms | 2.4 to 2.9 ms | 6.3 ms | 0.53 to 0.64 ms |
+
+- **The eager program meets the same thing.** Two arrays of one size, a multiple of a MiB, allocated one after the other lie 16 bytes apart in that sense, glibc's header between them. Lending gives the allocator one array fewer to place, which changes which arrays end up side by side.
+
+**Two things were tried,** each timed against the top of the line, one after the other, twice, on one performance core:
+
+- **No lending in a fused run:** Astropy's fused run 177.4 ms to 170.0 and 170.7 ms; pvlib's 2,462 ms to 2,550 ms and 2,420 ms to 2,545 ms; prysm's 331 ms to 353 ms and 332 ms to 351 ms; `black_scholes` 1 to 2% slower; the runs node by node as they were.
+- **Allocating a node's result elsewhere when it would land 8 to 128 bytes after an operand,** a Python prototype that held the allocation that would have landed there while the call was made: Astropy's fused run 169 ms, but its run node by node 179 ms to 200 ms.
+
+**Lending stays on in fused runs.** It gives pvlib's fused run about 90 ms and prysm's about 20 ms, and costs Astropy's 7 ms, and that cost is where the allocator happens to put a result, not the lending.
+
 **What was not done.**
 
 - **The memory pending work holds.** Lowering it means computing a graph before the program asks, when the operands its pending nodes hold pass a size: the noise program's octave by octave. That would cut the noise program's fused programs, the largest of which spans the whole sum of octaves, and is a decision about fusion, not about memory.
@@ -809,6 +831,7 @@ Each of these is a measurement above and a decision not taken here, with the iss
 - **A sum of a product along a short last axis,** [issue 319](https://github.com/sofeikov/hotkernels/issues/319), is built in the lazy layer: [What was built on it](#what-was-built-on-it). What it left: the package's kernel for `np.sum(x, axis=-1)` on short rows behind `install()`, which needs a design document first; `np.max` and `np.min` along such rows; and the reductions along the first axis of SALib and the network.
 - **`out=`, `np.clip` and plain operands on the core's quick road,** [issue 320](https://github.com/sofeikov/hotkernels/issues/320): built ([above](#out-npclip-and-plain-operands-issue-320)). What is left is a write while something is pending, which computes first in Python, and the calls outside the deferred set other than `np.clip` and `np.average`.
 - **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): built ([above](#memory-a-graph-holds-issue-321)). A node's value was released at its last reader already; a call now writes into an operand's memory as NumPy's do, and the shape of `A[r]` no longer walks the table. What is left is the memory pending work holds, which takes the noise program to 2.2 GB, and which only computing earlier, at a cost to fusion, would lower.
+- **Where a result lands against its operand.** A result 8 to 24 bytes after its operand, counted within a MiB, slows NumPy's loops 1.1x to 3x on this processor, and where it lands is the allocator's chance, eagerly and lazily ([Memory a graph holds, issue 321](#memory-a-graph-holds-issue-321)). Whether the layer should place a result so that it never lands just behind its operand is open; the one way tried lost more node by node than it won fused.
 - **A library that keeps the type of what it is given,** [issue 322](https://github.com/sofeikov/hotkernels/issues/322): built for `x.view(type(x))` and for `np.isscalar` of the stand-in ([above](#npemptyviewtypex-issue-322)). What is left is a library that asks with its own `numpy`, which is handed plain arrays.
 - **The design's ARM64 tables taken again in turn,** [issue 323](https://github.com/sofeikov/hotkernels/issues/323). The tools time in turn by default now and the x86-64 tables were taken again ([below](#issue-323-the-ways-timed-in-turn-by-default)); the tables from the Apple M1 Pro were not, for want of the machine.
 - **Which state of the allocator a program is timed in, and whether a fused run should keep the memory of its results,** [issue 326](https://github.com/sofeikov/hotkernels/issues/326): new pages from the system are a quarter of the equation of state's time.
