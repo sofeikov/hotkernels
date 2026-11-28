@@ -743,6 +743,24 @@ Each ratio is against NumPy as timed in the same run, 144 to 148 ms and 112 to 1
 - **The length of the normals, 24 ms, is still given up, and for its last axis.** `sum_sq += arr[..., i, np.newaxis] ** 2` reads three arrays of shape (2048, 2048, 1), each a column of the normals at a step of three elements. The module takes the axis of length one for the rows, so a row is one element, and declines. Written without that axis, `arr[..., i]`, the same expression is gathered and runs: 14.6 ms for NumPy's 33.3 ms, where with the axis the fused run takes 45.5 ms for NumPy's 40.7 ms. Not built here: it is arrays that step. It would be about 25 ms more of this program.
 - **A NaN in the image does not cost the program.** A processor's ordered comparison raises the invalid-operation flag for a NaN, NumPy reports nothing for one, and the layer drops a result whose kernel raised a flag. The kernel's x86-64 loop compares quietly, so the result is kept.
 
+**What timing the stack together found, and the fix.** With the nine pull requests in one line and each timed in order, the fused run at the small size got slower at this one, by 0.3 to 0.4 ms a run with the same counts: `astropy_models` 1.30 ms to 1.58 ms, `skimage_delta_e` 5.99 to 6.42, `prysm_zernike` 3.49 to 3.89, for NumPy's 1.26, 5.6 and 3.75 ms. It looked like 2.9 µs for each of the hundred calls those programs make at once. It was not the calls.
+
+- **It was `fuse.enable()`, 0.26 ms a call.** The change had it read the comparisons that wait off the library's names (`fuse.comparisons_selected_by`), every time, and the timing tool enables fusion for each run of a program, inside what it times. A program that enables fusion once never saw it; a program timed in 1.3 ms saw a fifth more.
+- **A call made at once costs what it did.** Twelve single calls on 16,384 elements, through the stand-in with fusion on, timed at the commit before this change and at the top of the line: `x - s` 0.02 and 0.03 µs over NumPy's 2.3 µs, `x * y` 0.06 and 0.05, `x ** 2` 0.06 and 0.05, `np.exp(x)` 0.14 and 0.14, `np.cos(s)` of a Python float 0.23 and 0.22, `x <= s` 0.02 and 0.02, `np.where(x > s, x, y)` 0.57 and 0.55. None moved by more than 0.02 µs.
+- **The fix:** the two sets are worked out once, when the library is loaded, and `enable` hands them over: 0.26 µs a call. Before and after with nothing else changed, then the commit before issue 317 in the same hour, the quickest of 25 runs at the small size, loads of 1.5 to 2.1:
+
+| Fused ms, small | NumPy ms | Before the fix | After | At the commit before issue 317 |
+|---|---|---|---|---|
+| `astropy_models` | 1.22 | 1.56 | 1.26 | 1.26 |
+| `skimage_delta_e` | 5.36 | 6.25 | 5.92 | 5.83 |
+| `sklearn_mlp` | 5.66 | 6.24 | 5.82 | 5.85 |
+| `prysm_zernike` | 3.71 | 4.16 | 3.93 | 3.14, with NumPy at 3.33 |
+| `prysm_zernike`, by itself | 3.78 | | 3.83 | 3.54, with NumPy at 3.72 |
+| `perlin_noise` | 22.37 | 15.03 | 14.11 | Not comparable: issue 319 came after |
+
+- **prysm at the small size moves by 0.4 ms from one process to the next** at one commit, NumPy's own time with it (3.33 and 3.72 ms above), so its last 0.3 ms cannot be told from that here. What can be told: with the comparison that waits and without it, turned on and off in one process sixty times, the program takes 3.58 and 3.56 ms, scikit-image's 6.49 and 6.43, Astropy's 1.05 and 1.05. The rule itself costs these programs nothing that shows.
+- **The large runs do not see it,** as 0.26 ms in 20 to 300 ms: `mpl_hillshade` 225.30 ms before the fix and 219.67 ms after, for NumPy's 286 ms, 1.27x and 1.31x; the perceptron 37.79 and 37.85 ms, the recurrent network 22.87 and 22.68, `make_decision` 99.94 and 100.14.
+
 ### A sum along a short last axis
 
 [Issue 319](https://github.com/sofeikov/hotkernels/issues/319). NumPy adds a row of fewer than eight elements from left to right, starting from 0.0, whichever order it walks the rows in. So `np.sum(a * b, axis=-1)` on rows of two to seven is a row's products added one after the other, each operation rounded by itself, and the module that runs a program makes it by a loop of its own, `row_sums` of `_fused.c`, with no kernel and no array of products. It takes `np.sum` and `np.mean` along the last axis alone, with `keepdims=` or without, of a product computed inside or of any array computed before the sum, where NumPy's result would be in C order. [The design](lazy-fusion-design.md#reductions) has the rule.
