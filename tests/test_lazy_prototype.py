@@ -978,6 +978,47 @@ def test_indexing_by_integer_arrays_is_deferred():
     assert beyond._node.pending and str(raised(beyond.gather)) == str(raised(lambda: plain[numpy.arange(3) * 5]))
 
 
+def test_large_arrays_of_positions_are_not_walked_for_a_shape(monkeypatch):
+    """x[r] with r of many positions gets NumPy's shape, layout and error without NumPy walking r, for every way of writing it."""
+    rng = numpy.random.default_rng(SEED)
+    data = rng.standard_normal((40, 6, 5))
+    x, plain = lazy.asarray(data) + 0, data + 0
+    many = rng.integers(0, 5, size=(64, 80))
+    assert many.size >= rules.QUICK_POSITIONS
+    indexes = {
+        "an array": many, "an array in a tuple": (many,), "after a slice": (slice(None), many),
+        "two arrays": (many, many), "two arrays apart": (many, slice(None), many), "after an ellipsis": (Ellipsis, many),
+        "a new axis, then a number": (None, many, 2), "a number, an array, a slice": (1, many, slice(1, 3)),
+        "arrays apart round a new axis": (many, None, many), "arrays that broadcast": (slice(None), many, many[:1]),
+        "eight-bit positions": (many.astype(numpy.int8),), "negative positions": (-many - 1,),
+        "unsigned positions": (many.astype(numpy.uint16),), "three dimensions": (many.reshape(4, 16, 80),),
+    }
+    walked = []
+    full = rules.index_stand_in
+    monkeypatch.setattr(rules, "index_stand_in", lambda item: walked.append(item) or full(item))
+    for name, index in indexes.items():
+        got, expected = x[index], plain[index]
+        assert got._node.pending and got.shape == expected.shape, name
+        assert same(expected, got.gather()) and got.gather().strides == expected.strides, name
+    assert walked == []
+    refused = {
+        "out of bounds": numpy.where(many == 3, 40, many), "below the bounds": numpy.where(many == 3, -41, many),
+        "on another axis": (slice(None), many + 5), "of shapes that do not broadcast": (many, many[:, :3]),
+        "too many": (many, many, many, many), "of floats": many.astype(float),
+    }
+    for name, index in refused.items():
+        expected = raised(lambda: plain[index])
+        got = raised(lambda: x[index])
+        assert type(got) is type(expected) and str(got) == str(expected), name
+    walked_by_numpy = {"wide unsigned positions": many.astype(numpy.uint64), "a mask": (slice(None), data[0] > 0),
+                       "few positions": many[:2], "an empty array": numpy.zeros((64, 0), int)}
+    for name, index in walked_by_numpy.items():
+        got, expected = x[index], plain[index]
+        assert got.shape == expected.shape and same(expected, got.gather()), name
+    pending = x[lazy.asarray(many) + 0]
+    assert pending._node.pending and same(plain[many], pending.gather())
+
+
 def test_a_pending_mask_selects_a_length_that_is_not_known():
     """x[mask] is a node; what is computed from it is deferred where the shape does not depend on how many it selects."""
     data = numpy.random.default_rng(SEED).standard_normal((40, 3))

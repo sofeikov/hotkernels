@@ -1378,6 +1378,9 @@ def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
     """
     index = args[1]
     items = index if isinstance(index, tuple) else (index,)
+    quick = _positions_shape(args[0].shape, items, isinstance(index, tuple))
+    if quick is not None:
+        return quick
     stood_in = tuple(index_stand_in(item) for item in items)
     shape = np.broadcast_to(np.zeros((), NO_SIZE), args[0].shape)[stood_in if isinstance(index, tuple) else stood_in[0]].shape
     mark = next((index_mark(item) for item in items if index_mark(item) is not None), None)
@@ -1386,6 +1389,96 @@ def _indexed_shape(operation: Callable[..., Any], args: tuple, kwargs: dict) -> 
     if shape.count(0) != 1:
         return None
     return tuple(mark if length == 0 else length for length in shape)
+
+
+def _positions_shape(shape: tuple[int, ...], items: tuple, is_tuple: bool) -> tuple[int, ...] | None:
+    """Shape of an array indexed by large arrays of positions, without NumPy walking them; or None.
+
+    NumPy's indexing of an array of an element type of no size walks every
+    position of the index: 8.7 ms for a table of 3.3 million positions on
+    the Intel Core i5-14600KF, where taking the elements themselves takes
+    2.5 ms. So the shape `_indexed_shape` asks for cost more than the call
+    it stands for (SALib's `A[r]`, the speech features' frames). Here NumPy
+    is asked twice, on stand-ins of one and of two positions along each
+    dimension of the arrays' broadcast shape; the dimensions where the two
+    answers differ are where that shape goes. Whether the positions of an
+    array that has its values are in bounds is asked of its least and
+    largest element, of its own element type, which NumPy checks as it
+    would the whole array. Pending positions are zeros, as in
+    `index_stand_in`.
+
+    Anything that is not plainly such an index is left to `_indexed_shape`:
+    a mask, a list, positions whose number is not known, unsigned positions
+    of eight bytes, an empty array or a dimension of length 0, small
+    arrays, and every index NumPy refuses here, so that its error is raised
+    by NumPy's own walk with the message the eager line gives.
+
+    Args:
+        shape: The shape of the array indexed. All its lengths are known.
+        items: The items of the index.
+        is_tuple: Whether the index was a tuple of these items, or the one item alone.
+
+    Returns:
+        The shape NumPy gives, or None to have it found the general way.
+    """
+    if 0 in shape:
+        return None
+    arrays, elements = [], 0
+    for place, item in enumerate(items):
+        if isinstance(item, Node):
+            if item.dtype.kind not in _POSITION_KINDS or not graph.is_known(item.shape):
+                return None
+        elif isinstance(item, np.ndarray):
+            kind = item.dtype.kind
+            if kind not in _POSITION_KINDS or (kind == "u" and item.dtype.itemsize >= _WIDE_UNSIGNED) or item.size == 0:
+                return None
+        elif isinstance(item, (list, tuple)) or (hasattr(item, "__array__") and not isinstance(item, np.generic)):
+            return None
+        else:
+            continue
+        arrays.append(place)
+        elements += math.prod(item.shape)
+    if elements < QUICK_POSITIONS:
+        return None
+    try:
+        broadcast = np.broadcast_shapes(*(items[place].shape for place in arrays))
+        if 0 in broadcast or len(broadcast) > _QUICK_DIMENSIONS:
+            return None
+        ghost = np.broadcast_to(np.zeros((), NO_SIZE), shape)
+
+        def answer(stand_ins: dict[int, Any]) -> tuple[int, ...]:
+            """NumPy's shape for the index with some of its items replaced."""
+            parts = tuple(stand_ins.get(place, item) for place, item in enumerate(items))
+            return ghost[parts if is_tuple else parts[0]].shape
+
+        ones = answer({place: np.zeros((1,) * len(broadcast), np.intp) for place in arrays})
+        twos = answer({place: np.zeros((2,) * len(broadcast), np.intp) for place in arrays})
+        bounds = {place: (np.zeros((), np.intp) if isinstance(items[place], Node)
+                          else np.array([items[place].min(), items[place].max()], items[place].dtype)) for place in arrays}
+        answer(bounds)
+    except Exception:
+        # NumPy refuses the index: its own walk below raises the error with the eager line's message.
+        return None
+    if len(ones) != len(twos):
+        return None
+    differ = [axis for axis, (one, two) in enumerate(zip(ones, twos)) if one != two]
+    if len(differ) != len(broadcast) or (differ and differ[-1] - differ[0] != len(differ) - 1):
+        return None
+    if not differ:
+        return ones
+    return ones[:differ[0]] + broadcast + ones[differ[-1] + 1:]
+
+
+# The element kinds of arrays of positions that `_positions_shape` takes, and the size from which it declines
+# unsigned ones: a position of eight bytes above the largest signed one is not ordered as NumPy casts it.
+_POSITION_KINDS = frozenset("iu")
+_WIDE_UNSIGNED = 8
+# How many positions an index must hold in all for `_positions_shape` to be worth asking: below this NumPy's own
+# walk takes a few microseconds, and the two stand-ins and the least and largest element cost as much.
+QUICK_POSITIONS = 4096
+# The most dimensions the arrays of an index may broadcast to for `_positions_shape`: its stand-in of two positions
+# along each holds 2 ** this many.
+_QUICK_DIMENSIONS = 8
 
 
 def index_stand_in(item: Any) -> Any:
