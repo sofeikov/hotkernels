@@ -2090,6 +2090,19 @@ def test_a_selection_by_a_threshold_of_data_with_a_nan_does_not_warn():
         assert fuse.STATS.flagged == 0 and fuse.STATS.calls.get("fuse_where_le_f64") == 1
 
 
+def test_enabling_fusion_again_reads_nothing_off_the_library(monkeypatch: pytest.MonkeyPatch):
+    """Which calls wait is worked out when the library is loaded. `enable` is called for every run of a program, and
+    reading the comparisons off the library's names each time took 0.26 ms: a fifth of a program of 1.3 ms."""
+    def read_again(library: Any) -> frozenset:
+        """Stand where `comparisons_selected_by` stood, and fail the test if it is called."""
+        raise AssertionError("the library was read again")
+
+    monkeypatch.setattr(fuse, "comparisons_selected_by", read_again)
+    fuse.disable()
+    assert fuse.enable() and fuse._WAITS[1] == frozenset({numpy.less_equal}) and numpy.add in fuse._WAITS[0]
+    array.at_once_below(0)  # As the fixture leaves it for the tests.
+
+
 def test_a_comparison_a_kernel_selects_by_waits_for_its_selection():
     """With calls made at once, `x <= s` on a large float64 array waits, so that the `np.where` written on top of it
     is computed with it; a comparison no kernel selects by, one of two arrays, one written the other way round and
