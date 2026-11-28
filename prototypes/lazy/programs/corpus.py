@@ -516,10 +516,11 @@ def by_name(names: list[str] | None = None) -> list[Program]:
     """Pick programs of the corpus by name.
 
     Args:
-        names: The names wanted, or None for every program.
+        names: The names wanted, or None for every program of the corpus. A name may also be one of the ten
+            programs of `codebases.py`, which are not in the corpus, or `codebases` for all ten.
 
     Returns:
-        The programs, in the corpus's order.
+        The programs, in the corpus's order, those of `codebases.py` after them.
 
     Raises:
         KeyError: For a name that is not a program's.
@@ -527,8 +528,14 @@ def by_name(names: list[str] | None = None) -> list[Program]:
     everything = programs()
     if not names:
         return everything
+    # Imported here: `codebases` is built on this module.
+    from prototypes.lazy.programs import codebases
+    more = codebases.programs()
+    wanted = {program.name for program in more} if codebases.SET in names else set()
+    wanted.update(name for name in names if name != codebases.SET)
+    everything += more
     known = {program.name for program in everything}
-    for name in names:
+    for name in wanted:
         if name not in known:
             raise KeyError(f"no program named {name!r}; there are {', '.join(sorted(known))}")
-    return [program for program in everything if program.name in names]
+    return [program for program in everything if program.name in wanted]

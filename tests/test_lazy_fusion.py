@@ -28,7 +28,7 @@ import pytest
 
 from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph, make_kernel, record_graphs
 from judge.spec import In, Scalar, load_spec
-from prototypes.lazy.programs import corpus
+from prototypes.lazy.programs import codebases, corpus
 
 # Seed of every random array in these tests.
 SEED = 0
@@ -1161,7 +1161,7 @@ def test_an_expression_too_deep_to_read_whole_is_read_in_pieces(depth: int):
     assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == depth - fuse.STATS.expressions - (left == 1)
 
 
-@pytest.mark.parametrize("name", [program.name for program in corpus.programs() if program.eager])
+@pytest.mark.parametrize("name", [program.name for program in corpus.programs() + codebases.programs() if program.eager])
 def test_a_program_of_the_corpus_gives_numpys_results_with_fusion(name: str):
     """Each program run with the stand-in and fusion matches the program run with NumPy, bit for bit."""
     (program,) = corpus.by_name([name])

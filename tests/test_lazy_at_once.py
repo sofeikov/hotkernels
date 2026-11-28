@@ -24,7 +24,7 @@ import numpy
 import pytest
 
 from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph
-from prototypes.lazy.programs import corpus
+from prototypes.lazy.programs import codebases, corpus
 
 lazy = get_lazy()
 # Seed of every random array and program in these tests.
@@ -803,7 +803,7 @@ def test_random_programs_of_views_and_writes_give_numpys_arrays(limit: int):
         array.at_once_below(NOTHING)
 
 
-@pytest.mark.parametrize("name", [program.name for program in corpus.programs() if program.eager])
+@pytest.mark.parametrize("name", [program.name for program in corpus.programs() + codebases.programs() if program.eager])
 def test_a_program_of_the_corpus_gives_numpys_results_as_it_is_run_for_speed(name: str):
     """Every program, run as `fusion_time` runs it fused: small calls at once, writes in place, kernels where they pay."""
     program = corpus.by_name([name])[0]
