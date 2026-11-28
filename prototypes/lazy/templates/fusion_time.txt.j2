@@ -5,7 +5,7 @@
 {{ "%-18s %9.2f %9.2f  %9.2f %8.2f %8.2f  %9.2f %8.2f %8.2f %8.2f  %6.2fx %7.2fx %8.2fx"|format(row.name, row.timings[numpy].total_ns / ns_per_ms, row.timings[installed].total_ns / ns_per_ms, t[lazy].total_ns / ns_per_ms, t[lazy].building_ns / ns_per_ms, t[lazy].computing_ns / ns_per_ms, t[fused].total_ns / ns_per_ms, t[fused].building_ns / ns_per_ms, t[fused].planning_ns / ns_per_ms, (t[fused].computing_ns - t[fused].planning_ns) / ns_per_ms, t[lazy].total_ns / t[fused].total_ns, row.timings[numpy].total_ns / t[fused].total_ns, row.timings[installed].total_ns / t[fused].total_ns) }}
 {% endfor %}
 {% endmacro %}
-Each program four ways ({{ size }} size, the quickest of {{ runs }} runs, {{ kernels }} fused kernels, nodes written by {{ "the C core" if core else "Python" }})
+Each program four ways ({{ size }} size, the quickest of {{ runs }} runs, {{ "the ways timed in turn" if alternate else "one way after another" }}, {{ kernels }} fused kernels, nodes written by {{ "the C core" if core else "Python" }})
 
 {{ table(rows, "installed") }}
 `NumPy` is the program as it is, with nothing installed. Every other column is under `hotkernels.install()`:

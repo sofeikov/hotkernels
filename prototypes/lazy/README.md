@@ -121,10 +121,12 @@ uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_
 uv run --group apps --group workloads python -m prototypes.lazy.programs.fusion_time --plain        # the lazy runs with nothing installed as well
 uv run --group apps --group workloads python -m prototypes.lazy.programs.limit --size large         # each program: what no fusion could remove, what is left, and what of the fused run could still go
 uv run python -m prototypes.lazy.make_kernel "sub(V0,mul(S0,V1))"                                   # write the kernel of a shape
-uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases --alternate   # the ten programs of other codebases
+uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases   # the ten programs of other codebases
 ```
 
-`--program` takes a program's name, several times if wanted, and `codebases` for the ten of `codebases.py`, which need `--group codebases` and are not among the programs run by default. What they showed is in [docs/lazy-codebases-findings.md](../../docs/lazy-codebases-findings.md). `fusion_time --alternate` times the four ways in turn, round after round, and not one after another: a process that has run a program before runs it faster, so the way timed first is otherwise the slowest by several percent on programs of large temporaries.
+`--program` takes a program's name, several times if wanted, and `codebases` for the ten of `codebases.py`, which need `--group codebases` and are not among the programs run by default. What they showed is in [docs/lazy-codebases-findings.md](../../docs/lazy-codebases-findings.md).
+
+`fusion_time` and `limit` time their ways in turn: each round runs the program once every way, and the quickest run of each way counts. A process that has run a program before runs it faster, so timed one way after another the way timed first, NumPy's, is the slowest by several percent on programs of large temporaries, and every figure against NumPy is too high by as much. `--one-after-another` asks either tool for that order.
 
 The timing tools run the lazy layer with `hotkernels.install()` in effect, since that is how the package is used, and measure against the program on plain NumPy.
 

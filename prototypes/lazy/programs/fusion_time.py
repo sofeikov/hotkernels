@@ -34,10 +34,13 @@ a NumPy call, how many calls and writes the fused run made at once instead
 of writing a node, how many deferred writes it made in place, and how many
 bytes of results were written to memory each way.
 
-With `--alternate` the ways are timed in turn, round after round, and not
-one after another. A process that has run a program before runs it faster;
-timed one after another, the first way, NumPy's, pays for that and the
-others do not, by several percent on programs of large temporaries.
+The ways are timed in turn: each round runs the program once every way, in
+the order above, and the quickest run of each way counts. A process that
+has run a program before runs it faster; timed one way after another, the
+first way, NumPy's, pays for that and the others do not, by several percent
+on programs of large temporaries. `--one-after-another` asks for that
+order, every run of one way before the first of the next; it is how the
+tables taken before issue 323 were timed.
 
 Timings are only meaningful on a machine that is doing nothing else.
 """
@@ -70,6 +73,9 @@ NS_PER_MS, BYTES_PER_MB = 1e6, 1e6
 NUMPY, LAZY, FUSED = "numpy", "lazy", "fused"
 # The eager run under `hotkernels.install()`, as a key of `Row.timings`.
 INSTALLED = "installed"
+# The package's logger. It says at INFO that it was installed and uninstalled, which timing in turn does once a
+# round for every program; the tool lets only its warnings through.
+PACKAGE = "hotkernels"
 
 app = typer.Typer(add_completion=False)
 
@@ -321,7 +327,7 @@ def alternately(program: corpus.Program, inputs: tuple, runs: int, enabled: Call
 
 
 def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], plain: bool,
-            alternate: bool = False) -> Row:
+            alternate: bool = True) -> Row:
     """Measure one program every way.
 
     Args:
@@ -365,13 +371,14 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
     return row
 
 
-def render(rows: list[Row], size: str, runs: int) -> str:
+def render(rows: list[Row], size: str, runs: int, alternate: bool) -> str:
     """Write the tables as text.
 
     Args:
         rows: One row per program.
         size: The size the programs were run at.
         runs: How many runs each timing is the quickest of.
+        alternate: Whether the ways were timed in turn and not one after another.
 
     Returns:
         The tables.
@@ -383,7 +390,7 @@ def render(rows: list[Row], size: str, runs: int) -> str:
         for name, count in row.stats.calls.items():
             calls[name] = calls.get(name, 0) + count
     return environment.get_template(TABLE_TEMPLATE).render(
-        rows=rows, size=size, runs=runs, ns_per_ms=NS_PER_MS, bytes_per_mb=BYTES_PER_MB, core=array.core_in_use(),
+        rows=rows, size=size, runs=runs, alternate=alternate, ns_per_ms=NS_PER_MS, bytes_per_mb=BYTES_PER_MB, core=array.core_in_use(),
         numpy=NUMPY, installed=INSTALLED, lazy=LAZY, fused=FUSED, calls=sorted(calls.items(), key=lambda item: item[1], reverse=True),
         kernels=len({kernel.name for kernel in fuse.LIBRARY.values()})).strip("\n")
 
@@ -393,8 +400,9 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
          program: list[str] = typer.Option(None, help="A program to time; may be given several times. Default: all."),
          runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
          plain: bool = typer.Option(False, help="Also time the lazy ways with nothing installed."),
-         alternate: bool = typer.Option(False, help="Time the ways in turn, round after round, so that each meets "
-                                                    "the process in the same state.")) -> None:
+         alternate: bool = typer.Option(True, "--alternate/--one-after-another",
+                                        help="Time the ways in turn, round after round, so that each meets the "
+                                             "process in the same state; or every run of one way before the next.")) -> None:
     """Time the corpus four ways and print the tables.
 
     Args:
@@ -405,6 +413,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
         alternate: Whether the ways are timed in turn and not one after another.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger(PACKAGE).setLevel(logging.WARNING)
     if not fuse.enable(install=False):
         log.error("the fused kernels are not built: uv run python -m prototypes.lazy.build_fused")
         raise typer.Exit(1)
@@ -418,7 +427,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         rows = [measure(each, size, runs, hotkernels.enabled, plain, alternate) for each in chosen]
-    log.info("%s", render(rows, size, runs))
+    log.info("%s", render(rows, size, runs, alternate))
 
 
 if __name__ == "__main__":
