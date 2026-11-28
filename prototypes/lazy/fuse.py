@@ -2205,10 +2205,30 @@ def _short_row_sums(todo: list[Node]) -> list[tuple[Node, Node | None]]:
             read = operation_of(reduced)
             if read is not None and read[0] in ROW_PRODUCTS and all(
                     type(arg) in (Node, np.ndarray) and arg.dtype == FLOAT64 and tuple(arg.shape) == reduced.shape
-                    for arg in read[1]):
+                    and _may_be_in_c_order(arg) for arg in read[1]):
                 product = reduced
-        found.append((total, product))
+        if product is not None or _may_be_in_c_order(reduced):
+            found.append((total, product))
     return found
+
+
+def _may_be_in_c_order(arg: Node | np.ndarray) -> bool:
+    """Say whether an array a sum along rows reads may be walked in C order, as far as can be told before computing.
+
+    Args:
+        arg: A node or an `ndarray`.
+
+    Returns:
+        `_in_c_order` of its value where it has one; True for a node still
+        pending, whose layout `_RowSum.run` looks at once it is computed.
+    """
+    if type(arg) is Node:
+        if arg.operation is not None:
+            return True
+        if arg.failure is not None or type(arg.value) is not np.ndarray:
+            return False
+        arg = arg.value
+    return _in_c_order(arg)
 
 
 def _in_c_order(value: np.ndarray) -> bool:
@@ -2289,7 +2309,8 @@ class _RowSum:
         first = values[0]
         second = values[1] if len(values) > 1 else (first if self.members and len(values) == 1 else None)
         width = first.shape[-1]
-        sums = np.empty(first.shape[:-1])
+        # In the shape the node has, with `keepdims` or without: an array of its own memory, as NumPy's is.
+        sums = np.empty(node.shape)
         raised = _fused.row_sums(sums, first, second, width if self.mean else 0)
         if raised == _fused.DECLINED:
             STATS.declined += 1
@@ -2298,7 +2319,7 @@ class _RowSum:
             STATS.flagged += 1
             _leave_to_numpy(node.origin)
             return False
-        node.value = sums.reshape(node.shape) if len(node.shape) == first.ndim else sums
+        node.value = sums
         graph.settle(node)
         name = ROW_SUMS_OF_PRODUCTS if second is not None else ROW_SUMS
         STATS.calls[name] = STATS.calls.get(name, 0) + 1
