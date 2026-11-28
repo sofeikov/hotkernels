@@ -23,7 +23,7 @@ from typing import Any, Callable, Iterator
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, array, evaluate, fuse, get_lazy, graph
+from prototypes.lazy import LazyArray, NotGathered, array, evaluate, fuse, get_lazy, graph, namespace, record_graphs, rules
 from prototypes.lazy.programs import codebases, corpus
 
 lazy = get_lazy()
@@ -35,6 +35,12 @@ EVERYTHING, NOTHING = 1_000_000, 0
 PROGRAMS, STEPS = 60, 80
 # The side of the square arrays the random programs work on, and of the large one that keeps a node pending.
 SIDE, LARGE_SIDE = 6, 40
+# The values a ufunc has an edge at, beside ordinary ones: not a number, the infinities, the two zeros, a denormal.
+EDGES = (numpy.nan, numpy.inf, -numpy.inf, 0.0, -0.0, 1.5, -2.5, 5e-324)
+# How many rows `edges` gives an array, and by how many places it turns the values of a second array of them.
+EDGE_ROWS, EDGE_TURN = 3, 3
+# How many random programs of a library's calls are run, and how many steps each has.
+LIBRARY_PROGRAMS, LIBRARY_STEPS = 40, 60
 
 
 @pytest.fixture
@@ -53,6 +59,31 @@ def same(expected: Any, got: Any) -> bool:
     """Say whether two results are the same in element type, shape and bits."""
     expected, got = numpy.asarray(expected), numpy.asarray(got)
     return expected.dtype == got.dtype and expected.shape == got.shape and expected.tobytes() == got.tobytes()
+
+
+def edges(turn: int = 0) -> numpy.ndarray:
+    """Make an array whose rows are the EDGES, each row turned one place further than the row before.
+
+    Args:
+        turn: By how many places the first row is turned, so that two arrays meet each edge with another.
+
+    Returns:
+        A new float64 array of EDGE_ROWS rows.
+    """
+    return numpy.array([numpy.roll(EDGES, turn + row) for row in range(EDGE_ROWS)])
+
+
+def layout(value: Any) -> tuple:
+    """Say how an array lies in memory: its strides and whether it is in C order, in Fortran order."""
+    value = numpy.asarray(value)
+    return value.strides, value.flags.c_contiguous, value.flags.f_contiguous
+
+
+def raised(call: Callable[[], Any]) -> tuple[type, str]:
+    """Run something that must fail, and return the type and the words of what it raised."""
+    with pytest.raises(Exception) as caught:
+        call()
+    return caught.type, str(caught.value)
 
 
 def writes(call: Callable[[], Any]) -> tuple[int, int, Any]:
@@ -787,6 +818,390 @@ def test_a_name_of_the_stand_in_follows_the_module(at_once: None, monkeypatch: p
     assert lazy._module is numpy and lazy._strict is False
     with pytest.raises(AttributeError):
         lazy.no_such_name
+
+
+# ---- A ufunc that names its output, a call on plain arrays, and a call outside the deferred set, made at once.
+
+@pytest.mark.parametrize("held", ("made", "handed", "plain"))
+def test_a_ufunc_that_names_its_output_writes_at_once_when_nothing_is_pending(at_once: None, held: str):
+    """`np.maximum(x, 0, out=x)` and its like are NumPy's own call into the memory the output has, for an array the
+    layer made, one the program handed in and a plain `ndarray` alike; the call gives its output."""
+    def program(np: Any, x: Any, y: Any) -> tuple:
+        """Compute in place, as a library written for speed does, through an array and through its views."""
+        first = np.maximum(x, 0.0, out=x)
+        np.exp(x, out=x)
+        np.add(x, y, out=x)
+        np.negative(x[1], out=x[1])
+        np.multiply(x[:, 2:], y[:, :-2], out=x[:, 2:])
+        np.copysign(x, y, out=x)
+        return first, x
+
+    theirs, ours = edges(), edges()
+    with numpy.errstate(all="ignore"):
+        expected = program(numpy, theirs, edges(EDGE_TURN))
+        target = {"made": lambda: lazy.asarray(ours) * 1.0, "handed": lambda: lazy.asarray(ours), "plain": lambda: ours}[held]()
+        deferred, written = graph.COUNTS.deferred, array.at_once_counts()[1]
+        first, got = program(lazy, target, lazy.asarray(edges(EDGE_TURN)))
+    assert graph.COUNTS.deferred == deferred and array.at_once_counts()[1] - written == 6 and not graph.pending_count()
+    assert same(expected[1], got.gather() if held != "plain" else got)
+    if held == "plain":
+        # What the stand-in gives for a plain output is a lazy array on it, whose memory the program knows.
+        assert isinstance(first, LazyArray) and first._node.value is ours and first._node.exposed
+    else:
+        assert first is target
+    if held != "made":
+        assert same(theirs, ours)  # The array the program holds has every write.
+
+
+def test_a_ufunc_that_names_its_output_waits_or_computes_first_while_something_is_pending(at_once: None):
+    """A pending operation reads what the output held: a write into the layer's own array waits its turn, and one
+    into an array the program holds is made after everything pending."""
+    array.at_once_below(100)
+
+    def program(np: Any, mine: numpy.ndarray, plain: numpy.ndarray) -> tuple:
+        """Read three arrays in an operation that waits, then write into each."""
+        large = np.asarray(numpy.arange(200.0).reshape(20, 10))
+        own, handed = np.zeros(10) + 1.0, np.asarray(mine)
+        reader = large + own + handed + plain
+        np.multiply(own, 3.0, out=own)
+        waited = getattr(getattr(reader, "_node", None), "pending", None)
+        np.add(handed, 5.0, out=handed)
+        np.subtract(plain, own, out=plain)
+        plain += own
+        return reader, own, handed, plain, waited
+
+    theirs = program(numpy, numpy.arange(10.0), numpy.arange(10.0) * 2.0)
+    mine, plain = numpy.arange(10.0), numpy.arange(10.0) * 2.0
+    ours = program(lazy, mine, plain)
+    assert ours[4] is True  # The write into the layer's own array was a node: the reader still waited after it.
+    for expected, got in zip(theirs[:4], array.gather(*ours[:4])):
+        assert same(expected, got)
+    assert same(theirs[2], mine) and ours[3] is plain
+
+
+def test_a_ufunc_that_names_its_output_fails_as_numpys_does(at_once: None):
+    """Made at once, the error is NumPy's own in type and words, and the output is as it was."""
+    whole = numpy.arange(3)
+    for make in (lambda: lazy.asarray(whole.copy()) + 0, lambda: lazy.asarray(whole.copy()), lambda: whole.copy()):
+        target, theirs = make(), whole.copy()
+        assert raised(lambda: lazy.add(target, 0.5, out=target)) == raised(lambda: numpy.add(theirs, 0.5, out=theirs))
+        longer = numpy.arange(4)
+        assert (raised(lambda: lazy.add(target, lazy.asarray(longer), out=target))
+                == raised(lambda: numpy.add(theirs, longer, out=theirs)))
+        assert raised(lambda: lazy.add(target, out=target))[0] is raised(lambda: numpy.add(theirs, out=theirs))[0]
+        assert same(whole, array.gather(target)[0])
+
+
+def test_a_ufunc_given_its_output_by_position_writes_into_it(at_once: None):
+    """`np.add(a, b, c)` is a write into `c`: what was written before it reads what `c` held, and the call gives `c`."""
+    array.at_once_below(100)
+
+    def program(np: Any) -> tuple:
+        """Read an array in an operation that waits, then name it as an output by position."""
+        a, b, c = (np.asarray(numpy.arange(4.0) + shift) for shift in range(3))
+        reader = np.asarray(numpy.arange(200.0).reshape(50, 4)) + c
+        result = np.add(a, b, c)
+        return reader, c, result, result is c
+
+    theirs, ours = program(numpy), program(lazy)
+    assert ours[3] == theirs[3]
+    for expected, got in zip(theirs[:3], array.gather(*ours[:3])):
+        assert same(expected, got)
+
+
+def test_a_plain_array_updated_in_place_by_a_lazy_one_is_numpys_write(at_once: None):
+    """`a += x` on an `ndarray` `a` reaches the lazy `x` as `np.add(a, x, out=(a,))`: NumPy's write into `a`, which
+    is what the statement gives, with nothing counted as computed early when `x` has its values."""
+    def program(np: Any, a: numpy.ndarray) -> numpy.ndarray:
+        """Update a plain array by arrays of `np`'s, as a library updates its parameters."""
+        x = np.asarray(edges()) * 1.0
+        a += x
+        a *= x[0]
+        a[1] -= x[2]
+        numpy.multiply(x, 2.0, out=a)
+        a /= np.sqrt(np.abs(x) + 1.0)
+        return a
+
+    theirs, ours = numpy.ones((EDGE_ROWS, len(EDGES))), numpy.ones((EDGE_ROWS, len(EDGES)))
+    with numpy.errstate(all="ignore"):
+        expected = program(numpy, theirs)
+        deferred, written, needed = graph.COUNTS.deferred, array.at_once_counts()[1], dict(graph.COUNTS.needed)
+        got = program(lazy, ours)
+    assert got is ours and same(expected, ours)
+    assert graph.COUNTS.deferred == deferred and array.at_once_counts()[1] - written == 5
+    assert graph.COUNTS.needed == needed
+
+
+def test_a_plain_array_updated_by_a_lazy_one_that_waits_or_is_strict(at_once: None):
+    """A pending array is computed for the write, as it was; the values of a strict one do not leave into an `ndarray`."""
+    array.at_once_below(100)
+    values = numpy.arange(200.0)
+    theirs, ours = numpy.ones(200), numpy.ones(200)
+    theirs += values * 2.0 + 1.0
+    waiting = lazy.asarray(values) * 2.0 + 1.0
+    assert waiting._node.pending
+    ours += waiting
+    assert same(theirs, ours) and not waiting._node.pending
+    strict = get_lazy(strict=True)
+    with pytest.raises(NotGathered):
+        ours += strict.asarray(values)
+    with pytest.raises(NotGathered):
+        numpy.add(ours, strict.asarray(values) * 2.0, out=ours)
+    assert same(theirs, ours)
+
+
+def test_a_call_on_plain_arrays_through_the_stand_in_is_numpys_call(at_once: None):
+    """A function or a ufunc of the stand-in on `ndarray`s, and an operator of an `ndarray` with a lazy array, are
+    NumPy's call on the arrays as they are: its values, its element type and the way its result lies in memory."""
+    a, b = edges(), edges(EDGE_TURN)
+    columns = numpy.asfortranarray(a)
+    lb = lazy.asarray(b)
+    tiny = numpy.finfo(a.dtype).eps  # A NumPy scalar among the arguments, as a library's own constants are.
+    before = graph.COUNTS.deferred
+    with numpy.errstate(all="ignore"):
+        cases = [
+            (numpy.sqrt(a), lazy.sqrt(a)), (numpy.add(a, b), lazy.add(a, b)), (numpy.add(a, b), lazy.add(a, lb)),
+            (a + b, a + lb), (b * a, lb * a), (a ** b, a ** lb), (a - 1.5, lazy.subtract(a, 1.5)),
+            (numpy.maximum(a, tiny), lazy.maximum(a, tiny)), (numpy.less(a, 0.0), lazy.less(a, 0.0)),
+            (numpy.exp(columns), lazy.exp(columns)), (columns + b, columns + lb), (numpy.negative(a[:, ::2]), lazy.negative(a[:, ::2])),
+            (numpy.dot(a, b.T), lazy.dot(a, b.T)), (numpy.matmul(a, b.T), lazy.matmul(a, lb.T)),
+            (numpy.sum(a, axis=0), lazy.sum(a, axis=0)), (numpy.max(a, axis=1, keepdims=True), lazy.max(a, axis=1, keepdims=True)),
+            (numpy.argmax(b), lazy.argmax(b)), (numpy.outer(a[0], b[0]), lazy.outer(a[0], lb[0])),
+            (numpy.sqrt(a[0, 5]), lazy.sqrt(a[0, 5])),
+        ]
+    for place, (expected, got) in enumerate(cases[:-1]):
+        assert isinstance(got, LazyArray) and not got._node.pending, place
+        assert same(expected, got.gather()) and layout(expected) == layout(got.gather()), place
+    assert type(cases[-1][1]) is type(cases[-1][0]) and same(*cases[-1])  # Of a number, NumPy's number.
+    assert graph.COUNTS.deferred == before
+    made = lazy.exp(a)
+    made[0, 0] = 99.0  # A result is an array of its own: the write does not reach `a`.
+    assert numpy.isnan(a[0, 0]) and made.gather()[0, 0] == 99.0
+
+
+def test_a_call_on_plain_arrays_waits_where_a_kernel_could_make_it(at_once: None):
+    """What the planner can compute still waits, on plain arrays as on the layer's; a strict stand-in gives strict results."""
+    array.at_once_below(10, frozenset({numpy.add, numpy.multiply}), numpy.dtype(numpy.float64))
+    a, b = numpy.arange(40.0), numpy.arange(40.0)[::-1].copy()
+    waits = lazy.add(a, b)
+    assert waits._node.pending and same(a + b, waits.gather())
+    by_operator = a * lazy.asarray(b)
+    assert by_operator._node.pending and same(a * b, by_operator.gather())
+    root = lazy.sqrt(a)  # No kernel of the planner's: made now, whatever its size.
+    assert not root._node.pending and same(numpy.sqrt(a), root.gather())
+    product = lazy.dot(a, b)
+    assert not product._node.pending and same(numpy.dot(a, b), product.gather())
+    whole = numpy.arange(40)
+    counted = lazy.add(whole, whole)  # Another element type than the kernels'.
+    assert not counted._node.pending and same(whole + whole, counted.gather())
+    strict = get_lazy(strict=True)
+    for made in (strict.sqrt(a), strict.dot(a, b), strict.add(a[:4], b[:4]), strict.clip(a, 1.0, 2.0)):
+        assert made._node.strict
+    target = a.copy()
+    assert strict.negative(a, out=target)._node.strict and same(-a, target)
+    own = lazy.zeros(40) + 1.0
+    strict.add(a, 1.0, out=own)  # What a strict stand-in writes is strict, and so is the array from then on.
+    assert own._node.strict
+
+
+def test_a_call_made_on_plain_arrays_raises_and_warns_where_it_is_written(at_once: None):
+    """A warning of a call the core makes is the program's, at the line that wrote it, under the error settings in
+    effect there: for a call on plain arrays, a ufunc that names its output and a plain array updated in place."""
+    ones = numpy.ones(3)
+    with pytest.warns(RuntimeWarning, match="divide by zero encountered in divide") as caught:
+        lazy.divide(ones, 0.0)
+    assert caught[0].filename == __file__
+    with pytest.warns(RuntimeWarning, match="invalid value encountered in sqrt") as caught:
+        below = lazy.asarray(-ones)
+        lazy.sqrt(below, out=below)
+    assert caught[0].filename == __file__ and numpy.isnan(below.gather()).all()
+    with pytest.warns(RuntimeWarning, match="divide by zero encountered in divide") as caught:
+        target = ones.copy()
+        target /= lazy.zeros(3)
+    assert caught[0].filename == __file__ and numpy.isinf(target).all()
+    with numpy.errstate(divide="raise"):
+        for call in (lambda: lazy.divide(ones, 0.0), lambda: lazy.divide(ones, 0.0, out=ones.copy()),
+                     lambda: ones.copy().__itruediv__(lazy.zeros(3)), lambda: lazy.clip(lazy.asarray(ones) / 0.0, 0.0, 1.0)):
+            with pytest.raises(FloatingPointError):
+                call()
+
+
+def test_a_call_outside_the_deferred_set_is_made_at_once_and_counted(at_once: None):
+    """`np.clip` and `np.average` have no rule: NumPy's call on the values, on arrays of the layer's and plain ones,
+    with every call counted on its line for `lazy_report()` as a call made at once."""
+    a, b = edges(), edges(EDGE_TURN)
+    la, lb = lazy.asarray(a), lazy.asarray(b)
+    tiny = numpy.finfo(a.dtype).eps
+    weights = numpy.arange(1.0, len(EDGES) + 1.0)
+    finite = numpy.arange(12.0).reshape(3, 4)
+    calls = [
+        (lambda np, x, y: np.clip(x, -1.0, 1.0), 1), (lambda np, x, y: np.clip(x, tiny, 1 - tiny), 1),
+        (lambda np, x, y: np.clip(x, None, 0.5), 1), (lambda np, x, y: np.clip(x, y, 2.0), 1),
+        (lambda np, x, y: np.clip(x, 0.0, numpy.inf), 1), (lambda np, x, y: np.clip(x[0], -0.0, 0.0), 1),
+        (lambda np, x, y: np.average(x, axis=0), 0), (lambda np, x, y: np.average(x, axis=1, weights=weights), 0),
+        (lambda np, x, y: np.average(y), 0),
+    ]
+    clipped, deferred = graph.COUNTS.at_once.get("np.clip", 0), graph.COUNTS.deferred
+    sites = sum(count for site, count in graph.SITES.items() if site[:3] == (graph.AT_ONCE, "np.clip", __file__))
+    with numpy.errstate(all="ignore"):
+        for place, (call, _) in enumerate(calls):
+            expected = call(numpy, a, b)
+            for got in (call(lazy, la, lb), call(lazy, a, b), call(lazy, a, lb)):
+                assert isinstance(got, LazyArray) and not got._node.pending and got._node.kind == graph.AT_ONCE, place
+                assert same(expected, got.gather()) and layout(expected) == layout(got.gather()), place
+        both = lazy.average(lazy.asarray(finite), axis=0, weights=lazy.asarray(numpy.arange(1.0, 4.0)), returned=True)
+    assert all(same(theirs, ours.gather()) for theirs, ours
+               in zip(numpy.average(finite, axis=0, weights=numpy.arange(1.0, 4.0), returned=True), both, strict=True))
+    made = 3 * sum(counted for _, counted in calls)
+    assert graph.COUNTS.at_once["np.clip"] - clipped == made and graph.COUNTS.deferred == deferred
+    assert sum(count for site, count in graph.SITES.items() if site[:3] == (graph.AT_ONCE, "np.clip", __file__)) - sites == made
+    kept = lazy.clip(la, -1.0, 1.0)
+    kept[0, 0] = 99.0  # A result is an array of its own.
+    assert numpy.isnan(a[0, 0]) and kept.gather()[0, 0] == 99.0
+
+
+def test_a_call_outside_the_deferred_set_computes_what_it_reads_and_takes_any_size(at_once: None):
+    """A pending argument is computed for the call, as it was, and an array past the limit is clipped at once."""
+    array.at_once_below(100)
+    values = numpy.arange(200.0)
+    waiting = lazy.asarray(values) * 2.0
+    assert waiting._node.pending
+    clipped = lazy.clip(waiting, 10.0, 50.0)
+    assert not clipped._node.pending and not waiting._node.pending and same(numpy.clip(values * 2.0, 10.0, 50.0), clipped.gather())
+    for large in (lazy.asarray(values), values):
+        made = lazy.clip(large, 10.0, 50.0)
+        assert not made._node.pending and same(numpy.clip(values, 10.0, 50.0), made.gather())
+    into = lazy.asarray(values.copy())
+    assert lazy.clip(into, 10.0, 50.0, out=into) is into and same(numpy.clip(values, 10.0, 50.0), into.gather())
+    with pytest.raises(NotGathered):
+        float(get_lazy(strict=True).average(values))
+
+
+def test_the_functions_called_whatever_their_size_have_no_rule_and_give_an_array_of_their_own():
+    """What `array.NEVER_DEFERRED` says of its functions, which the core's road rests on."""
+    values = numpy.arange(12.0).reshape(3, 4)
+    node = lazy.asarray(values)._node
+    for function in array.NEVER_DEFERRED:
+        assert rules.plan(function, (node,), {}) is None and rules.plan(function, (node, 0.0, 1.0), {}) is None
+    for result in (numpy.clip(values, None, None), numpy.clip(values, -numpy.inf, numpy.inf), numpy.clip(values, values, values),
+                   numpy.average(values, axis=0), numpy.average(values, axis=0, weights=numpy.ones(3)),
+                   *numpy.average(values, axis=1, keepdims=True, returned=True)):
+        assert not numpy.shares_memory(result, values)
+
+
+def test_the_core_makes_these_calls_without_the_python_roads(at_once: None, monkeypatch: pytest.MonkeyPatch):
+    """None of them reaches the Python that makes a write at once, makes a call at once or makes a plain array lazy:
+    that way round is what each cost 1 to 8 µs over NumPy's own call for."""
+    def reached(*args: Any, **kwargs: Any) -> None:
+        """Fail the test: a Python road was taken."""
+        raise AssertionError("the call went the Python road")
+
+    a, b = numpy.arange(1.0, 13.0).reshape(3, 4), numpy.arange(12.0).reshape(3, 4)
+    made, handed = lazy.zeros((3, 4)) + 1.0, lazy.asarray(b.copy())
+    tiny = numpy.finfo(a.dtype).eps
+    for owner, name in ((array, "_write"), (array, "_at_once"), (namespace, "wrap")):
+        monkeypatch.setattr(owner, name, reached)
+    for target in (made, handed, a.copy()):
+        lazy.maximum(target, 2.0, out=target)
+        lazy.exp(target, out=target)
+        lazy.add(target, handed, out=target)
+    plain = a.copy()
+    plain += made
+    plain *= handed
+    numpy.subtract(plain, made, out=plain)
+    results = [lazy.sqrt(a), lazy.add(a, b), a + made, handed - a, lazy.dot(a, b.T), lazy.sum(a, axis=0),
+               lazy.clip(a, tiny, 1 - tiny), lazy.clip(made, 2.0, 5.0), lazy.average(handed, axis=0), lazy.maximum(a, tiny)]
+    assert all(isinstance(result, LazyArray) and not result._node.pending for result in results)
+
+
+def test_the_quick_roads_stand_aside_while_a_recording_listens(at_once: None):
+    """A recording has a node for each array that comes in and a line for each write made at once, as without them."""
+    theirs, ours = numpy.arange(6.0) - 2.0, numpy.arange(6.0) - 2.0
+    numpy.maximum(theirs, 0.0, out=theirs)
+    with record_graphs() as recording:
+        lazy.maximum(ours, 0.0, out=ours)
+        root = lazy.sqrt(ours)
+        ours += root
+        clipped = lazy.clip(root, 0.5, 1.0)
+    theirs += numpy.sqrt(theirs)
+    assert same(theirs, ours) and same(numpy.clip(numpy.sqrt(numpy.maximum(numpy.arange(6.0) - 2.0, 0.0)), 0.5, 1.0), clipped.gather())
+    report = recording.report()
+    assert [row.call for row in report.writes] == ["np.maximum"] and [row.call for row in report.eager] == ["np.clip"]
+
+
+def library_program(np: Any, seed: int) -> list:
+    """Run a program of the calls a library makes on its own arrays, and return every array.
+
+    Half of the arrays are plain `ndarray`s whichever module computes, as a
+    library's are once it has validated its input, and half are `np`'s. The
+    calls are those of a library written for speed: a ufunc that names its
+    output, a plain array updated in place, a function on plain arrays,
+    `np.clip`, and now and then an operation large enough to wait.
+
+    Args:
+        np: The `numpy` module or the lazy stand-in.
+        seed: The seed of the program: the same calls are made for either module.
+
+    Returns:
+        The arrays the program ended with.
+    """
+    rng = random.Random(seed)
+    values = numpy.random.default_rng(seed)
+
+    def draw() -> numpy.ndarray:
+        """Draw a small array of numbers of both signs, zeros among them."""
+        return values.integers(-3, 4, (SIDE, SIDE)).astype(float)
+
+    pool = [draw(), draw(), np.asarray(draw()), np.asarray(draw()) * 1.0]
+    large = np.asarray(values.standard_normal((LARGE_SIDE, LARGE_SIDE)))
+    for _ in range(LIBRARY_STEPS):
+        kind = rng.randrange(12)
+        place = rng.randrange(len(pool))
+        target, other = pool[place], rng.choice(pool)
+        if kind == 0:
+            np.maximum(target, 0.0, out=target)
+        elif kind == 1:
+            np.tanh(target, out=target)
+        elif kind == 2:
+            np.add(target, other, out=target)
+        elif kind == 3:
+            # Through `np`: a write from one `ndarray` into another is NumPy's alone, which the layer does not see.
+            target += np.asarray(other)
+        elif kind == 4:
+            target *= np.sqrt(np.abs(other))
+        elif kind == 5:
+            pool[place] = np.clip(target, -2.5, 2.5)
+        elif kind == 6:
+            pool[place] = np.dot(target, other)
+        elif kind == 7:
+            target -= np.sum(other, axis=0)
+        elif kind == 8:
+            large = large * 1.0001 + 0.5  # Stays pending under a limit below its size.
+        elif kind == 9:
+            np.subtract(target, large[:SIDE, :SIDE], out=target)
+        elif kind == 10:
+            np.multiply(target[1:], other[:-1], out=target[1:])
+        elif kind == 11:
+            pool[place] = other / (np.abs(target) + 1.0)
+    return pool + [large]
+
+
+@pytest.mark.parametrize("limit", (NOTHING, SIDE * SIDE + 1, EVERYTHING))
+def test_random_programs_of_a_librarys_calls_give_numpys_arrays(limit: int):
+    """In-place ufuncs, updates of plain arrays and calls on them in any order give NumPy's arrays, whatever waits."""
+    if limit and not array.core_in_use():
+        pytest.skip("calls are made at once by the C core only")
+    array.at_once_below(limit)
+    try:
+        for seed in range(LIBRARY_PROGRAMS):
+            with numpy.errstate(all="ignore"):
+                expected = library_program(numpy, seed)
+                got = array.gather(*library_program(lazy, seed))
+            assert len(expected) == len(got)
+            for place, (theirs, ours) in enumerate(zip(expected, got)):
+                assert same(theirs, ours), (seed, place)
+    finally:
+        array.at_once_below(NOTHING)
 
 
 def random_program(np: Any, seed: int) -> list:
