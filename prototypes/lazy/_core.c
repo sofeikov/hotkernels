@@ -45,7 +45,7 @@
 
 /* Raised by one whenever this file and the Python it stands for change together, so that a module built from an
  * older source is not used: array.py asks for the number it was written against. */
-#define CORE_VERSION 37
+#define CORE_VERSION 38
 
 /* A field of an instance of a class with `__slots__`, by its offset. */
 #define SLOT(object, offset) (*(PyObject **)((char *)(object) + (offset)))
@@ -151,6 +151,8 @@ static int enabled = 0;
 static Py_ssize_t small_limit = 0;
 /* How many calls and writes were made at once that way, for the tools that measure a program. */
 static long long made_at_once = 0, written_at_once = 0;
+/* Calls that wrote into the memory of an operand nothing else read, since the module was loaded: `lent_count()`. */
+static long long lent = 0;
 /* The callables a fused kernel can make, and the element type it makes them on: `array.at_once_below` is given
  * both. A call of any size that is not one of these on that type is made at once when its operands have their
  * values: nothing above it could be computed together with it, so its node would only cost. NULL for none given,
@@ -6798,6 +6800,14 @@ module_small_reads(PyObject *module, PyObject *function)
     Py_RETURN_NONE;
 }
 
+/* `lent_count()`: calls that wrote their result into the memory of an operand nothing else read, since the module
+ * was loaded (`lendable`). */
+static PyObject *
+module_lent_count(PyObject *module, PyObject *ignored)
+{
+    return PyLong_FromLongLong(lent);
+}
+
 /* `release_pending()`: give back the table of the pending set when nothing is pending. A set keeps the table of its
  * largest moment, and reading it walks the whole table (`graph.release_pending`). Finding the set empty and
  * clearing it are one step here, with no other thread of the interpreter between them: in Python they are two, and
@@ -6818,6 +6828,78 @@ module_release_pending(PyObject *module, PyObject *ignored)
 /* The most operands a node is computed with on the C stack; one of more is left to Python. */
 #define MOST_COMPUTED 8
 
+/* The fewest bytes an operand must have for its memory to be lent to the call that reads it last: NumPy's own
+ * threshold for reusing a temporary (`NPY_MIN_ELIDE_BYTES`, 256 KiB). `evaluate.LEND_BYTES` is the same. */
+#define LEND_BYTES (256 * 1024)
+
+
+/* Whether an array operand leaves the layout of a ufunc's result as NumPy gives it out of place: it has no
+ * dimensions, or its elements lie in C order. With every array operand so, NumPy's result is in C order, as the
+ * operand lent is. */
+static int
+lays_in_order(PyObject *value)
+{
+    return Py_TYPE(value) != Ndarray || PyArray_NDIM((PyArrayObject *)value) == 0
+        || PyArray_IS_C_CONTIGUOUS((PyArrayObject *)value);
+}
+
+/* The operand of a plain node whose memory its call may write its result into, as NumPy reuses a temporary's;
+ * `evaluate._lendable` is the definition, and this says the same from the counts the core sees. A borrowed
+ * reference, or NULL for none. The node's call is a ufunc of one output with an operand for each input and no
+ * keyword, element by element; every array operand lies in C order; and the operand lent is a computed node that
+ * no lazy array the user can name stands for (`exposed`), that nothing but this call reads (the only references to
+ * it are the places of this node's operands, since a pending node holds its operands and a lazy array its node),
+ * whose value is an `ndarray` that owns its memory, can be written, has the result's shape and element type and at
+ * least `LEND_BYTES`, and that nothing but the node refers to: no view of it is alive. */
+static PyObject *
+lendable(PyObject *node, PyObject *operation, PyObject *args, Py_ssize_t count)
+{
+    PyObject *kind = SLOT(node, node_at[N_KIND]);
+    if (Py_TYPE(operation) != Ufunc || ((PyUFuncObject *)operation)->nout != 1 || ((PyUFuncObject *)operation)->nin != count
+        || (kind != elementwise_kind && PyUnicode_Compare(kind, elementwise_kind) != 0)) {
+        return NULL;
+    }
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        if (!lays_in_order(Py_TYPE(arg) == Node ? SLOT(arg, node_at[N_VALUE]) : arg)) {
+            return NULL;
+        }
+    }
+    PyObject *shape = SLOT(node, node_at[N_SHAPE]), *dtype = SLOT(node, node_at[N_DTYPE]);
+    for (Py_ssize_t place = 0; place < count; place++) {
+        PyObject *arg = PyTuple_GET_ITEM(args, place);
+        if (Py_TYPE(arg) != Node || SLOT(arg, node_at[N_EXPOSED]) != Py_False) {
+            continue;
+        }
+        PyObject *value = SLOT(arg, node_at[N_VALUE]);
+        if (Py_TYPE(value) != Ndarray || Py_REFCNT(value) != 1) {
+            continue;
+        }
+        PyArrayObject *memory = (PyArrayObject *)value;
+        Py_ssize_t places = 0;
+        for (Py_ssize_t other = 0; other < count; other++) {
+            places += PyTuple_GET_ITEM(args, other) == arg;
+        }
+        if (Py_REFCNT(arg) != places || PyArray_BASE(memory) != NULL || !PyArray_CHKFLAGS(memory, NPY_ARRAY_OWNDATA)
+            || !PyArray_ISWRITEABLE(memory) || PyArray_NBYTES(memory) < LEND_BYTES
+            || PyTuple_GET_SIZE(shape) != PyArray_NDIM(memory)) {
+            continue;
+        }
+        int fits = 1;
+        for (int axis = 0; fits && axis < PyArray_NDIM(memory); axis++) {
+            PyObject *length = PyTuple_GET_ITEM(shape, axis);
+            fits = PyLong_CheckExact(length) && PyLong_AsSsize_t(length) == PyArray_DIM(memory, axis);
+        }
+        if (!fits || ((PyObject *)PyArray_DESCR(memory) != dtype
+                      && PyObject_RichCompareBool((PyObject *)PyArray_DESCR(memory), dtype, Py_EQ) != 1)) {
+            PyErr_Clear();
+            continue;
+        }
+        return arg;
+    }
+    return NULL;
+}
+
 /* Compute one pending node whose call is plain, as `evaluate._compute_one` does: the operation on its operands'
  * values, the value kept, the operands let go (`graph.settle`). A plain call is one that is no write, has no
  * keyword, gives a shape that is known, and reads only values that are there; the caller sees to the error
@@ -6837,7 +6919,7 @@ plain_now(PyObject *node)
         || !shape_known(SLOT(node, node_at[N_SHAPE]))) {
         return 0;
     }
-    PyObject *values[MOST_COMPUTED];
+    PyObject *values[MOST_COMPUTED + 1];
     Py_ssize_t count = PyTuple_GET_SIZE(args);
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *arg = PyTuple_GET_ITEM(args, place);
@@ -6845,18 +6927,28 @@ plain_now(PyObject *node)
             return 0; /* Failed, or its memory taken by a write: Python says what follows. */
         }
     }
+    /* Asked before the values are taken, which are references to them. */
+    PyObject *lender = lendable(node, operation, args, count);
     for (Py_ssize_t place = 0; place < count; place++) {
         PyObject *arg = PyTuple_GET_ITEM(args, place);
         values[place] = Py_NewRef(Py_TYPE(arg) == Node ? SLOT(arg, node_at[N_VALUE]) : arg);
     }
+    if (lender != NULL) {
+        values[count] = Py_NewRef(SLOT(lender, node_at[N_VALUE]));
+    }
     Py_INCREF(operation);
-    PyObject *value = PyObject_Vectorcall(operation, values, (size_t)count, NULL);
+    PyObject *value = PyObject_Vectorcall(operation, values, (size_t)count, lender != NULL ? out_names : NULL);
     Py_DECREF(operation);
-    for (Py_ssize_t place = 0; place < count; place++) {
+    for (Py_ssize_t place = 0; place < count + (lender != NULL); place++) {
         Py_DECREF(values[place]);
     }
     if (value == NULL) {
         return -1;
+    }
+    if (lender != NULL) {
+        /* The lender's memory is the node's now: as a write made in place does, the lender keeps no value. */
+        Py_SETREF(SLOT(lender, node_at[N_VALUE]), Py_NewRef(Py_None));
+        lent++;
     }
     /* `node.value = value`, then `graph.settle(node)`. */
     Py_SETREF(SLOT(node, node_at[N_VALUE]), value);
@@ -7181,6 +7273,7 @@ static PyMethodDef methods[] = {
     {"fusible", (PyCFunction)(void (*)(void))module_fusible, METH_FASTCALL,
      "Name the callables a kernel can make and their element type: a large call that is none of them is made at once."},
     {"at_once_counts", module_at_once_counts, METH_NOARGS, "(calls, writes) made at once since the module was loaded."},
+    {"lent_count", module_lent_count, METH_NOARGS, "Calls that wrote into an operand's memory since the module was loaded."},
     {"small_reads", module_small_reads, METH_O,
      "Be told the function that computes a lazy array's node, for a small call that reads a pending one; None for none."},
     {"release_pending", module_release_pending, METH_NOARGS,
