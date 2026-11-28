@@ -700,6 +700,8 @@ The blend by itself, `rgb` of 2,048 × 2,048 rows of four and of three, nothing 
 | Rows of four | 144.1 | 139.7, 1.03x | 118.3, 1.25x | 43.3, 3.33x |
 | Rows of three | 112.1 | 108.1, 1.06x | 95.1, 1.20x | 33.8, 3.32x |
 
+Each ratio is against NumPy as timed in the same run, 144 to 148 ms and 112 to 115 ms. The middle column was taken with the first version of the fill, a row at a time, which the loop over many rows has made 9 ms shorter on rows of four since.
+
 - **`mpl_hillshade` computes its blend by one program of five kernel calls, and is 1.30x of NumPy where it was level.** The program is six of the blend's nine operations. `2 * intensity` is one operation on an array in one run, NumPy's call, and `2 * (1 - intensity)` is a program of its own, as before. Timed twice each way:
 
 | `mpl_hillshade` | NumPy ms | Fused ms | Of which computing | vs NumPy | Given up | Kernel calls | Nodes inside a program | New arrays written |
