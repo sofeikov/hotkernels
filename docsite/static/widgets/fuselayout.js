@@ -102,9 +102,9 @@ const LAYOUTS = {
   },
   declined: {
     label: "What is declined",
-    code: "y = a[::-1] * 2.0 + b           # reversed\ny = a.T * 2.0 + b               # transposed",
+    code: "y = a[::-1] * 2.0 + b           # reversed\ny = a.T * 2.0 + b               # two orders",
     panels: [{ title: "a[::-1]: strides that run backwards", rows: 4, pitch: 13, cell: () => "x" }],
-    how: "The module reads float64 arrays whose strides are positive and do not grow from one axis to the next: then NumPy's result is laid out in C order, as the output is, and a later sum adds in NumPy's order. It <b>declines</b> a reversed, Fortran-ordered or transposed array, an output that overlaps an operand without being it, rows shorter than 16 at more than one pitch or more than eight times their length apart, an array that steps with fewer than 32 elements at one step (save the one stored product isoneutral mixing makes), and a program with too few operations for the arrays it would copy.",
+    how: "The module reads float64 arrays whose strides are positive and do not grow from one axis to the next: then NumPy's result is laid out in C order, as the output is, and a later sum adds in NumPy's order. Arrays that all lie in one other order (<code>a.T * 2.0 + b.T</code>) are walked in that order, as NumPy walks them, and the result is laid out as NumPy's. It <b>declines</b> a reversed array, arrays that lie in two orders, an array out of order beside a row or a column or with an axis of length one, an output that overlaps an operand without being it, rows shorter than 16 at more than one pitch or more than eight times their length apart, an array that steps with fewer than 32 elements at one step (save the one stored product isoneutral mixing makes), and a program with too few operations for the arrays it would copy.",
     when: "Declining is decided before anything is computed or copied. The group's nodes are then computed by their own NumPy calls, in order, and the result is the same.",
   },
 };
