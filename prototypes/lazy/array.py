@@ -2186,8 +2186,9 @@ class LazyArray:
             **kwargs: `dtype` and `type`, when given by keyword.
 
         Returns:
-            A pending lazy array that is a view of this one, for the three
-            calls above. For anything else the call is made at once, by
+            A lazy array that is a view of this one, for the three calls
+            above: pending, or NumPy's view where the index `x[...]` would
+            be taken at once. For anything else the call is made at once, by
             NumPy's own method on the computed array: a change of element
             type, another array type (`np.matrix`, a masked array), an
             array without dimensions, whose view is a number when the value
