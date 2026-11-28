@@ -39,7 +39,7 @@ except ImportError:
     _built_core = None
 
 # The version of `_core.c` this file was written against. A module built from another is not used.
-CORE_VERSION = 36
+CORE_VERSION = 37
 
 # NumPy functions that answer from the shape alone, and the attribute that answers each.
 SHAPE_QUESTIONS = {np.shape: "shape", np.ndim: "ndim", np.size: "size"}
@@ -63,12 +63,17 @@ WHOLE_INDEX = (Ellipsis,)
 
 # In-place ufunc calls, `np.clip` and the roundings take `out=`; these functions are deferred as writes when they do.
 OUT_FUNCTIONS = frozenset({np.clip, np.round, np.around})
-# What a recording calls an element read from an array that has its values, where it is an input of a later graph.
 # Functions that give one new array or number, which never shares memory with an argument, whatever they are
 # given. With small calls made at once (`at_once_below`) the C core calls one of these on small arrays that have
 # their values without asking the rules: the result is an array of its own either way.
 FRESH_FUNCTIONS = frozenset({np.dot, np.matmul, np.sum, np.mean, np.max, np.min, np.prod, np.std, np.var, np.argmax,
                              np.argmin, np.copy, np.cumsum, np.any, np.all, np.outer})
+# Functions the rules have no rule for, so that a call of one is never a node, and which give one new array or
+# number that shares no memory with an argument when they are called without `out=`. A call of one is made at
+# once on gathered operands (`_at_once`) and counted as outside the deferred set. With small calls made at once
+# (`at_once_below`) the C core makes it, on arrays of any size that have their values, where the stand-in is called.
+NEVER_DEFERRED = frozenset({np.clip})
+# What a recording calls an element read from an array that has its values, where it is an input of a later graph.
 ELEMENT_SOURCE = "x[index]"
 # The layout a write's copy of an array is given: the array's own, as far as NumPy can keep it. A write that
 # NumPy makes in place leaves the array laid out as it was, and a later sum over it adds in that order.
@@ -2345,7 +2350,7 @@ def _set_up(core: Any) -> None:
                internal_files=graph._internal_files, elementwise=rules.ELEMENTWISE, fitting=_fitting,
                write_kind=rules.WRITE, LazyCallable=namespace.LazyCallable, LazyNumPy=namespace.LazyNumPy,
                at_once=graph.AT_ONCE, handled_apart=HANDLED_APART, shaped_like=SHAPED_LIKE,
-               fresh_functions=FRESH_FUNCTIONS, valued=VALUED, generic=np.generic, in_place_ufuncs=IN_PLACE_UFUNCS,
+               fresh_functions=FRESH_FUNCTIONS, never_deferred=NEVER_DEFERRED, at_once_result=_made_lazy, valued=VALUED, generic=np.generic, in_place_ufuncs=IN_PLACE_UFUNCS,
                deferred_kinds="".join(sorted(rules.DEFERRED_KINDS)))
 
 
