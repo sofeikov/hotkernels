@@ -322,6 +322,16 @@ Everything above was measured on an Apple M1 Pro. The same was run on x86-64, an
 - **NumPy is not the same function there.** `np.maximum` of two zeros is its second operand, not the positive zero, so a maximum's operands are matched only in the order the program wrote them. An invalid operation such as `inf - inf` gives a NaN with its sign bit set, unlike `np.nan`, and NumPy's own loops return one or the other of two NaNs depending on where an element falls. The judge now checks that a fused result is a NaN wherever NumPy's is, and not which of two.
 - **The layer's limits were not moved.** The block of 4,096 elements and the size below which a call is made at once are still the M1 Pro's. Whether x86-64 wants others is [issue 309](https://github.com/sofeikov/hotkernels/issues/309).
 
+### Ten programs from other codebases
+
+Ten more programs were run on x86-64, each the NumPy code of a published project with the stand-in where its `import numpy as np` stood: perlin-numpy, the convolutional network of the book *Deep Learning from Scratch*, Matplotlib's hill shading, pvlib's solar position, scikit-image's colour difference, scikit-learn's perceptron, SALib's Sobol' analysis, prysm's Zernike polynomials, Astropy's models and python_speech_features. The tables and the reasons are in [the findings](repo:docs/lazy-codebases-findings.md).
+
+- **They gain little: the fused run is 0.88x to 1.14x of NumPy.** Astropy's models 1.14x, prysm 1.10x, scikit-image 1.08x, the convolutional network 1.07x (from `install()`, not from fusion), five level, pvlib 0.97x and scikit-learn's perceptron 0.88x. All give NumPy's bits.
+- **A third of their time is a mathematics library's functions:** `cos`, `sin`, `x ** 3`, `%`, `cbrt`. Those end an expression, since a kernel's result has to be the library's bits, and a program that is sums of cosines has little between them.
+- **No pattern was missing.** Every expression found on arrays a kernel can read was planned. What was given up was for how the arrays lie: one left transposed by the call that made it, rows of four colour values with one value for each pixel, and a channel of an image or a column of a table, whose elements are not next to each other.
+- **`install()` gains on one of the ten,** 1.08x: the other nine make almost no call the package has a kernel for.
+- **The layer costs time where the corpus had not shown it.** A program computed node by node is up to 1.4x slower than eagerly, because NumPy reuses the memory of its temporaries and a graph holds each one; and a ufunc called with `out=`, `np.clip` and a function called on a library's plain arrays cost 1 to 8 µs over NumPy's call.
+
 ### What is open in the layer, and is not fusion
 
 - **What handing a lazy array to a library costs.** scikit-learn is 2% slower with lazy arrays handed in, with the kernels installed, and the time is not in the layer: the library takes a longer road for an array type it does not know. scikit-image fails on one. Whether a program whose work is a library's should lose anything is open.

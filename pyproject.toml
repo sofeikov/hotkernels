@@ -39,6 +39,17 @@ apps = [
     "scipy>=1.17.1",
     "trimesh>=5.2.1",
 ]
+# The libraries whose NumPy code `prototypes/lazy/programs/codebases.py` runs with the lazy stand-in, beside those
+# of `apps`. prysm 0.21 imports `pkg_resources`, which setuptools dropped in 81.
+# See docs/lazy-codebases-findings.md.
+codebases = [
+    "matplotlib>=3.11",
+    "prysm>=0.21.1",
+    "pvlib>=0.16.1",
+    "python-speech-features>=0.6",
+    "salib>=1.5",
+    "setuptools<81",
+]
 # What `uv run delivery numpy-tests` needs to run NumPy's own test suite.
 dev = [
     "hypothesis>=6.100",

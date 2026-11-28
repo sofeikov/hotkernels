@@ -34,6 +34,11 @@ a NumPy call, how many calls and writes the fused run made at once instead
 of writing a node, how many deferred writes it made in place, and how many
 bytes of results were written to memory each way.
 
+With `--alternate` the ways are timed in turn, round after round, and not
+one after another. A process that has run a program before runs it faster;
+timed one after another, the first way, NumPy's, pays for that and the
+others do not, by several percent on programs of large temporaries.
+
 Timings are only meaningful on a machine that is doing nothing else.
 """
 from __future__ import annotations
@@ -268,7 +273,55 @@ def shape_of(program: corpus.Program, inputs: tuple, way: str) -> tuple[Shape, f
     return shape, stats, values
 
 
-def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], plain: bool) -> Row:
+def _quicker(first: Timing | None, second: Timing) -> Timing:
+    """Return the quicker of two runs.
+
+    Args:
+        first: A run, or None when there is none yet.
+        second: Another run.
+
+    Returns:
+        `second` when it took less time or there is no `first`.
+    """
+    return second if first is None or second.total_ns < first.total_ns else first
+
+
+def alternately(program: corpus.Program, inputs: tuple, runs: int, enabled: Callable[[], Any],
+                plain: bool) -> tuple[dict[str, Timing], dict[str, Timing]]:
+    """Time a program every way in turn, round after round, and keep the quickest run of each way.
+
+    A process that has run a program several times runs it faster, most likely because the allocator has kept
+    the memory of the earlier runs and a large array is no longer new pages from the system. Timed one way after
+    another, the way timed first pays for that and the ways after it do not, which on programs of large
+    temporaries is several percent: pvlib's solar position ran 10% faster "installed" with no call taken by a
+    kernel (docs/lazy-codebases-findings.md). In turn, every way meets the process in the same state.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many rounds; each times every way once.
+        enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
+        plain: Whether to time the lazy ways with nothing installed as well.
+
+    Returns:
+        (the quickest run by NUMPY, INSTALLED, LAZY and FUSED, the last three installed; the quickest by LAZY and
+        FUSED with nothing installed, empty unless `plain`).
+    """
+    timings: dict[str, Timing] = {}
+    bare: dict[str, Timing] = {}
+    for _ in range(runs):
+        timings[NUMPY] = _quicker(timings.get(NUMPY), quickest(program, inputs, NUMPY, 1))
+        with enabled():
+            timings[INSTALLED] = _quicker(timings.get(INSTALLED), quickest(program, inputs, NUMPY, 1))
+            for way in (LAZY, FUSED):
+                timings[way] = _quicker(timings.get(way), quickest(program, inputs, way, 1))
+        for way in (LAZY, FUSED) if plain else ():
+            bare[way] = _quicker(bare.get(way), quickest(program, inputs, way, 1))
+    return timings, bare
+
+
+def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], plain: bool,
+            alternate: bool = False) -> Row:
     """Measure one program every way.
 
     Args:
@@ -277,6 +330,7 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         runs: How many times each way is timed; the quickest counts.
         enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
         plain: Whether to time the lazy ways with nothing installed as well.
+        alternate: Whether the ways are timed in turn, round after round (`alternately`), and not one after another.
 
     Returns:
         The program's row.
@@ -287,7 +341,8 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
     """
     inputs = program.make(size)
     row = Row(program.name, program.sizes[size])
-    row.timings[NUMPY] = quickest(program, inputs, NUMPY, runs)
+    if not alternate:
+        row.timings[NUMPY] = quickest(program, inputs, NUMPY, runs)
     with enabled():
         served = _run(program, inputs, NUMPY)
         row.lazy, _, lazily = shape_of(program, inputs, LAZY)
@@ -295,14 +350,18 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         assert _same(served, lazily), f"{program.name}: under hotkernels.install() the lazy run does not give the eager program's results"
         assert _same(served, fused), f"{program.name}: under hotkernels.install() the fused run does not give the eager program's results"
         del served, lazily, fused
-        row.timings[INSTALLED] = quickest(program, inputs, NUMPY, runs)
-        for way in (LAZY, FUSED):
-            row.timings[way] = quickest(program, inputs, way, runs)
+        if not alternate:
+            row.timings[INSTALLED] = quickest(program, inputs, NUMPY, runs)
+            for way in (LAZY, FUSED):
+                row.timings[way] = quickest(program, inputs, way, runs)
     if plain:
         expected = _run(program, inputs, NUMPY)
         for way in (LAZY, FUSED):
             assert _same(expected, _run(program, inputs, way)), f"{program.name}: the {way} run does not give NumPy's results"
-            row.plain[way] = quickest(program, inputs, way, runs)
+            if not alternate:
+                row.plain[way] = quickest(program, inputs, way, runs)
+    if alternate:
+        row.timings, row.plain = alternately(program, inputs, runs, enabled, plain)
     return row
 
 
@@ -333,7 +392,9 @@ def render(rows: list[Row], size: str, runs: int) -> str:
 def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are run at: small or large."),
          program: list[str] = typer.Option(None, help="A program to time; may be given several times. Default: all."),
          runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
-         plain: bool = typer.Option(False, help="Also time the lazy ways with nothing installed.")) -> None:
+         plain: bool = typer.Option(False, help="Also time the lazy ways with nothing installed."),
+         alternate: bool = typer.Option(False, help="Time the ways in turn, round after round, so that each meets "
+                                                    "the process in the same state.")) -> None:
     """Time the corpus four ways and print the tables.
 
     Args:
@@ -341,6 +402,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
         program: The names of the programs to time, or none for all of them that run with NumPy.
         runs: How many times each way is timed.
         plain: Whether to time the lazy and the fused run with nothing installed as well.
+        alternate: Whether the ways are timed in turn and not one after another.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not fuse.enable(install=False):
@@ -355,7 +417,7 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
     chosen = [each for each in asked if each.eager and each.available]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        rows = [measure(each, size, runs, hotkernels.enabled, plain) for each in chosen]
+        rows = [measure(each, size, runs, hotkernels.enabled, plain, alternate) for each in chosen]
     log.info("%s", render(rows, size, runs))
 
 
