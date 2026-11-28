@@ -19,6 +19,7 @@ a line of its own, or by `gathered`, and only its value goes into the `assert`.
 from __future__ import annotations
 
 import gc
+import itertools
 import subprocess
 import warnings
 from typing import Any, Iterator
@@ -262,13 +263,27 @@ def test_a_reduction_over_more_than_one_dimension_is_numpys():
     assert calls() == 10 and fuse.STATS.declined == 0
 
 
-def test_a_reduction_of_an_array_that_is_not_contiguous_is_left_to_numpy():
+def test_a_reduction_of_an_array_that_is_not_one_run_is_left_to_numpy():
     """Where NumPy's order of addition is not the order in memory, the kernel is not called and the bits are NumPy's."""
     (x,) = arrays(1, (40, 30))
-    for view in (x[:, ::2], x.T, x[::3]):
+    for view in (x[:, ::2], x[::3], x.T[::2], x.T[1:], x.T[::-1]):
         total = numpy.sum(lazy.asarray(view) ** 2)
         assert same(numpy.sum(view ** 2), total.gather())
     assert "fuse_sum_squares_f64" not in fuse.STATS.calls
+
+
+@pytest.mark.parametrize("shape", ((40, 30), (129, 2), (2, 200), (5, 6, 7), (2, 90, 70), (3, 4, 5, 6), (300, 257)))
+def test_a_reduction_of_an_array_left_out_of_order_adds_in_the_order_of_memory(shape: tuple[int, ...]):
+    """NumPy adds the elements of `x.T ** 2` as they lie in memory, whichever dimension is the slowest: so does the
+    kernel, for every order of the dimensions."""
+    (x,) = arrays(1, shape)
+    orders = list(itertools.permutations(range(len(shape))))
+    for order in orders:
+        view = x.transpose(order)
+        total, mean = numpy.sum(lazy.asarray(view) ** 2), (lazy.asarray(view) ** 2).mean()
+        assert same(numpy.sum(view ** 2), total.gather()), order
+        assert same((view ** 2).mean(), mean.gather()), order
+    assert calls() == 2 * len(orders) and fuse.STATS.declined == 0
 
 
 def test_rows_slices_and_broadcast_operands_are_walked():
@@ -289,18 +304,256 @@ def test_rows_slices_and_broadcast_operands_are_walked():
 
 
 def test_a_layout_the_kernels_do_not_read_is_left_to_numpy():
-    """A reversed array, a Fortran-ordered one and a transposed one are not walked; the results are NumPy's."""
+    """A reversed array is not walked, nor a transposed one beside one that is not; the results are NumPy's."""
     a, b = arrays(2, (30, 40))
-    fortran = numpy.asfortranarray(a)
+    (c,) = arrays(1, (40, 30))
     cases = [
         (a[::-1] + 0.5 * b, lazy.asarray(a)[::-1] + 0.5 * lazy.asarray(b)),
-        (fortran + 0.5 * fortran, lazy.asarray(fortran) + 0.5 * lazy.asarray(fortran)),
-        (a.T + 0.5 * b.T, lazy.asarray(a).T + 0.5 * lazy.asarray(b).T),
+        (a.T[::-1] + 0.5 * b.T[::-1], lazy.asarray(a).T[::-1] + 0.5 * lazy.asarray(b).T[::-1]),
+        (a[:, ::-1].T + 0.5 * b[:, ::-1].T, lazy.asarray(a)[:, ::-1].T + 0.5 * lazy.asarray(b)[:, ::-1].T),
+        (a.T + 0.5 * c, lazy.asarray(a).T + 0.5 * lazy.asarray(c)),
+        (c + 0.5 * a.T, lazy.asarray(c) + 0.5 * lazy.asarray(a).T),
     ]
     for expected, got in cases:
-        value = got.gather()
-        assert same(expected, value) and value.flags.c_contiguous == expected.flags.c_contiguous
+        assert laid_the_same(expected, got.gather())
     assert calls() == 0 and fuse.STATS.declined == len(cases)
+
+
+def laid_the_same(expected: numpy.ndarray, got: Any) -> bool:
+    """Say whether a result is NumPy's in its bits and in how it lies in memory.
+
+    Args:
+        expected: What eager NumPy returned.
+        got: What `gather()` returned.
+
+    Returns:
+        True when `same` holds and the strides and every flag are equal: a later sum adds in the order an array
+        lies in, so a result laid out otherwise is another result.
+    """
+    return same(expected, got) and expected.strides == got.strides and str(expected.flags) == str(got.flags)
+
+
+def interpolant(t: Any) -> Any:
+    """perlin-numpy's interpolant, seven operations on one array: the expression issue 316 was found on."""
+    return t * t * t * (t * (t * 6 - 15) + 10)
+
+
+def blend(a: Any, b: Any, c: Any) -> Any:
+    """An expression of five operations on three arrays."""
+    return a * (b - c) + 0.5 * b * c
+
+
+# Shapes with no dimension of length one, of two to four dimensions, with rows shorter and longer than a kernel's
+# block and than the shortest row a program is run on.
+OUT_OF_ORDER = ((5, 7), (40, 33), (2, 300), (300, 2), (6, 5, 4), (9, 2, 40), (20, 30, 2), (3, 4, 5, 6))
+
+
+@pytest.mark.parametrize("shape", OUT_OF_ORDER)
+@pytest.mark.parametrize("special", (False, True))
+def test_arrays_left_out_of_order_are_walked_in_the_order_of_memory(shape: tuple[int, ...], special: bool):
+    """`np.mgrid[...].transpose(1, 2, 0) % 1` has its last dimension slowest in memory. An expression on arrays that
+    all lie in one such order is run by its kernels, in every order of the dimensions, and its result has NumPy's
+    bits, strides and flags."""
+    a, b, c = arrays(3, shape, special)
+    orders = list(itertools.permutations(range(len(shape))))
+    for order in orders:
+        ta, tb, tc = (operand.transpose(order) for operand in (a, b, c))
+        la, lb, lc = (lazy.asarray(operand) for operand in (ta, tb, tc))
+        with numpy.errstate(all="ignore"):
+            wanted, got = (interpolant(ta), blend(ta, tb, tc)), (interpolant(la), blend(la, lb, lc))
+        for expected, pending in zip(wanted, got):
+            assert laid_the_same(expected, pending.gather()), order
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == (6 + 4) * len(orders)
+
+
+def test_a_sum_of_a_result_out_of_order_adds_as_numpys_does():
+    """What a later line reads of a fused result is what it would read of NumPy's: a sum along each axis, a sum of
+    everything, a view, a copy in C order."""
+    a, b, c = (operand.transpose(1, 2, 0) for operand in arrays(3, (2, 90, 70)))
+    expected = blend(a, b, c)
+    got = blend(*(lazy.asarray(operand) for operand in (a, b, c)))
+    for read in (lambda x: x.sum(), lambda x: x.sum(axis=0), lambda x: x.sum(axis=2), lambda x: x[:, :, 1] * 2.0,
+                 lambda x: x.ravel(), lambda x: x.reshape(-1, 2), lambda x: x.copy(), lambda x: x.T + 1.0):
+        assert laid_the_same(numpy.asarray(read(expected)), numpy.asarray(read(got)))
+    assert calls() > 0 and fuse.STATS.declined == 0
+
+
+def test_fortran_arrays_and_parts_of_arrays_out_of_order_are_walked():
+    """Fortran-ordered arrays, slices of transposed arrays, and transposed arrays that step: all one order."""
+    a, b, c = arrays(3, (30, 40))
+    cases = [
+        [numpy.asfortranarray(operand) for operand in (a, b, c)],
+        [numpy.asfortranarray(a), numpy.asfortranarray(b)[:, ::-1][:, ::-1], c.T.copy().T],
+        [a.T[1:-1, 2:-2], b.T[1:-1, 2:-2], c.T[2:, 1:-3]],
+        [a[::2].T, b[::2].T, c[1::2].T],
+        [a[:, ::2].T, b[:, ::2].T, c[:, 1::2].T],
+        [a.T, b.T, c.T[:, :]],
+    ]
+    cases.append([operand[..., 1].transpose(2, 0, 1) for operand in arrays(3, (5, 6, 40, 3))])
+    for operands in cases:
+        expected = blend(*operands)
+        got = blend(*(lazy.asarray(operand) for operand in operands)).gather()
+        assert laid_the_same(expected, got)
+    assert fuse.STATS.declined == 0 and fuse.STATS.fused_nodes == 4 * len(cases)
+
+
+def test_arrays_in_two_orders_are_left_to_numpy():
+    """Where the operands lie in different orders NumPy decides the result's order operation by operation, and C
+    order wins a disagreement. The module walks one order, so these are NumPy's calls and NumPy's layout."""
+    a, b, c = arrays(3, (30, 40))
+    d, e = arrays(2, (40, 30))
+    x, y, z = arrays(3, (5, 6, 7))
+    (w,) = arrays(1, (5, 7, 6))
+    cases = [
+        (a.T, d, e), (a.T, b.T, e), (d, b.T, c.T), (d, e, c.T), (numpy.asfortranarray(a), b, c),
+        (x.transpose(1, 2, 0), y.transpose(1, 2, 0), w.transpose(2, 1, 0)),
+        (w.transpose(2, 1, 0), y.transpose(1, 2, 0), z.transpose(1, 2, 0)),
+    ]
+    for operands in cases:
+        expected = blend(*operands)
+        got = blend(*(lazy.asarray(operand) for operand in operands)).gather()
+        assert laid_the_same(expected, got)
+    assert calls() == 0 and fuse.STATS.declined == len(cases)
+
+
+def test_an_operand_the_same_along_a_dimension_ends_a_walk_out_of_order():
+    """A row or a column beside arrays out of order would leave the order of a result to the other operand of its
+    operation: `row + column` is in C order whatever a third array is. Those are NumPy's; one element and a number
+    decide nothing and are taken."""
+    a, b, c = arrays(3, (30, 40))
+    (d,) = arrays(1, (40, 30))
+    row, column, one = c.T[3], c.T[:, :1], c[:1, :1]
+    declined = [(a.T, b.T, row), (a.T, b.T, c.T[:1]), (a.T, b.T, column), (a.T, row, column), (row, column, a.T)]
+    for operands in declined:
+        expected = blend(*operands)
+        assert laid_the_same(expected, blend(*(lazy.asarray(operand) for operand in operands)).gather())
+    assert calls() == 0
+    expected = (d[:1] + d[:, :1]) * a.T - a.T
+    got = ((lazy.asarray(d[:1]) + lazy.asarray(d[:, :1])) * lazy.asarray(a.T) - lazy.asarray(a.T)).gather()
+    assert laid_the_same(expected, got) and expected.flags.c_contiguous
+    taken = [(a.T, b.T, one), (a.T, b.T, numpy.float64(2.5)), (a.T, b.T, numpy.array(-0.0)), (a.T, 3.0, b.T)]
+    fuse.STATS.reset()
+    for operands in taken:
+        expected = blend(*operands)
+        got = blend(*(operand if type(operand) is float else lazy.asarray(operand) for operand in operands)).gather()
+        assert laid_the_same(expected, got)
+    assert calls() > 0 and fuse.STATS.declined == 0
+
+
+@pytest.mark.parametrize("shape", ((1, 5, 6), (5, 1, 6), (5, 6, 1), (1, 1, 9), (4, 1, 1, 5)))
+def test_a_dimension_of_length_one_out_of_order_is_left_to_numpy(shape: tuple[int, ...]):
+    """NumPy gives a dimension of length one no stride when it sorts, and where it puts one in a result depends on
+    which of its loops the operation took. The result's strides are NumPy's because the calls are."""
+    a, b, c = arrays(3, shape)
+    for order in itertools.permutations(range(len(shape))):
+        operands = [operand.transpose(order) for operand in (a, b, c)]
+        expected = blend(*operands)
+        declined = fuse.STATS.declined
+        got = blend(*(lazy.asarray(operand) for operand in operands)).gather()
+        assert laid_the_same(expected, got), order
+        lengths = [length for length in expected.shape if length != 1]
+        strides = [stride for length, stride in zip(expected.shape, operands[0].strides) if length != 1]
+        in_c_order = strides == sorted(strides, reverse=True)
+        assert (fuse.STATS.declined == declined) == in_c_order or len(lengths) < 2, order
+
+
+@pytest.mark.parametrize("shape", ((0, 5), (5, 0), (0, 3, 4), (1, 1), (1, 1, 1), (2, 1), (1, 2)))
+def test_empty_and_one_element_arrays_out_of_order_are_numpys(shape: tuple[int, ...]):
+    """Nothing to walk, or one element: whatever is done with them, the result is laid out as NumPy's."""
+    a, b, c = arrays(3, shape)
+    for order in itertools.permutations(range(len(shape))):
+        operands = [operand.transpose(order) for operand in (a, b, c)]
+        expected = blend(*operands)
+        assert laid_the_same(expected, blend(*(lazy.asarray(operand) for operand in operands)).gather()), order
+
+
+def test_dimensions_of_one_stride_stay_in_the_order_written():
+    """Of two dimensions with one stride NumPy takes the order they are written in. Windows of an array have such
+    strides: beside an array whose strides say the other order, the result is in C order and the calls are NumPy's."""
+    (signal,) = arrays(1, (300,))
+    windows = numpy.lib.stride_tricks.sliding_window_view(signal, 40)
+    b, c = arrays(2, (40, 261))
+    for operands in ((windows, windows, windows), (windows.T, windows.T, windows.T)):
+        expected = blend(*operands)
+        assert laid_the_same(expected, blend(*(lazy.asarray(operand) for operand in operands)).gather())
+    assert calls() > 0 and fuse.STATS.declined == 0
+    fuse.STATS.reset()
+    for operands in ((windows, b.T, c.T), (b.T, windows, c.T), (b.T, c.T, windows)):
+        expected = blend(*operands)
+        assert laid_the_same(expected, blend(*(lazy.asarray(operand) for operand in operands)).gather())
+        assert expected.flags.c_contiguous
+    assert calls() == 0 and fuse.STATS.declined == 3
+
+
+def test_a_warning_on_arrays_out_of_order_is_numpys():
+    """A kernel that raised a reported exception on arrays out of order is dropped like any other."""
+    huge = numpy.full((6, 40), 1e308).T
+    with warnings.catch_warnings(record=True) as expected:
+        warnings.simplefilter("always")
+        wanted = huge + 10.0 * huge
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = (lazy.asarray(huge) + 10.0 * lazy.asarray(huge)).gather()
+    assert laid_the_same(wanted, got)
+    assert [str(warning.message) for warning in caught] == [str(warning.message) for warning in expected]
+    assert fuse.STATS.flagged == 1 and calls() == 0
+    with numpy.errstate(over="ignore"):
+        pending = lazy.asarray(huge) + 10.0 * lazy.asarray(huge)
+    assert laid_the_same(wanted, pending.gather()) and calls() == 1
+
+
+def test_writes_into_an_array_out_of_order_are_made_where_it_lies():
+    """`x += e`, `x[1:-1, 2:-2] = e` and `np.add(a, b, out=x)` on an array left out of order, with operands that lie
+    as it does: each is a program that writes the array's own memory, and the array keeps its layout."""
+    grid, other, third = (operand.T for operand in arrays(3, (30, 40)))
+    u, expected = lazy.array(grid) * 1.0, numpy.array(grid) * 1.0
+    assert not expected.flags.c_contiguous
+    held, more = lazy.asarray(other), lazy.asarray(third)
+    u += held * (more - u)
+    expected += other * (third - expected)
+    u[1:-1, 2:-2] = held[1:-1, 2:-2] * (more[2:, 2:-2] - u[:-2, 2:-2])
+    expected[1:-1, 2:-2] = other[1:-1, 2:-2] * (third[2:, 2:-2] - expected[:-2, 2:-2])
+    u[:, 3:9] -= held[:, 3:9] * u[:, 10:16]
+    expected[:, 3:9] -= other[:, 3:9] * expected[:, 10:16]
+    numpy.add(held, more, out=u)
+    numpy.multiply(u, 0.5, out=u)
+    numpy.add(other, third, out=expected)
+    numpy.multiply(expected, 0.5, out=expected)
+    u[:, :] = u * (held - u)
+    expected[:, :] = expected * (other - expected)
+    assert laid_the_same(expected, u.gather())
+    assert fuse.STATS.declined == 0 and calls() == 6
+
+
+def test_a_write_into_an_array_in_another_order_than_its_operands_is_numpys():
+    """A C-ordered array written from transposed operands, and a transposed one from C-ordered operands."""
+    a, b = arrays(2, (30, 40))
+    c, d = arrays(2, (40, 30))
+    for target, first, second in ((c, a.T, b.T), (a.T, c, d)):
+        u, expected = lazy.array(target) * 1.0, numpy.array(target) * 1.0
+        u += lazy.asarray(first) * (lazy.asarray(second) - 1.5)
+        expected += first * (second - 1.5)
+        u[2:, 1:] = lazy.asarray(first)[2:, 1:] * lazy.asarray(second)[:-2, :-1] + 1.0
+        expected[2:, 1:] = first[2:, 1:] * second[:-2, :-1] + 1.0
+        assert laid_the_same(expected, u.gather())
+
+
+def test_the_driver_walks_the_order_of_the_array_it_fills():
+    """`_fused.program` and `_fused.elementwise` take the order of `out`, and decline an operand that lies otherwise."""
+    module = fuse._fused
+    add = fuse.LIBRARY["add(V0,V1)"].index
+    steps = ((add, -1, 0, 1),)
+    a, b = arrays(2, (20, 30, 2))
+    ta, tb = a.transpose(1, 2, 0), b.transpose(1, 2, 0)
+    for call in (lambda operands, out: module.program(steps, 2, operands, out, fuse.BLOCK_ELEMENTS),
+                 lambda operands, out: module.elementwise(add, operands, out)):
+        out = numpy.empty_like(ta)
+        assert out.strides == ta.strides and call((ta, tb), out) == 0 and same(ta + tb, out)
+        assert call((ta, tb), numpy.empty(ta.shape)) == module.DECLINED
+        assert call((ta, numpy.ascontiguousarray(tb)), numpy.empty_like(ta)) == module.DECLINED
+        assert call((ta, tb[:, :, ::-1]), numpy.empty_like(ta)) == module.DECLINED
+        whole = numpy.array(ta)
+        assert call((whole, tb), whole) == 0 and same(ta + tb, whole)
 
 
 # The shortest row the module gathers: `SHORTEST_RUN` of `_fused.c`.

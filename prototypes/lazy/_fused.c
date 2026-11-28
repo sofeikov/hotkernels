@@ -450,16 +450,55 @@ fused_elementwise(PyObject *module, PyObject *const *args, Py_ssize_t count)
     return PyLong_FromLong(raised);
 }
 
+/* Says in which order an array's dimensions lie in memory, for an array whose elements are one run.
+ *
+ * Args:
+ *   array: A float64 array.
+ *   order: Filled in: its dimensions, the one that steps by one element first.
+ *
+ * Returns how many dimensions it has, or -1 for an array that is not one run of elements side by side, has no
+ * elements, or has a dimension of length one, which `walk_order` leaves out for the same reason.
+ * `np.ones((3, 4)).T` is one run, its first dimension the quickest; so is a `transpose` of any contiguous array.
+ */
+static int
+one_run(PyArrayObject *array, int *order)
+{
+    int dimensions = PyArray_NDIM(array);
+    if (dimensions < 1 || dimensions > MOST_DIMENSIONS) {
+        return -1;
+    }
+    char placed[MOST_DIMENSIONS] = {0};
+    npy_intp expected = ELEMENT; /* The stride of the next dimension outwards: the bytes of everything inside it. */
+    for (int place = 0; place < dimensions; place++) {
+        int found = -1;
+        for (int axis = dimensions - 1; axis >= 0 && found < 0; axis--) {
+            if (!placed[axis] && PyArray_STRIDE(array, axis) == expected) {
+                found = axis;
+            }
+        }
+        if (found < 0 || PyArray_DIM(array, found) < 2) {
+            return -1;
+        }
+        placed[found] = 1;
+        order[place] = found;
+        expected *= PyArray_DIM(array, found);
+    }
+    return dimensions;
+}
+
 /* reduce(kernel, operands) -> (value, flags), or DECLINED.
  *
  * Args:
  *   kernel: The kernel's place in the table.
  *   operands: A tuple, the kernel's arrays and then its numbers, in the order of its arguments.
  *
- * NumPy adds the elements of a C-contiguous array in the order they lie in
- * memory, whatever its shape, and a reduction kernel adds in that order. So
- * every array has to be C-contiguous and of one shape, and every number a
- * Python float; anything else is declined.
+ * NumPy adds the elements of an array that lies in one run in the order they
+ * lie in memory, whatever its shape and whichever of its dimensions is the
+ * slowest, and a reduction kernel adds in that order. So every array has to
+ * lie in one run and be of one shape, and every number a Python float;
+ * anything else is declined. The arrays are all C-contiguous, or all left in
+ * one other order by the calls that made them (`a.T`, see `one_run`): what
+ * NumPy computes of them before it adds then lies in that order too.
  */
 static PyObject *
 fused_reduce(PyObject *module, PyObject *const *args, Py_ssize_t count)
@@ -485,21 +524,38 @@ fused_reduce(PyObject *module, PyObject *const *args, Py_ssize_t count)
     uintptr_t integers[MOST_INTEGERS] = {0};
     double floats[MOST_NUMBERS] = {0};
     PyArrayObject *first = NULL;
+    int in_c_order = 1;
     for (int place = 0; place < vectors; place++) {
         PyObject *object = PyTuple_GET_ITEM(args[1], place);
         if (!PyArray_CheckExact(object)) {
             return PyLong_FromLong(DECLINED);
         }
         PyArrayObject *array = (PyArrayObject *)object;
-        if (PyArray_TYPE(array) != NPY_DOUBLE || !PyArray_ISBEHAVED_RO(array) || !PyArray_IS_C_CONTIGUOUS(array)) {
+        if (PyArray_TYPE(array) != NPY_DOUBLE || !PyArray_ISBEHAVED_RO(array)) {
             return PyLong_FromLong(DECLINED);
         }
+        in_c_order = in_c_order && PyArray_IS_C_CONTIGUOUS(array);
         if (first == NULL) {
             first = array;
         } else if (!PyArray_SAMESHAPE(array, first)) {
             return PyLong_FromLong(DECLINED);
         }
         integers[place] = (uintptr_t)PyArray_BYTES(array);
+    }
+    if (!in_c_order) {
+        /* One of them is not C-contiguous: then each is one run in the same order of its dimensions, or the
+         * elements one call reads side by side are not the elements of one place. */
+        int order[MOST_DIMENSIONS], other[MOST_DIMENSIONS];
+        int dimensions = one_run(first, order);
+        if (dimensions < 0) {
+            return PyLong_FromLong(DECLINED);
+        }
+        for (int place = 1; place < vectors; place++) {
+            PyArrayObject *array = (PyArrayObject *)PyTuple_GET_ITEM(args[1], place);
+            if (one_run(array, other) != dimensions || memcmp(order, other, (size_t)dimensions * sizeof(int)) != 0) {
+                return PyLong_FromLong(DECLINED);
+            }
+        }
     }
     for (int place = 0; place < scalars; place++) {
         PyObject *object = PyTuple_GET_ITEM(args[1], vectors + place);
