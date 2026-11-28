@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, record_graphs, rules
+from prototypes.lazy import LazyArray, NotGathered, array, evaluate, gather, get_lazy, graph, lazy_report, record_graphs, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -976,6 +976,77 @@ def test_indexing_by_integer_arrays_is_deferred():
     assert graph.COUNTS.at_once == {}
     beyond = x[lazy.arange(3) * 5]
     assert beyond._node.pending and str(raised(beyond.gather)) == str(raised(lambda: plain[numpy.arange(3) * 5]))
+
+
+
+def lent() -> int:
+    """Count the calls that have written into an operand's memory, by Python and by the C core."""
+    return evaluate.LENT["python"] + (array._core.lent_count() if array._core is not None else 0)
+
+
+# Elements of the arrays the tests of lending use: float64 of more than `evaluate.LEND_BYTES`.
+LENDING = 100_000
+
+
+def test_a_call_writes_into_the_memory_of_an_operand_nothing_else_reads():
+    """a * (1 - t) + t * b computes into its temporaries' memory, as NumPy does, with NumPy's bits and layout."""
+    assert LENDING * 8 >= evaluate.LEND_BYTES
+    rng = numpy.random.default_rng(SEED)
+    first, second = rng.standard_normal(LENDING), rng.standard_normal(LENDING)
+    first[:6] = [numpy.nan, numpy.inf, -numpy.inf, -0.0, 0.0, 1e308]
+    second[:6] = [1.0, -numpy.inf, numpy.nan, 0.0, -0.0, 1e308]
+    kept = first.copy(), second.copy()
+
+    def program(np, a, b):
+        """A blend, a square root of a square, a product of an operand with itself, and a sum of three."""
+        a, b = np.asarray(a), np.asarray(b)
+        t = a * 0.5
+        blend = a * (1 - t) + t * b
+        square = (blend * 2) * (blend * 2)
+        return np.sqrt(square * 3.0) - np.maximum(blend, b) + (a - b) / 7
+
+    before = lent()
+    with numpy.errstate(all="ignore"):
+        got = program(lazy, first, second).gather()
+        expected = program(numpy, first, second)
+    assert lent() > before
+    assert same(expected, got) and got.strides == expected.strides and got.flags.c_contiguous
+    assert same(kept[0], first) and same(kept[1], second)
+
+
+def test_memory_is_not_lent_where_something_still_reads_it():
+    """A name the user holds, a view that is alive, another layout, another element type: each call makes a new array."""
+    rng = numpy.random.default_rng(SEED)
+    data = rng.standard_normal(LENDING)
+    x = lazy.asarray(data)
+    named = x * 2
+    before = lent()
+    later = named + 1
+    assert same(data * 2 + 1, later.gather()) and same(data * 2, named.gather()) and lent() == before
+    viewed = x * 3
+    every_other = viewed[::2]
+    shown = every_other.gather().copy()
+    following = viewed + 1
+    del viewed
+    before = lent()
+    assert same(data * 3 + 1, following.gather()) and lent() == before
+    assert same(shown, every_other.gather())
+    table = data.reshape(400, 250)
+    turned = (lazy.asarray(table).T * 2) + 1
+    expected = (table.T * 2) + 1
+    before = lent()
+    got = turned.gather()
+    assert same(expected, got) and got.strides == expected.strides and lent() == before
+    counts = numpy.arange(LENDING)
+    before = lent()
+    assert same((counts * 3) + 0.5, ((lazy.asarray(counts) * 3) + 0.5).gather()) and lent() == before
+    column, row = data[:400].reshape(400, 1), data[:250].reshape(1, 250)
+    before = lent()
+    assert same((column * 2) + row, ((lazy.asarray(column) * 2) + lazy.asarray(row)).gather()) and lent() == before
+    small = data[:1000]
+    before = lent()
+    assert same((small * 2) + 1, ((lazy.asarray(small) * 2) + 1).gather()) and lent() == before
+    assert same(data, x.gather())
 
 
 def test_large_arrays_of_positions_are_not_walked_for_a_shape(monkeypatch):

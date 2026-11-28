@@ -2,10 +2,12 @@
 
 Left alone, this makes exactly the calls the eager program would have made,
 on the same operands, in the order they were written, so the results are
-NumPy's by construction. One thing is done differently from the letter of
-the graph, and gives the same values: a write, which is defined as a copy
+NumPy's by construction. Two things are done differently from the letter
+of the graph, and give the same values: a write, which is defined as a copy
 of the array with the write made into it, is made into the array's own
-memory when nothing will read what the array held before (`reusable`).
+memory when nothing will read what the array held before (`reusable`); and
+a call element by element writes its result into the memory of an operand
+that nothing else reads, as NumPy reuses a temporary's (`_lendable`).
 
 Two things can be put in from outside, and both are empty unless something
 sets them. `planner` is asked, before a computation starts, which of its
