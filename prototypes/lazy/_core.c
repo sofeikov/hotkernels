@@ -158,6 +158,10 @@ static long long lent = 0;
  * values: nothing above it could be computed together with it, so its node would only cost. NULL for none given,
  * where only small calls and views are made at once. */
 static PyObject *fusible_calls = NULL, *fusible_dtype = NULL;
+/* Those of `fusible_calls` whose result is a mask and not of `fusible_dtype`: the comparisons a kernel selects by
+ * (`np.where(x <= 0.5, a, b)`). Such a call waits like the others when the arrays it reads are of the type; NULL
+ * for none. */
+static PyObject *fusible_masks = NULL;
 static PyObject *compute_small = NULL; /* `array._compute_for_small`: computes the node of a lazy array. */
 static PyObject *at_once_kind;       /* `graph.AT_ONCE` */
 static PyObject *handled_apart;      /* `array.HANDLED_APART`: the functions `__array_function__` has a way of its own for */
@@ -852,6 +856,14 @@ ready_now(PyObject *operation, PyObject *args, PyObject *kwargs, PyObject *shape
                 return 0;
             }
             int same_type = dtype == fusible_dtype;
+            if (!same_type && fusible_masks != NULL) {
+                /* A comparison a kernel selects by gives a mask: what it reads decides. */
+                same_type = PySet_Contains(fusible_masks, operation);
+                if (same_type < 0) {
+                    PyErr_Clear(); /* A callable that cannot be looked up is none of them. */
+                    same_type = 0;
+                }
+            }
             for (Py_ssize_t place = 0; same_type && place < PyTuple_GET_SIZE(args); place++) {
                 /* `abs(z)` of a complex array gives float64 and is no kernel's: every array read has to be of the type,
                  * or one whole number, which a kernel takes as it takes a number written in the program. */
@@ -6769,17 +6781,18 @@ module_views_alone(PyObject *module, PyObject *on)
     Py_RETURN_NONE;
 }
 
-/* `fusible(calls, dtype)`: the callables a kernel can make and the element type it makes them on, or None twice
- * for none; see `fusible_calls`. */
+/* `fusible(calls, dtype, masks)`: the callables a kernel can make, the element type it makes them on, and those of
+ * the callables whose result is a mask; or None three times for none. See `fusible_calls` and `fusible_masks`. */
 static PyObject *
 module_fusible(PyObject *module, PyObject *const *args, Py_ssize_t count)
 {
-    if (count != 2 || (args[0] != Py_None && !PyFrozenSet_CheckExact(args[0]))) {
-        PyErr_SetString(PyExc_TypeError, "fusible(calls, dtype) takes a frozenset and an element type, or None twice");
+    if (count != 3 || (args[0] != Py_None && (!PyFrozenSet_CheckExact(args[0]) || !PyFrozenSet_CheckExact(args[2])))) {
+        PyErr_SetString(PyExc_TypeError, "fusible(calls, dtype, masks) takes a frozenset, an element type and a frozenset, or None three times");
         return NULL;
     }
     Py_XSETREF(fusible_calls, args[0] == Py_None ? NULL : Py_NewRef(args[0]));
     Py_XSETREF(fusible_dtype, args[0] == Py_None ? NULL : Py_NewRef(args[1]));
+    Py_XSETREF(fusible_masks, args[0] == Py_None ? NULL : Py_NewRef(args[2]));
     Py_RETURN_NONE;
 }
 

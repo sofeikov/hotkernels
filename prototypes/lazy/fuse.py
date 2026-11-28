@@ -41,7 +41,7 @@ import platform
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 
@@ -2561,6 +2561,35 @@ def _store_directly(expression: Expression) -> bool:
 _installed_here = False
 
 
+def comparisons_selected_by(library: Iterable[str]) -> frozenset:
+    """Find the comparisons a library's kernels select by, with the arrays compared read and not computed.
+
+    `where(le(V0,S0),V1,V2)` selects by `x <= s` on an array as it lies in
+    memory. Such a comparison written by itself, `rgb <= 0.5` on an array
+    that has its value, has to wait for the `np.where` written on top of
+    it, or the kernel never sees it: a comparison is otherwise made at once
+    (`array.at_once_below`). A kernel whose comparison reads something
+    computed, `where(gt(mul(V0,sub(V1,V2)),S0),S1,V3)`, needs no such rule:
+    its comparison reads a node that waits, and so waits itself.
+
+    Args:
+        library: The names of the library's shapes.
+
+    Returns:
+        The comparisons, as the callables a node holds for them.
+    """
+    by_name = {name: call for call, name in COMPARISONS.items()}
+    found = set()
+    for name in library:
+        todo = [parse(name)]
+        while todo:
+            pattern = todo.pop()
+            todo.extend(pattern.parts)
+            if pattern.op == WHERE and pattern.parts[0].op in MASKS and not any(part.op for part in pattern.parts[0].parts):
+                found.add(by_name[pattern.parts[0].op])
+    return frozenset(found)
+
+
 def _install_package() -> None:
     """Have `hotkernels.install()` in effect, unless it is already or the package is not there.
 
@@ -2608,10 +2637,10 @@ def enable(install: bool = True) -> bool:
         _BY_TOP.update(index(LIBRARY))
     evaluate.planner = plan
     array.assign_rows = assign_rows
-    # What may wait for a kernel: the arithmetic a kernel makes, on float64. Everything else on arrays that have
-    # their values is made at once, whatever its size.
+    # What may wait for a kernel: the arithmetic a kernel makes, on float64, and the comparisons a kernel selects
+    # by. Everything else on arrays that have their values is made at once, whatever its size.
     array.at_once_below(AT_ONCE_BELOW, frozenset(ARITHMETIC) | frozenset(UNARY) | frozenset(SCALED) | {operator.pow, np.power},
-                       FLOAT64)
+                        FLOAT64, comparisons_selected_by(LIBRARY))
     if install and not _installed_here:
         _install_package()
     return True
