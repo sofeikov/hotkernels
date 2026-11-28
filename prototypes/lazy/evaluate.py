@@ -2,10 +2,12 @@
 
 Left alone, this makes exactly the calls the eager program would have made,
 on the same operands, in the order they were written, so the results are
-NumPy's by construction. One thing is done differently from the letter of
-the graph, and gives the same values: a write, which is defined as a copy
+NumPy's by construction. Two things are done differently from the letter
+of the graph, and give the same values: a write, which is defined as a copy
 of the array with the write made into it, is made into the array's own
-memory when nothing will read what the array held before (`reusable`).
+memory when nothing will read what the array held before (`reusable`); and
+a call element by element writes its result into the memory of an operand
+that nothing else reads, as NumPy reuses a temporary's (`_lendable`).
 
 Two things can be put in from outside, and both are empty unless something
 sets them. `planner` is asked, before a computation starts, which of its
@@ -589,6 +591,112 @@ _VIEW_ALONE: tuple[int, int] = (0, 0)
 _ALONE, _VIEW_ALONE = _calibrated()
 # Counts of writes made in place and of writes that copied, for the tools that measure a program.
 WRITES = {"in_place": 0, "copied": 0}
+# The fewest bytes an operand must have for `_lendable` to lend its memory: NumPy's own threshold for reusing a
+# temporary (`NPY_MIN_ELIDE_BYTES`, 256 KiB). Below it a new array is memory the allocator has just had back. The
+# C core's `LEND_BYTES` is the same.
+LEND_BYTES = 256 * 1024
+# Calls computed by Python that wrote into an operand's memory (`_lendable`); the core counts its own (`lent_count`).
+LENT = {"python": 0}
+
+
+def _lend_counts(node: Node, place: int) -> tuple[int, int]:
+    """Count the references to one operand of a node, and to its value.
+
+    Args:
+        node: A pending node.
+        place: Where the operand is among the node's operands. It is a computed node.
+
+    Returns:
+        (`sys.getrefcount` of the operand, less one for each place the node has it at; the same of its value),
+        this function's own references among them.
+    """
+    operand = node.args[place]
+    return sys.getrefcount(operand) - _places(node.args, operand), sys.getrefcount(operand.value)
+
+
+def _places(args: tuple, operand: Node) -> int:
+    """Count the places of one operand among a node's operands.
+
+    Args:
+        args: The node's operands.
+        operand: One of them.
+
+    Returns:
+        How many of them are that object.
+    """
+    return sum(1 for arg in args if arg is operand)
+
+
+def _calibrated_lending() -> tuple[int, int]:
+    """Measure what `_lend_counts` reports for an operand that nothing but the node reads.
+
+    Returns:
+        `_lend_counts` of the only operand of a node that nothing else refers to.
+    """
+    kind = np.dtype(np.float64)
+    node = Node(1, "negative", np.negative, (Node(0, "array", None, (), {}, (2,), kind, value=np.zeros(2)),), {}, (2,), kind)
+    return _lend_counts(node, 0)
+
+
+# What `_lend_counts` reports for an operand that the node alone reads.
+_LENT_ALONE = _calibrated_lending()
+
+
+def _lendable(node: Node) -> Node | None:
+    """Return the operand whose memory a node's call may write its result into, as NumPy reuses a temporary's.
+
+    NumPy computes `a * b + c` by writing the sum into the memory of
+    `a * b`, a temporary nothing else holds, and frees each temporary as
+    soon as it is read, so the next array of that size is pages already in
+    use. A graph's intermediates are each held by a node until their last
+    reader has run, and were each a new array: computed node by node,
+    pvlib's solar position took 1.05x the eager program's time, and takes
+    0.95x with this (docs/lazy-codebases-findings.md). The result is the same when it is written into an operand's memory
+    with `out=`: an operation element by element reads each element before
+    it writes it. That is done when all of this holds:
+
+    - the call is a ufunc of one output, with an operand for each input and
+      no keyword, element by element;
+    - every array operand lies in C order or has no dimensions, so that
+      NumPy's result out of place is in C order, as the operand lent is;
+    - the operand lent is a computed node, its value an `ndarray` that owns
+      its memory and can be written, of the result's shape and element
+      type, of `LEND_BYTES` or more, and not exposed;
+    - nothing else reads it: a pending node holds its operands and a lazy
+      array its node, so a reference to it beyond this node's is a reader
+      or a name the user holds; and nothing but the node refers to its
+      value, so no view of it is alive.
+
+    CPython counts references exactly. Where a count is higher than it has
+    to be the call makes a new array, which is always right.
+
+    Args:
+        node: A pending node whose operands are computed.
+
+    Returns:
+        The operand to lend its memory, or None.
+    """
+    operation, args = node.operation, node.args
+    if (type(operation) is not np.ufunc or node.kwargs or operation.nout != 1 or operation.nin != len(args)
+            or node.kind != rules.ELEMENTWISE):
+        return None
+    for arg in args:
+        value = arg.value if type(arg) is Node else arg
+        if type(value) is np.ndarray and value.ndim and not value.flags.c_contiguous:
+            return None
+    value = None
+    for place in range(len(args)):
+        arg = args[place]
+        if type(arg) is not Node or arg.operation is not None or arg.failure is not None or arg.exposed:
+            continue
+        memory = arg.value
+        if (type(memory) is not np.ndarray or memory.base is not None or not memory.flags.writeable
+                or memory.dtype != node.dtype or memory.shape != node.shape or memory.nbytes < LEND_BYTES):
+            continue
+        memory = arg = None
+        if _lend_counts(node, place) == _LENT_ALONE:
+            return args[place]
+    return None
 
 
 def reusable(write: Node, held: int = 0, apart: int = 0) -> bool:
@@ -663,7 +771,7 @@ def _compute_one(node: Node, quiet: _Quiet) -> None:
             if quiet.caught:
                 quiet.note(origin)
             return
-    operation, moved = node.operation, None
+    operation, moved, out = node.operation, None, {}
     if node.kind == rules.WRITE:
         in_place = getattr(operation, "in_place", None)
         if in_place is not None and reusable(node):
@@ -671,6 +779,11 @@ def _compute_one(node: Node, quiet: _Quiet) -> None:
             WRITES["in_place"] += 1
         else:
             WRITES["copied"] += 1
+    else:
+        moved = _lendable(node)
+        if moved is not None:
+            out = {"out": moved.value}
+            LENT["python"] += 1
     values = []
     for arg in node.args:
         if type(arg) is Node:
@@ -682,7 +795,7 @@ def _compute_one(node: Node, quiet: _Quiet) -> None:
     if node.errstate is not quiet.active:
         quiet.under(node.errstate)
     try:
-        value = operation(*values, **node.kwargs)
+        value = operation(*values, **node.kwargs, **out)
     except Exception as error:
         error.add_note(f"in the lazy operation '{node.name}' written at {node.origin.filename}:{node.origin.lineno}")
         _fail(node, error)

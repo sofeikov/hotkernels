@@ -11,7 +11,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 - **`install()` alone gains on one of the ten,** the convolutional network, 1.08x, from its kernels for `x[mask] = 0` and for `argmax` and sums along rows. On the other nine it is within 2% of NumPy either way: their time is not in calls the package has kernels for.
 - **A third of all the time in the ten programs is a mathematics library's functions:** `cos`, `sin`, `x ** 3`, `x ** 2.4`, `%`, `cbrt`, `hypot`, `arctan2`, `exp`. 2.6 s of 7.9 s. No kernel of either kind may touch them, because the result has to be the library's bits. This is the largest thing the ten programs have that the corpus did not show at this weight. What a kind that is not bit-identical would be worth was measured ([issue 315](#issue-315-what-an-inexact-kind-would-be-worth)): glibc's vector functions in place of NumPy's loops make pvlib 2.17x with no graph, and the decision is left open.
 - **The float64 arithmetic that fusion is for is 30% of the time, and a fifth of that was found and then given up for how the arrays lie.** An array left transposed by the call that made it, 300 ms; rows of four colour values with one value for each pixel, 100 ms; and arrays that step, a channel of an image (`lab[..., 0]`), a column of a table (`AB[:, j]`), every eighth element (`Y[::8]`), 30 ms in three programs. Each is how these codebases hold their data, and none is a missing pattern.
-- **A lazy run computed node by node is slower than the eager program on six of the ten,** by up to 1.4x, before fusion is counted. NumPy computes `a * (1 - t) + t * b` reusing the memory of its temporaries; computed with every intermediate held, as a graph's are, the same line takes 1.4 to 1.7 times as long. Fusion wins that back and no more, which is why several programs are level.
+- **A lazy run computed node by node was slower than the eager program on six of the ten,** by up to 1.4x, before fusion is counted. Two things were behind it, and neither was quite what was supposed. SALib and the speech features lost most of it to the shape rule of `A[r]`, which had NumPy walk every position of a large table a second time; the rest lost it to each node's call writing a new array where NumPy writes into a temporary's memory. Both are fixed: node by node SALib is 0.89x of the eager program where it was 0.65x, the speech features 0.92x where 0.76x, pvlib 1.05x where 0.95x, prysm 1.11x where 0.93x ([Memory a graph holds](#memory-a-graph-holds-issue-321)). What is left is the noise program, 0.95x: its pending octaves hold 2.2 GB at once where the eager program holds 0.5 GB.
 - **Calls through the stand-in had slow roads the corpus did not meet:** a ufunc called with `out=`, `np.clip`, a function called on plain `ndarray`s, and `plain += lazy` cost 1.1 to 8.1 µs over NumPy's own call, where the same calls on the layer's arrays cost 0.05 to 0.2 µs. scikit-learn's perceptron makes 1,800 of them among its 7,000 calls at once and was 0.88x for it. The core makes them since, at 0.1 to 0.3 µs and 0.9 µs for `np.clip`, and the perceptron is 0.95x, and 0.98x at its small size where it was 0.66x ([`out=`, `np.clip` and plain operands](#out-npclip-and-plain-operands-issue-320)).
 - **The timing tool's order was worth several percent, and the tools time in turn now.** Timed one way after another, the way timed first, NumPy's, was the slowest whatever it was: pvlib ran 10% "faster installed" with no kernel serving a single call. `fusion_time` and `limit` time the ways in turn, by default since [issue 323](#issue-323-the-ways-timed-in-turn-by-default), which also found that much of it was not the order: the tool kept a result of the program alive while it timed, and the runs after it reused memory. Every table of the four ways below is taken in turn, with that result kept.
 
@@ -202,7 +202,7 @@ The CIEDE2000 formula is long, and its two largest expressions, of 24 and 16 ope
 
 - **Its time is not arithmetic.** 55% of the nodes' time is `A[r]`, a hundred resamples of 32,768 values taken by a table of positions, and 31% is `np.var` and `np.mean` along the first axis of the results. Neither kind of kernel has those.
 - **15 of its 31 programs are given up, all for arrays that step, and they weigh nothing.** `separate_output_values` takes `A = Y[0:Y.size:step]`, every eighth value, and `AB[:, j]`, a column of a table of three. The first-order estimator `np.mean(B * (AB - A), axis=0)` then reads three arrays at steps of 64, 24 and 64 bytes, and a single kernel call that would need three copies first is declined, as [the design decided for the Veros routines](lazy-fusion-design.md#what-was-built-on-it-and-did-not-gain). Those are the base sample's 32,768 values, under a millisecond in all. The same arithmetic on the hundred resamples, 3.3 million elements that indexing made contiguous, is fused: 127 ms of NumPy's passes made 54 ms.
-- **Node by node it is 1.4x slower than the program,** 1,413 ms for 997 ms, the most of the ten: [Memory a graph holds](#memory-a-graph-holds).
+- **Node by node it was 1.4x slower than the program,** 1,413 ms for 997 ms, the most of the ten, and it was not memory: the shape rule of `A[r]` had NumPy walk the 3.3 million positions of the resampling table a second time, 9 ms for each of 39 calls. It is 0.89x since ([Memory a graph holds](#memory-a-graph-holds-issue-321)).
 
 ### `perlin_noise`, 1.00x
 
@@ -219,13 +219,13 @@ The CIEDE2000 formula is long, and its two largest expressions, of 24 and 16 ope
 
 ### `speech_mfcc`, 1.00x
 
-The Fourier transform, the table of positions the sound is cut into frames by (int64, 4.8 million elements, built with `np.tile`) and the frames taken through it are most of it, and none is deferred or fusable. One expression of weight, `1.0 / NFFT * np.square(magspec)`, is fused. Node by node the lazy run is 0.75x of NumPy; fused it is level.
+The Fourier transform, the table of positions the sound is cut into frames by (int64, 4.8 million elements, built with `np.tile`) and the frames taken through it are most of it, and none is deferred or fusable. One expression of weight, `1.0 / NFFT * np.square(magspec)`, is fused. Node by node the lazy run was 0.75x of NumPy, 15 ms of the 20 ms it was behind by the shape of `padsignal[indices]` worked out by walking the 4.8 million positions; it is 0.92x since ([Memory a graph holds](#memory-a-graph-holds-issue-321)). Fused it is level.
 
 ### `pvlib_solar`, 0.97x
 
 - **It is the program with the most to fuse, and gains nothing.** 2,520 operations in one graph; 290 expressions, all planned, 684 kernel calls, 638 nodes computed inside a program, and no program given up. The kernels take 291 ms for what NumPy's passes took 814 ms.
 - **63% of it is the library.** The algorithm is sums of `a * np.cos(b + c * x)` over the rows of a table, 64 terms for one quantity: `np.cos` alone is 1,229 ms, `np.sin` 339 ms, `x ** 3` and `x ** 4` 158 ms. With glibc's vector functions in NumPy's place the eager program is 2.17x and the fused one 2.27x, at another last bit for most results ([issue 315](#issue-315-what-an-inexact-kind-would-be-worth)). Its 89 `np.radians` and `np.degrees` are operations of an expression now.
-- **The eager program is already near what fusion makes of the rest.** `s += arr[row, 0] * np.cos(arr[row, 1] + arr[row, 2] * x)` makes few arrays as NumPy computes it, because NumPy reuses a temporary's memory and `+=` adds in place. The lazy run writes 18.5 GB of new arrays for it and the fused run 13.7 GB; node by node the program is 5% slower than eagerly, and fusion takes back 2%.
+- **The eager program is already near what fusion makes of the rest.** `s += arr[row, 0] * np.cos(arr[row, 1] + arr[row, 2] * x)` makes few arrays as NumPy computes it, because NumPy reuses a temporary's memory and `+=` adds in place. The lazy run writes 18.5 GB of new arrays for it and the fused run 13.7 GB; node by node the program was 5% slower than eagerly, and fusion took back 2%. Since a call writes into the memory of an operand nothing else reads, as NumPy's do, the run node by node is 1.05x of the eager program and the fused run 1.03x ([Memory a graph holds](#memory-a-graph-holds-issue-321)).
 - **A whole number from a table ended an expression.** The nutation terms are `NUTATION_YTERM_ARRAY[row, 0]*x0 + ... + NUTATION_YTERM_ARRAY[row, 4]*x4`, and that table is int64. A NumPy scalar of another type than float64 was not an operand a kernel took, so each of the 315 products was NumPy's pass, 176 ms that the limit tool counted under other element types, and only the sum of five was a program, where the whole line is nine operations. `np.int64(k) * x` and `float(k) * x` have the same bits. It is a number now, and the line one program of nine operations: [issue 318](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression).
 
 ### `sklearn_mlp`, 0.88x
@@ -257,6 +257,8 @@ The question this was run to answer: where a program does not gain, is it an ope
 Where the layer costs a program time or stops it, as these ten found it.
 
 ### Memory a graph holds
+
+What follows is what the study found. [Memory a graph holds, issue 321](#memory-a-graph-holds-issue-321) has what it was when measured, and what was built.
 
 Six of the ten are slower node by node than eagerly: SALib 0.71x, the speech features 0.75x, the perceptron 0.82x, the noise 0.86x, Astropy's models 0.90x, the solar position 0.95x. The calls are the same calls.
 
@@ -578,6 +580,61 @@ Six programs of the corpus, at the large size with the kernels installed, the fu
 - **A library that calls its own `numpy.clip` on a lazy array** reaches the layer through NumPy's protocol, and is made by Python. The road built here is where the stand-in is called.
 - **Nothing was measured on ARM64.** There is no such machine here. The roads are the same C on both.
 
+### Memory a graph holds, issue 321
+
+**What was measured first.** The six programs that were slower node by node than eagerly, with the kernels installed, the ways in turn on one performance core: the quickest of 5 runs, the minor page faults of that run (`resource.getrusage`), and the most bytes NumPy had allocated at once (`tracemalloc`). Then the same with glibc told to keep the memory it is given back (`MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_` and `MALLOC_TOP_PAD_` set high), which takes new pages out of the time. Load 1.6 to 2.6.
+
+| Program | Eager ms | Lazy ms | Faults, eager | Faults, lazy | Most allocated, eager | lazy | Lazy behind by, glibc keeping memory |
+|---|---|---|---|---|---|---|---|
+| `perlin_noise` | 2,000.7 | 2,314.0 | 70,277 | 113,237 | 541 MB | 2,185 MB | 87 ms of 313 |
+| `pvlib_solar` | 2,748.7 | 2,881.4 | 24,368 | 18,541 | 353 MB | 169 MB | 142 ms of 133 |
+| `salib_sobol` | 1,037.0 | 1,449.9 | 39,378 | 47,172 | 318 MB | 318 MB | 391 ms of 413 |
+| `astropy_models` | 194.9 | 219.1 | 3,577 | 3,062 | 67 MB | 59 MB | 32 ms of 24 |
+| `speech_mfcc` | 67.8 | 89.3 | 4,932 | 4,932 | 165 MB | 146 MB | 20 ms of 21 |
+
+- **A node's value was already released at its last reader.** The list of a computation lets go of each node as it is taken, a computed node lets go of its operands, and nothing else holds an intermediate the program has no name for: on four of the five the lazy run holds as much memory at its peak as the eager one, or less.
+- **New pages are two thirds of the noise program's loss, and none of the others'.** Its five octaves are one graph until the last line, and each pending octave holds what it reads, the four arrays `np.dstack` made and the repeated gradients, 400 MB an octave; eagerly each is read and freed at once. With glibc keeping memory the lazy run is 87 ms behind, where it was 313.
+- **SALib and the speech features lost their time to a call made twice.** `cProfile` of the lazy run: 355 ms of SALib's 413 in `rules._indexed_shape`, the shape rule of `A[r]`, and 15 ms of the speech features' 21. The rule asked NumPy for the shape by indexing an array of an element type of no size, and NumPy walks every position to do it: 8.7 ms for SALib's table of 3.3 million positions, where `A[r]` itself takes 2.5 ms.
+- **The rest is the memory of temporaries, and not new pages.** pvlib, Astropy's models and the noise program were as far behind with glibc keeping memory. A Python prototype that called each element-by-element node with `out=` the memory of an operand nothing else read took the node-by-node run of pvlib from 3,365 ms to 2,932 ms, Astropy's from 272 ms to 200 ms and the noise program's from 2,662 ms to 2,489 ms, with NumPy's bits: NumPy writes `a * b + c` into the memory of `a * b`, and its next array of that size is pages that are in the cache.
+
+**What was built.**
+
+- **The shape of `A[r]` without the walk** ([the design](lazy-design.md#shape-and-element-type-without-computing)). An index of arrays of integers holding 4,096 positions or more, with no mask and no list in it, is asked twice, on stand-ins of one and of two positions along each dimension of the arrays' broadcast shape; the dimensions where the two answers differ are where that shape goes. Whether an array that has its values is in bounds is asked of its least and largest element, of its own type. Every other index, and every index NumPy refuses there, is asked the whole way as before, so an error is NumPy's own walk's, with the eager line's message.
+- **A call writes into the memory of an operand nothing else reads** ([the design](lazy-design.md#computing)). A ufunc of one output, element by element, with no keyword and every array operand in C order, is called with `out=` the value of an operand that is a computed node no lazy array stands for and no other node reads, an `ndarray` of the result's shape and type that owns its memory, has no view alive and holds 256 KiB or more, NumPy's own threshold. References are counted, as for a write made in place. Python's `evaluate._lendable` is the definition and the C core's road for a plain node does the same; core version 38. In one run the noise program lends 55 times, pvlib 1,439, the cavity flow 1,760, the perceptron 900; fused, pvlib 791 among the nodes left to NumPy, and the corpus's stencils none or a few.
+- **Not built: a pool of blocks for intermediates.** Within a run the lazy layer frees an intermediate where the eager program would; what the noise program faults on is memory held at once, not memory given back and asked for again. Across runs a pool would hide what glibc's trimming costs the eager program as well, which is the timing tool's matter ([issue 326](https://github.com/sofeikov/hotkernels/issues/326)) and not the layer's.
+
+**What it measured.** `fusion_time --plain --runs 7` at the large size, with the kernels installed, the ten programs and six of the corpus, the base of this change and this change one after the other, twice, each from its own working tree. Each figure is the lazy or the fused run against the eager program with the kernels installed in the same table, before → after, the first take and the second; then the second take's lazy and fused runs in milliseconds. Load 3.5 to 4.5 for the first take, 2.1 to 3.9 for the second. In the first take NumPy's own time fell by a third between the two tables of `regression` and `veros_eos`, so read each ratio against its own table.
+
+| Program | Lazy vs installed | Fused vs installed | Lazy ms, take 2 | Fused ms, take 2 |
+|---|---|---|---|---|
+| `perlin_noise` | 0.92x → 0.96x, 0.93x → 0.95x | 1.00x → 0.99x, 1.00x → 0.99x | 2,091.2 → 2,068.8 | 1,949.6 → 1,987.7 |
+| `pvlib_solar` | 0.93x → 1.03x, 0.95x → 1.05x | 1.02x → 1.02x, 0.99x → 1.03x | 2,833.3 → 2,600.5 | 2,722.4 → 2,650.6 |
+| `salib_sobol` | 0.73x → 0.88x, 0.65x → 0.89x | 1.09x → 1.01x, 1.03x → 1.03x | 1,119.4 → 789.1 | 703.9 → 688.1 |
+| `astropy_models` | 1.03x → 1.10x, 1.10x → 1.10x | 1.14x → 1.15x, 1.16x → 1.14x | 173.5 → 179.6 | 163.4 → 172.0 |
+| `speech_mfcc` | 0.76x → 0.93x, 0.76x → 0.92x | 1.01x → 1.02x, 1.03x → 1.05x | 82.4 → 64.8 | 60.7 → 57.2 |
+| `sklearn_mlp` | 0.78x → 0.81x, 0.81x → 0.82x | 0.91x → 0.93x, 0.93x → 0.92x | 273.6 → 270.4 | 238.1 → 239.1 |
+| `dlfs_convnet` | 1.01x → 1.02x, 1.00x → 1.04x | 1.06x → 1.00x, 0.99x → 1.01x | 692.2 → 680.4 | 702.7 → 697.0 |
+| `mpl_hillshade` | 0.99x → 1.07x, 0.98x → 1.07x | 0.99x → 1.04x, 0.99x → 1.02x | 266.0 → 252.0 | 265.8 → 263.4 |
+| `skimage_delta_e` | 1.00x → 1.04x, 1.02x → 1.05x | 1.09x → 1.08x, 1.08x → 1.07x | 373.1 → 364.7 | 350.8 → 355.8 |
+| `prysm_zernike` | 0.93x → 1.12x, 0.93x → 1.11x | 1.14x → 1.15x, 1.08x → 1.15x | 365.3 → 308.5 | 313.1 → 298.5 |
+| `cavity_flow` | 0.81x → 0.94x, 0.80x → 0.93x | 3.12x → 3.08x, 3.10x → 3.09x | 238.5 → 209.3 | 61.3 → 63.2 |
+| `hdiff` | 0.80x → 0.88x, 0.80x → 0.88x | 1.99x → 1.98x, 1.99x → 2.00x | 228.9 → 208.8 | 91.4 → 91.9 |
+| `veros_eos` | 0.93x → 1.00x, 0.82x → 1.03x | 1.99x → 1.88x, 1.87x → 1.87x | 232.5 → 185.0 | 101.8 → 102.1 |
+| `veros_isoneutral` | 0.94x → 1.04x, 0.94x → 1.03x | 1.31x → 1.35x, 1.31x → 1.29x | 418.1 → 383.5 | 301.4 → 304.4 |
+| `black_scholes` | 1.01x → 1.15x, 1.02x → 1.13x | 1.17x → 1.24x, 1.16x → 1.22x | 88.4 → 80.9 | 77.3 → 75.0 |
+| `regression` | 0.96x → 1.01x, 0.98x → 1.01x | 1.15x → 1.01x, 1.01x → 1.03x | 58.3 → 53.8 | 56.4 → 52.7 |
+
+- **Node by node, ten of the sixteen gained more than 3% in both takes, and none lost.** SALib from 0.65x of the eager program to 0.89x, the speech features from 0.76x to 0.92x, both from the shape of `A[r]`; pvlib from 0.95x to 1.05x, prysm from 0.93x to 1.11x, the hill shading from 0.98x to 1.07x, the corpus's cavity flow from 0.80x to 0.93x and `veros_eos` from 0.82x to 1.03x, from lending memory. The noise program gained 4% and 2%, the perceptron, the network and Astropy's models 1% to 4% in one take and nothing in the other.
+- **Fused, three gained and none lost.** `black_scholes` 1.16x to 1.22x and pvlib 0.99x to 1.03x in the second take, with the same direction in the first, and prysm 1.08x to 1.15x in the second take, where the first had it level. The rest are within 3% in at least one take and the other has them level or in the other direction: `veros_eos` and `regression` read 1.99x → 1.88x and 1.15x → 1.01x in the first take only because the eager runs of the two tables took a third less time in the second; their fused runs took 154 ms → 108 ms and 72 ms → 61 ms.
+- **The issue's "Done when".** Node by node the noise program is 0.95x of the eager program and SALib 0.89x. What SALib is still behind by, 84 ms in the second take, is not new pages (it has as many faults and as much memory at its peak as the eager program) and was not looked into further. The noise program's is the 2.2 GB its pending octaves hold, and the faults of it: 84,197 a run where the eager program has 70,277, from 113,237 before.
+- **Nothing was measured on ARM64.** There is no such machine here.
+
+**What was not done.**
+
+- **The memory pending work holds.** Lowering it means computing a graph before the program asks, when the operands its pending nodes hold pass a size: the noise program's octave by octave. That would cut the noise program's fused programs, the largest of which spans the whole sum of octaves, and is a decision about fusion, not about memory.
+- **Writes through an index, `x[r] = v`,** still have the shape and the bounds checked by NumPy's walk on stand-ins without memory. None of the sixteen programs makes such a write with a large table.
+- **A ufunc whose operands lie in another order than C's,** or that is called with a keyword, makes a new array as before: NumPy's result could lie otherwise than the operand lent.
+
 ## What is open
 
 Each of these is a measurement above and a decision not taken here, with the issue it is parked in.
@@ -588,7 +645,7 @@ Each of these is a measurement above and a decision not taken here, with the iss
 - **Whole-number NumPy scalars as numbers,** [issue 318](https://github.com/sofeikov/hotkernels/issues/318). Built ([above](#issue-318-a-whole-number-of-numpys-is-a-number-of-an-expression)). Left as they were: an `np.float32` scalar and a Python integer beyond 2**53 beside float64, which no program of the corpus or of these ten has, and a kernel for the whole line of the nutation series.
 - **A sum of a product along a short last axis,** [issue 319](https://github.com/sofeikov/hotkernels/issues/319).
 - **`out=`, `np.clip` and plain operands on the core's quick road,** [issue 320](https://github.com/sofeikov/hotkernels/issues/320): built ([above](#out-npclip-and-plain-operands-issue-320)). What is left is a write while something is pending, which computes first in Python, and the calls outside the deferred set other than `np.clip` and `np.average`.
-- **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): whether a node's value can be released, or its memory used again, as soon as its last reader has run.
+- **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): built ([above](#memory-a-graph-holds-issue-321)). A node's value was released at its last reader already; a call now writes into an operand's memory as NumPy's do, and the shape of `A[r]` no longer walks the table. What is left is the memory pending work holds, which takes the noise program to 2.2 GB, and which only computing earlier, at a cost to fusion, would lower.
 - **A library that keeps the type of what it is given,** [issue 322](https://github.com/sofeikov/hotkernels/issues/322): built for `x.view(type(x))` and for `np.isscalar` of the stand-in ([above](#npemptyviewtypex-issue-322)). What is left is a library that asks with its own `numpy`, which is handed plain arrays.
 - **The design's ARM64 tables taken again in turn,** [issue 323](https://github.com/sofeikov/hotkernels/issues/323). The tools time in turn by default now and the x86-64 tables were taken again ([below](#issue-323-the-ways-timed-in-turn-by-default)); the tables from the Apple M1 Pro were not, for want of the machine.
 - **Which state of the allocator a program is timed in, and whether a fused run should keep the memory of its results,** [issue 326](https://github.com/sofeikov/hotkernels/issues/326): new pages from the system are a quarter of the equation of state's time.

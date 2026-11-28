@@ -14,7 +14,7 @@ import warnings
 import numpy
 import pytest
 
-from prototypes.lazy import LazyArray, NotGathered, gather, get_lazy, graph, lazy_report, record_graphs, rules
+from prototypes.lazy import LazyArray, NotGathered, array, evaluate, gather, get_lazy, graph, lazy_report, record_graphs, rules
 from prototypes.lazy.programs import attention, regression
 
 # Seed of every random array in these tests.
@@ -976,6 +976,118 @@ def test_indexing_by_integer_arrays_is_deferred():
     assert graph.COUNTS.at_once == {}
     beyond = x[lazy.arange(3) * 5]
     assert beyond._node.pending and str(raised(beyond.gather)) == str(raised(lambda: plain[numpy.arange(3) * 5]))
+
+
+
+def lent() -> int:
+    """Count the calls that have written into an operand's memory, by Python and by the C core."""
+    return evaluate.LENT["python"] + (array._core.lent_count() if array._core is not None else 0)
+
+
+# Elements of the arrays the tests of lending use: float64 of more than `evaluate.LEND_BYTES`.
+LENDING = 100_000
+
+
+def test_a_call_writes_into_the_memory_of_an_operand_nothing_else_reads():
+    """a * (1 - t) + t * b computes into its temporaries' memory, as NumPy does, with NumPy's bits and layout."""
+    assert LENDING * 8 >= evaluate.LEND_BYTES
+    rng = numpy.random.default_rng(SEED)
+    first, second = rng.standard_normal(LENDING), rng.standard_normal(LENDING)
+    first[:6] = [numpy.nan, numpy.inf, -numpy.inf, -0.0, 0.0, 1e308]
+    second[:6] = [1.0, -numpy.inf, numpy.nan, 0.0, -0.0, 1e308]
+    kept = first.copy(), second.copy()
+
+    def program(np, a, b):
+        """A blend, a square root of a square, a product of an operand with itself, and a sum of three."""
+        a, b = np.asarray(a), np.asarray(b)
+        t = a * 0.5
+        blend = a * (1 - t) + t * b
+        square = (blend * 2) * (blend * 2)
+        return np.sqrt(square * 3.0) - np.maximum(blend, b) + (a - b) / 7
+
+    before = lent()
+    with numpy.errstate(all="ignore"):
+        got = program(lazy, first, second).gather()
+        expected = program(numpy, first, second)
+    assert lent() > before
+    assert same(expected, got) and got.strides == expected.strides and got.flags.c_contiguous
+    assert same(kept[0], first) and same(kept[1], second)
+
+
+def test_memory_is_not_lent_where_something_still_reads_it():
+    """A name the user holds, a view that is alive, another layout, another element type: each call makes a new array."""
+    rng = numpy.random.default_rng(SEED)
+    data = rng.standard_normal(LENDING)
+    x = lazy.asarray(data)
+    named = x * 2
+    before = lent()
+    later = named + 1
+    assert same(data * 2 + 1, later.gather()) and same(data * 2, named.gather()) and lent() == before
+    viewed = x * 3
+    every_other = viewed[::2]
+    shown = every_other.gather().copy()
+    following = viewed + 1
+    del viewed
+    before = lent()
+    assert same(data * 3 + 1, following.gather()) and lent() == before
+    assert same(shown, every_other.gather())
+    table = data.reshape(400, 250)
+    turned = (lazy.asarray(table).T * 2) + 1
+    expected = (table.T * 2) + 1
+    before = lent()
+    got = turned.gather()
+    assert same(expected, got) and got.strides == expected.strides and lent() == before
+    counts = numpy.arange(LENDING)
+    before = lent()
+    assert same((counts * 3) + 0.5, ((lazy.asarray(counts) * 3) + 0.5).gather()) and lent() == before
+    column, row = data[:400].reshape(400, 1), data[:250].reshape(1, 250)
+    before = lent()
+    assert same((column * 2) + row, ((lazy.asarray(column) * 2) + lazy.asarray(row)).gather()) and lent() == before
+    small = data[:1000]
+    before = lent()
+    assert same((small * 2) + 1, ((lazy.asarray(small) * 2) + 1).gather()) and lent() == before
+    assert same(data, x.gather())
+
+
+def test_large_arrays_of_positions_are_not_walked_for_a_shape(monkeypatch):
+    """x[r] with r of many positions gets NumPy's shape, layout and error without NumPy walking r, for every way of writing it."""
+    rng = numpy.random.default_rng(SEED)
+    data = rng.standard_normal((40, 6, 5))
+    x, plain = lazy.asarray(data) + 0, data + 0
+    many = rng.integers(0, 5, size=(64, 80))
+    assert many.size >= rules.QUICK_POSITIONS
+    indexes = {
+        "an array": many, "an array in a tuple": (many,), "after a slice": (slice(None), many),
+        "two arrays": (many, many), "two arrays apart": (many, slice(None), many), "after an ellipsis": (Ellipsis, many),
+        "a new axis, then a number": (None, many, 2), "a number, an array, a slice": (1, many, slice(1, 3)),
+        "arrays apart round a new axis": (many, None, many), "arrays that broadcast": (slice(None), many, many[:1]),
+        "eight-bit positions": (many.astype(numpy.int8),), "negative positions": (-many - 1,),
+        "unsigned positions": (many.astype(numpy.uint16),), "three dimensions": (many.reshape(4, 16, 80),),
+    }
+    walked = []
+    full = rules.index_stand_in
+    monkeypatch.setattr(rules, "index_stand_in", lambda item: walked.append(item) or full(item))
+    for name, index in indexes.items():
+        got, expected = x[index], plain[index]
+        assert got._node.pending and got.shape == expected.shape, name
+        assert same(expected, got.gather()) and got.gather().strides == expected.strides, name
+    assert walked == []
+    refused = {
+        "out of bounds": numpy.where(many == 3, 40, many), "below the bounds": numpy.where(many == 3, -41, many),
+        "on another axis": (slice(None), many + 5), "of shapes that do not broadcast": (many, many[:, :3]),
+        "too many": (many, many, many, many), "of floats": many.astype(float),
+    }
+    for name, index in refused.items():
+        expected = raised(lambda: plain[index])
+        got = raised(lambda: x[index])
+        assert type(got) is type(expected) and str(got) == str(expected), name
+    walked_by_numpy = {"wide unsigned positions": many.astype(numpy.uint64), "a mask": (slice(None), data[0] > 0),
+                       "few positions": many[:2], "an empty array": numpy.zeros((64, 0), int)}
+    for name, index in walked_by_numpy.items():
+        got, expected = x[index], plain[index]
+        assert got.shape == expected.shape and same(expected, got.gather()), name
+    pending = x[lazy.asarray(many) + 0]
+    assert pending._node.pending and same(plain[many], pending.gather())
 
 
 def test_a_pending_mask_selects_a_length_that_is_not_known():
