@@ -355,7 +355,7 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         row.fused, row.stats, fused = shape_of(program, inputs, FUSED)
         assert _same(served, lazily), f"{program.name}: under hotkernels.install() the lazy run does not give the eager program's results"
         assert _same(served, fused), f"{program.name}: under hotkernels.install() the fused run does not give the eager program's results"
-        del served, lazily, fused
+        del served, lazily, fused  # As for `expected` below: no result is held while a run is timed.
         if not alternate:
             row.timings[INSTALLED] = quickest(program, inputs, NUMPY, runs)
             for way in (LAZY, FUSED):
@@ -364,8 +364,13 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         expected = _run(program, inputs, NUMPY)
         for way in (LAZY, FUSED):
             assert _same(expected, _run(program, inputs, way)), f"{program.name}: the {way} run does not give NumPy's results"
-            if not alternate:
-                row.plain[way] = quickest(program, inputs, way, runs)
+        # Nothing of a result is held while a run is timed. An array still alive lies above the memory the next
+        # runs take and free, and the C library's allocator gives the top of its heap back to the system only:
+        # with a result held, every later run reused the memory under it and took no new pages, 20% to 28% less
+        # time on a program of large temporaries, and the ways timed before the result was made did not.
+        del expected
+        for way in (LAZY, FUSED) if not alternate else ():
+            row.plain[way] = quickest(program, inputs, way, runs)
     if alternate:
         row.timings, row.plain = alternately(program, inputs, runs, enabled, plain)
     return row

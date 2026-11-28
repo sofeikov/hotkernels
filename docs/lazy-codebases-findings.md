@@ -13,7 +13,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 - **The float64 arithmetic that fusion is for is 30% of the time, and a fifth of that was found and then given up for how the arrays lie.** An array left transposed by the call that made it, 300 ms; rows of four colour values with one value for each pixel, 100 ms; and arrays that step, a channel of an image (`lab[..., 0]`), a column of a table (`AB[:, j]`), every eighth element (`Y[::8]`), 30 ms in three programs. Each is how these codebases hold their data, and none is a missing pattern.
 - **A lazy run computed node by node is slower than the eager program on six of the ten,** by up to 1.4x, before fusion is counted. NumPy computes `a * (1 - t) + t * b` reusing the memory of its temporaries; computed with every intermediate held, as a graph's are, the same line takes 1.4 to 1.7 times as long. Fusion wins that back and no more, which is why several programs are level.
 - **Calls through the stand-in have slow roads the corpus did not meet:** a ufunc called with `out=`, `np.clip`, a function called on plain `ndarray`s, and `plain += lazy` cost 1.1 to 8.1 µs over NumPy's own call, where the same calls on the layer's arrays cost 0.05 to 0.2 µs. scikit-learn's perceptron makes 7,000 of them and is 0.88x for it.
-- **The timing tool's order was worth several percent, and has an option now.** Timed one way after another, the way timed first, NumPy's, was the slowest whatever it was: pvlib ran 10% "faster installed" with no kernel serving a single call. `fusion_time --alternate` times the ways in turn. Every figure below is taken that way.
+- **The timing tool's order was worth several percent, and the tools time in turn now.** Timed one way after another, the way timed first, NumPy's, was the slowest whatever it was: pvlib ran 10% "faster installed" with no kernel serving a single call. `fusion_time` and `limit` time the ways in turn, by default since [issue 323](#issue-323-the-ways-timed-in-turn-by-default). Every table of the four ways below is taken that way.
 
 ## The programs
 
@@ -41,7 +41,7 @@ Each is run with `import numpy as np`, or with the stand-in for it put where tha
 ```bash
 uv run --group apps --group codebases python -m prototypes.lazy.build_core
 uv run --group apps --group codebases python -m prototypes.lazy.build_fused
-OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases --size large --plain --runs 7 --alternate
+OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases --size large --plain --runs 7
 OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.mine --program codebases --size large
 OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.limit --program codebases --size large
 ```
@@ -306,7 +306,7 @@ What a call costs over NumPy's own, on arrays of 200 × 100, with fusion on:
 
 - **`prototypes/lazy/programs/codebases.py`** has the ten programs. `corpus.by_name` finds them by name and takes `codebases` for all ten; `corpus.programs()` is the twenty-six it was.
 - **`prototypes/lazy/programs/vendor/`** has two more directories, `perlin_numpy/` and `dlfs/`, each with its licence; [its README](../prototypes/lazy/programs/vendor/README.md) has the commits.
-- **`fusion_time.py` has `--alternate`.** Its default is as before.
+- **`fusion_time.py` can time the ways in turn** (`alternately`). In this study that was an option, `--alternate`; it is the default now, and `--one-after-another` asks for the order before it ([issue 323](#issue-323-the-ways-timed-in-turn-by-default)).
 - **A dependency group, `codebases`:** Matplotlib, prysm, pvlib, python_speech_features, SALib, and setuptools below 81 for prysm's `pkg_resources`.
 - **The two tests that run every program of the corpus fused** run these ten as well, at their small size, and skip one whose library is missing.
 - **Nothing in the layer, in `fuse.py` or in a kernel changed.**
