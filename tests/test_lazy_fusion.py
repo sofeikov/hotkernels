@@ -663,6 +663,25 @@ def test_a_whole_number_of_numpys_is_a_number_as_its_float_is(k: Any, length: in
             assert sum(1 for _, inside, _ in did.values() if inside) >= MOSTLY_INSIDE
 
 
+def test_the_float_of_a_whole_number_is_the_float64_numpy_makes_of_it():
+    """`float(k)`, which a kernel is handed, has the bits of NumPy's own conversion, at every power of two and beside it."""
+    one = numpy.ones(1)
+    whole = [kind(sign * (2 ** power + step))
+             for kind, powers, signs in ((numpy.int64, range(63), (1, -1)), (numpy.uint64, range(64), (1,)),
+                                         (numpy.int32, range(31), (1, -1)), (numpy.uint16, range(16), (1,)))
+             for power in powers for sign in signs for step in (-1, 0, 1)
+             if numpy.iinfo(kind).min <= sign * (2 ** power + step) <= numpy.iinfo(kind).max]
+    rng = numpy.random.default_rng(SEED)
+    whole += list(rng.integers(-(2 ** 63), 2 ** 63 - 1, 500, dtype=numpy.int64))
+    whole += list(rng.integers(0, 2 ** 64 - 1, 500, dtype=numpy.uint64, endpoint=True))
+    whole += [numpy.bool_(True), numpy.bool_(False), numpy.int64(-(2 ** 63)), numpy.uint64(2 ** 64 - 1)]
+    assert len(whole) > 1500
+    for k in whole:
+        handed = numpy.float64(float(k))
+        assert same(one * k, one * handed) and (one * k)[0].tobytes() == handed.tobytes(), k
+        assert float(numpy.asarray(k)) == float(k) and same(numpy.asarray(k).astype(numpy.float64), numpy.asarray(handed)), k
+
+
 @pytest.mark.parametrize("k", INEXACT, ids=lambda k: f"{type(k).__name__}({k})")
 def test_a_whole_number_a_float64_does_not_hold_is_rounded_as_numpy_rounds_it(k: Any):
     """`a * np.int64(2**53 + 1) + b` is one kernel call with NumPy's bits: the conversion that rounds is NumPy's own."""
