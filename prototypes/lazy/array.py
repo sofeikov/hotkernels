@@ -748,6 +748,11 @@ def _is_viewed_by_index(target: "LazyArray") -> bool:
 def _at_once(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict) -> Any:
     """Make a call now, with NumPy, on gathered operands.
 
+    With small calls made at once (`at_once_below`) the C core makes the
+    calls of NEVER_DEFERRED itself where the stand-in is called, on
+    arguments that have their values: the same count, the same call and the
+    same lazy result as here.
+
     Args:
         operation: The NumPy callable.
         name: The call's name, for the counters and for messages.
@@ -830,6 +835,12 @@ def _made_lazy(result: Any, name: str, strict: bool, exposed: bool = False) -> A
 
 def _write(operation: Callable[..., Any], name: str, args: tuple, kwargs: dict, targets: tuple) -> None:
     """Make a call that writes into arrays that exist, after computing everything pending.
+
+    With small calls made at once (`at_once_below`) the C core makes a ufunc
+    call with one output itself when nothing is pending and every operand
+    has its values, into a lazy array or a plain one (`ufunc_into_now`): the
+    same call on the same values, with nothing to compute first and so
+    nothing counted. Every other write is made here.
 
     Args:
         operation: The NumPy callable.

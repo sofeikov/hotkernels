@@ -432,7 +432,11 @@ class LazyNumPy:
         return convert
 
 
-# The roads the C core can stand on: see `array.use_core`.
+# The roads the C core can stand on: see `array.use_core`. While calls are made at once (`array.at_once_below`)
+# the road of `__call__` also makes three kinds of call itself, on values, that the method above makes by making
+# every plain array lazy and handing the call to NumPy, which hands it back through its protocols: a ufunc or a
+# function that gives a new array on plain `ndarray`s, a ufunc that names its output with `out=` when nothing is
+# pending, and a function of `array.NEVER_DEFERRED`. The method is the definition of each.
 LazyCallable.__call__.road = ("standin_call", _made_lazy, NO_ARRAY)
 LazyNumPy.__getattr__.road = ("standin_name",)
 
