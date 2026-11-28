@@ -4,7 +4,9 @@
  * contiguous runs of float64: `f(v0, ..., out, n, s0, ...)`. This module
  * stands between it and an expression on arrays of any shape. It checks that
  * the arrays are ones the kernel can read, walks the outer dimensions, and
- * calls the kernel once per contiguous run along the innermost ones. It
+ * calls the kernel once per contiguous run along the innermost ones. Outer
+ * and innermost are as the arrays lie in memory, not as their dimensions are
+ * written: see `walk_order`. It
  * decides nothing about what is fused: `fuse.py` does, and hands over a
  * kernel's place in the table with the operands in the kernel's order.
  *
@@ -122,7 +124,7 @@ typedef struct {
  * NumPy's loops walk the operands of an operation in the order of memory: its iterator sorts the dimensions by
  * stride, largest outermost, and leaves two of one stride in the order they are written in. So does this, for
  * `out`: `np.mgrid[...].transpose(1, 2, 0) % 1` is an array of shape (m, n, 2) whose last dimension is the slowest
- * in memory, and it is walked as two runs of m * n elements and not as m * n rows of two. Where the strides
+ * in memory, and it is walked as one run of 2 * m * n elements and not as m * n rows of two. Where the strides
  * already fall from each dimension to the next the order is the one written, whatever the strides are, and
  * `read_operand` has the rest of the rule. Where they do not, an empty array, a stride below zero and a dimension
  * of length one are declined. NumPy gives a dimension of length one no stride when it sorts, the place of such a

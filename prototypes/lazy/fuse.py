@@ -1915,9 +1915,10 @@ class _Group:
         if raised == _fused.DECLINED:
             like = _out_of_order(operands, shape)
             if like is not None:
-                # The memory tried first is given back before the second is asked for, so that the second is the
-                # same pages. With both held, the allocator returns them to the system when both are freed and every
-                # run pays for new pages: one multiplication of 200,000 elements took 308 µs so, and 85 µs in NumPy.
+                # The memory tried first is given back before the second is asked for. With both held at once, one
+                # multiplication of 200,000 elements took 308 µs for NumPy's 85 µs, and 101 µs this way: most likely
+                # the allocator returns two such blocks to the system when both are freed, and every run then starts
+                # on new pages.
                 out = None
                 out = np.empty_like(like)
                 raised = _fused.program(self.steps, self.arrays, operands, out, BLOCK_ELEMENTS)
