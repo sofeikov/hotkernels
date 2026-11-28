@@ -32,6 +32,7 @@ What an expression may contain is decided by one rule: **each operation must be 
 | An expression may contain | Why |
 |---|---|
 | `+`, `-`, `*`, `/`, `np.maximum`, `np.minimum`, unary `-`, `abs`, `np.sqrt`, `np.square`, `x ** 2` | Each is one IEEE operation, and NumPy's loop for it executes the one instruction a kernel would. `x ** 2`, `np.square(x)` and `x * x` are all one multiplication |
+| `np.radians`, `np.degrees` | NumPy's loop for each is one multiplication by a constant, which a kernel makes with the same float64 |
 | A comparison, as the condition of `np.where(c, a, b)` | The comparison gives a mask, which a kernel keeps in a register and never writes to memory |
 | A sum or a mean of every element, at the top | NumPy's order of addition can be reproduced exactly ([below](#a-sum-adds-in-numpys-order)) |
 
