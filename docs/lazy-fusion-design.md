@@ -394,7 +394,7 @@ The argument is per operation, and the judge checks it per kernel.
 
 ## What was measured
 
-Everything below is from an Apple M1 Pro, NumPy 2.5.5, CPython 3.13, with the layer's nodes written by its C core. The kernels' specs are not on `main` yet, so the judge's runs are `--unlocked`.
+Everything below is from an Apple M1 Pro, NumPy 2.5.5, CPython 3.13, with the layer's nodes written by its C core. The kernels' specs are not on `main` yet, so the judge's runs are `--unlocked`. The tables of the programs from that machine were timed one way after another, NumPy's first, by the tool as it then was; [issue 323](https://github.com/sofeikov/hotkernels/issues/323) and [the findings on it](lazy-codebases-findings.md#issue-323-the-ways-timed-in-turn-by-default) have what that can move, and they could not be taken again without the machine.
 
 ### The kernels written by hand, alone
 
@@ -937,76 +937,81 @@ Everything above was measured on an Apple M1 Pro. This is the same on x86-64, an
 - **An invalid operation gives a NaN with its sign bit set,** where ARM64's is `np.nan`'s bits. A program that holds `np.nan` and also makes `inf - inf` has two kinds of NaN, and which of two an operation returns is which operand comes first. NumPy's own loops do not keep to one order: `a + b` returns `a`'s NaN in blocks of eight and `b`'s in the elements left over, and `a + s` the number's NaN from nine elements up and the array's below. A C compiler is free to swap the operands of a sum. So each fused spec's domain is now inputs whose NaNs all have the bits of this processor's invalid operations (`one_nan`), and the judge checks that a result is a NaN wherever NumPy's is, but not which of two. On ARM64 that changes nothing. What a program with both kinds gets is NumPy's NaN, or the other one; [the kernels' README](../prototypes/lazy/kernels/README.md#what-is-not-specified) already said so.
 - **One C reference cannot be NumPy's even then.** In `s0 * (a * (|s1 * b| * (c * d + (s2 - e))))` the absolute value makes a NaN with the sign bit clear out of one with it set, a second kind inside the expression, and clang orders the products otherwise than NumPy's passes. The judge refuses the reference, so that kernel has no assembly on x86-64 either.
 
-**The programs, four ways,** with the command of [The programs, four ways](#the-programs-four-ways), the quickest of 5 runs:
+**The programs, four ways,** with the command of [The programs, four ways](#the-programs-four-ways), the quickest of 5 rounds. This table and the next were taken again for [issue 323](https://github.com/sofeikov/hotkernels/issues/323), with the ways timed in turn and no result of a program kept while it is timed ([what that is](lazy-codebases-findings.md#issue-323-the-ways-timed-in-turn-by-default)). They were taken pinned to one performance core with one BLAS thread (`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 taskset -c 6`), while other work ran on the machine, at load averages of 2.1 to 3.5. So a program of matrix products has them on one thread here, where the first take of these tables had BLAS on every core.
 
 ```text
 program             NumPy ms installed    lazy ms    build  compute   fused ms    build     plan  compute  vs lazy vs NumPy  vs inst.
-regression             64.44     35.93      36.93     0.33    36.61      28.54    22.55     0.58     5.42    1.29x    2.26x     1.26x
-attention              45.76     52.46      51.38     0.53    50.85      55.40     1.54     0.18    53.68    0.93x    0.83x     0.95x
-perceptron             45.96     36.45      84.26    33.93    50.34      39.75    39.30     0.04     0.41    2.12x    1.16x     0.92x
-char_rnn               22.96     19.85      79.11    44.45    34.66      23.26    23.26     0.00     0.00    3.40x    0.99x     0.85x
-particle_filter       385.16    357.22     416.16   129.21   286.95     324.53   136.34     3.97   184.22    1.28x    1.19x     1.10x
-veros_eos             236.45    238.29     275.78     1.51   274.27     141.46     1.56     0.46   139.44    1.95x    1.67x     1.68x
-veros_isoneutral      407.01    394.03     414.48    40.59   373.89     307.55    54.50     1.01   252.05    1.35x    1.32x     1.28x
-veros_tke             199.54    165.52     162.29    30.23   132.06     123.19    40.11     0.54    82.53    1.32x    1.62x     1.34x
-cavity_flow           182.05    182.16     219.74     7.48   212.26      58.97     8.91     2.64    47.43    3.73x    3.09x     3.09x
-hdiff                 179.82    168.60     216.11    16.37   199.74      81.60    16.09     0.04    65.47    2.65x    2.20x     2.07x
-black_scholes          77.84     78.30      81.66     3.91    77.75      70.61     4.02     0.04    66.55    1.16x    1.10x     1.11x
-trimesh_mesh          141.29    121.84     121.07   120.82     0.26     122.10   122.10     0.00     0.00    0.99x    1.16x     1.00x
-sklearn_metrics      1013.62    313.42     317.86   313.17     4.69     315.63   315.63     0.00     0.00    1.01x    3.21x     0.99x
-empyrical_stats       863.61    446.06     444.12   444.12     0.00     447.12   447.12     0.00     0.00    0.99x    1.93x     1.00x
-skimage_pipeline     1133.26   1074.84    1075.49  1075.49     0.00    1075.72  1075.72     0.00     0.00    1.00x    1.05x     1.00x
-pandas_sales          406.11    394.60     394.00   394.00     0.00     394.08   394.08     0.00     0.00    1.00x    1.03x     1.00x
-astropy_timeseries   1422.70   1258.71    1268.18  1266.33     1.85    1247.53  1246.67     0.11     0.76    1.02x    1.14x     1.01x
-example                35.65     13.40      14.09     6.62     7.48      14.01    12.21     0.01     1.78    1.01x    2.55x     0.96x
-flame                 114.27     69.74     155.32    82.50    72.82      74.00    71.85     0.03     2.11    2.10x    1.54x     0.94x
-azimint_naive          56.90     58.74      71.35     6.21    65.14      59.34    59.34     0.00     0.00    1.20x    0.96x     0.99x
-azimint_hist           88.96     58.50      58.43    58.40     0.03      58.81    58.81     0.00     0.00    0.99x    1.51x     0.99x
-mandelbrot1            91.96     84.71      93.54     1.32    92.22      90.08    90.08     0.00     0.00    1.04x    1.02x     0.94x
-mandelbrot2           132.90    135.40     170.50    26.30   144.19     138.71   138.71     0.00     0.00    1.23x    0.96x     0.98x
-make_decision         119.09     71.85    1330.18  1050.77   279.41      98.44    98.44     0.00     0.00   13.51x    1.21x     0.73x
-pandas_filter         142.76    100.72     101.18   101.18     0.00     100.07   100.07     0.00     0.00    1.01x    1.43x     1.01x
-equalize_hist         114.07    104.20     104.14   104.05     0.10     105.46   105.46     0.00     0.00    0.99x    1.08x     0.99x
+regression             53.31     52.92      54.72     0.24    54.48      52.25    44.39     0.78     7.07    1.05x    1.02x     1.01x
+attention              53.93     53.94      59.19     0.47    58.72      58.24     2.18     0.15    55.91    1.02x    0.93x     0.93x
+perceptron             41.57     35.66      79.05    29.89    49.16      38.24    37.78     0.04     0.41    2.07x    1.09x     0.93x
+char_rnn               22.36     19.37      78.53    44.84    33.69      23.16    23.16     0.00     0.00    3.39x    0.97x     0.84x
+particle_filter       388.52    356.90     409.27   125.64   283.63     328.66   137.61     3.97   187.08    1.25x    1.18x     1.09x
+veros_eos             234.84    235.21     268.87     2.88   265.99     139.26     1.56     0.42   137.29    1.93x    1.69x     1.69x
+veros_isoneutral      402.86    403.77     427.89    42.27   385.62     314.11    55.11     1.03   257.97    1.36x    1.28x     1.29x
+veros_tke             176.90    169.86     170.17    30.36   139.81     128.05    40.63     0.55    86.87    1.33x    1.38x     1.33x
+cavity_flow           199.82    199.33     247.27     7.67   239.59      64.73    10.22     2.80    51.71    3.82x    3.09x     3.08x
+hdiff                 178.19    167.70     209.71    10.74   198.97      77.03    10.70     0.05    66.28    2.72x    2.31x     2.18x
+black_scholes          78.88     78.76      83.25     3.88    79.38      70.58     3.88     0.04    66.66    1.18x    1.12x     1.12x
+trimesh_mesh          139.99    120.70     121.50   121.26     0.24     120.25   120.25     0.00     0.00    1.01x    1.16x     1.00x
+sklearn_metrics      1025.79    316.25     321.95   317.32     4.62     321.34   321.34     0.00     0.00    1.00x    3.19x     0.98x
+empyrical_stats       939.03    433.44     434.62   434.62     0.00     433.68   433.68     0.00     0.00    1.00x    2.17x     1.00x
+skimage_pipeline     1155.21   1099.37    1092.21  1092.21     0.00    1091.82  1091.82     0.00     0.00    1.00x    1.06x     1.01x
+pandas_sales          418.97    408.71     408.13   408.13     0.00     409.18   409.18     0.00     0.00    1.00x    1.02x     1.00x
+astropy_timeseries   1465.95   1298.77    1318.68  1317.04     1.64    1290.45  1289.67     0.10     0.68    1.02x    1.14x     1.01x
+example                36.63     14.06      14.58     6.60     7.98      14.15    12.36     0.01     1.78    1.03x    2.59x     0.99x
+flame                 115.48     73.78     160.97    85.88    75.09      78.42    76.18     0.04     2.19    2.05x    1.47x     0.94x
+azimint_naive          60.97     71.51      86.32     6.53    79.79      71.56    71.56     0.00     0.00    1.21x    0.85x     1.00x
+azimint_hist           90.44     59.41      59.74    59.70     0.04      59.80    59.80     0.00     0.00    1.00x    1.51x     0.99x
+mandelbrot1            95.02     88.72     100.40     1.31    99.09      96.06    96.06     0.00     0.00    1.05x    0.99x     0.92x
+mandelbrot2           146.62    155.72     185.78    28.56   157.22     156.13   156.13     0.00     0.00    1.19x    0.94x     1.00x
+make_decision         116.34     71.56    1326.81  1055.96   270.85      98.67    98.67     0.00     0.00   13.45x    1.18x     0.73x
+pandas_filter         162.77    132.15     131.88   131.88     0.00     132.11   132.11     0.00     0.00    1.00x    1.23x     1.00x
+equalize_hist         113.58    104.44     104.49   104.39     0.11     104.71   104.71     0.00     0.00    1.00x    1.08x     1.00x
 ```
 
-- **Where the programs are expressions on large arrays the gains are those of ARM64 or larger:** the cavity flow 3.09x, the regression 2.26x, the horizontal diffusion 2.20x, the equation of state 1.67x, turbulent kinetic energy 1.62x, isoneutral mixing 1.32x, the particle filter 1.19x. This is with seventy-eight of the eighty kernels compiled C: fusion's gain is the passes it saves, not the instructions.
-- **One program is behind NumPy by more than a few percent:** the attention block, at 0.83x. It is behind with the kernels installed and no graph too (45.76 ms for NumPy, 52.46 ms installed), and the fused run is 0.95x of that; its time is in matrix products. Why the installed run is slower there was not looked into. Three more are within 4% of NumPy, behind it: the character RNN, the naive azimuthal integration and the second Mandelbrot set.
-- **Against the eager program with the same kernels** the small-array programs are behind as on ARM64, by the cost of a call made at once: the decision tree at 0.73x, the character RNN at 0.85x, the perceptron at 0.92x, the flame graph at 0.94x.
-**How far fusion could go,** with the command of [How far any fusion could go](#how-far-any-fusion-could-go):
+- **Where the programs are expressions on large arrays the gains are about those of ARM64:** the cavity flow 3.09x, the horizontal diffusion 2.31x, the equation of state 1.69x, turbulent kinetic energy 1.38x, isoneutral mixing 1.28x, the particle filter 1.18x. This is with seventy-eight of the eighty kernels compiled C: fusion's gain is the passes it saves, not the instructions.
+- **The regression is level, 1.02x, where the first take had it at 2.26x.** That was its NumPy column: 64.44 ms in that take and 137.76 ms in the table after it, with BLAS on every core, against a fused run of 28.54 ms. On one thread its NumPy run is 53.31 ms here and 55.55 ms in the next table, and 44 ms of its 52 ms fused run is calls made at once, its matrix products among them.
+- **Turbulent kinetic energy was 1.62x in the first take and is 1.38x.** That one is the order. One way after another its NumPy run, timed first, took 200 to 205 ms in three takes; in turn it took 177 to 188 ms in four, with the fused run at 123 to 137 ms either way.
+- **Four programs are behind NumPy by 3% or more:** the naive azimuthal integration at 0.85x, the attention block at 0.93x, the second Mandelbrot set at 0.94x and the character RNN at 0.97x. The attention block's eager run is the same with the kernels installed and without (53.93 ms and 53.94 ms), where the first take had the installed run slower; its lazy runs are 4 to 5 ms behind both. The azimuthal integration and the Mandelbrot set are behind with the kernels installed and no graph (60.97 ms for NumPy and 71.51 ms installed, 146.62 ms and 155.72 ms), and their fused runs are level with that. A second take had the azimuthal integration at 0.91x; unpinned, earlier the same day, its two eager runs were level at 56 to 58 ms. Why the installed run is slower there when pinned was not looked into.
+- **Against the eager program with the same kernels** the small-array programs are behind as on ARM64, by the cost of a call made at once: the decision tree at 0.73x, the character RNN at 0.84x, the first Mandelbrot set at 0.92x, the perceptron and the attention block at 0.93x, the flame graph at 0.94x.
+- **A second take, at load averages of 3.2 to 3.8, had times up to 28% longer and nearly the same ratios.** The equation of state took 298.50 ms on NumPy for 234.84 ms, isoneutral mixing 488.70 ms for 402.86 ms. Fused against NumPy, nineteen of the twenty-six were within 0.05 of this table. The other seven: the equation of state 1.79x for 1.69x, the horizontal diffusion 2.18x for 2.31x, `sklearn_metrics` 3.05x for 3.19x, `empyrical_stats` 2.09x for 2.17x, `example` 2.49x for 2.59x, `pandas_filter` 1.29x for 1.23x, and the azimuthal integration as above. Timed in turn, a slow stretch of the machine falls on every way.
+
+**How far fusion could go,** with the command of [How far any fusion could go](#how-far-any-fusion-could-go), in turn and pinned as the table above:
 
 ```text
 program                NumPy installed     floor     fused  at best       now     left   left of
                                                                                        fused run
-regression            137.76     34.79     15.87     29.23    8.68x     4.71x    13.36     45.7%
-attention              46.43     47.84     21.09     48.62    2.20x     0.95x    27.53     56.6%
-perceptron             41.01     35.11     29.48     31.93    1.39x     1.28x     2.45      7.7%
-char_rnn               22.11     19.14     13.73     22.63    1.61x     0.98x     8.89     39.3%
-particle_filter       382.99    352.62    273.35    323.16    1.40x     1.19x    49.81     15.4%
-veros_eos             239.96    242.17     67.26    144.86    3.57x     1.66x    77.60     53.6%
-veros_isoneutral      402.41    402.42    273.50    315.56    1.47x     1.28x    42.07     13.3%
-veros_tke             206.05    194.47    108.66    129.89    1.90x     1.59x    21.23     16.3%
-cavity_flow           187.29    187.80    136.72     60.30    1.37x     3.11x   -76.43   -126.8%
-hdiff                 183.11    171.72     43.46     82.56    4.21x     2.22x    39.09     47.4%
-black_scholes          79.01     78.72     62.61     70.36    1.26x     1.12x     7.75     11.0%
-trimesh_mesh          138.90    118.47    118.33    119.19    1.17x     1.17x     0.87      0.7%
-sklearn_metrics      1023.67    315.48    314.97    317.75    3.25x     3.22x     2.78      0.9%
-empyrical_stats       865.87    443.41    443.41    445.98    1.95x     1.94x     2.58      0.6%
-skimage_pipeline     1121.49   1064.61   1064.61   1056.27    1.05x     1.06x    -8.33     -0.8%
-pandas_sales          400.17    396.73    396.73    410.12    1.01x     0.98x    13.39      3.3%
-astropy_timeseries   1522.91   1304.26   1303.82   1270.13    1.17x     1.20x   -33.69     -2.7%
-example                36.09     14.00     10.57     14.37    3.41x     2.51x     3.80     26.4%
-flame                 114.52     72.05     62.12     76.06    1.84x     1.51x    13.94     18.3%
-azimint_naive          61.95     63.77     41.98     65.05    1.48x     0.95x    23.07     35.5%
-azimint_hist           89.40     58.95     58.94     58.99    1.52x     1.52x     0.05      0.1%
-mandelbrot1            93.20     86.13     63.23     92.84    1.47x     1.00x    29.60     31.9%
-mandelbrot2           132.73    137.74    133.68    137.31    0.99x     0.97x     3.63      2.6%
-make_decision         118.63     71.81         -     99.21        -     1.20x        -         -
-pandas_filter         156.36    117.63    117.63    117.32    1.33x     1.33x    -0.31     -0.3%
-equalize_hist         113.57    103.76    103.75    104.29    1.09x     1.09x     0.54      0.5%
+regression             55.55     56.27     41.60     53.07    1.34x     1.05x    11.47     21.6%
+attention              54.26     54.36     43.00     54.99    1.26x     0.99x    12.00     21.8%
+perceptron             41.91     35.96     30.69     38.45    1.37x     1.09x     7.76     20.2%
+char_rnn               22.39     19.44     13.91     22.95    1.61x     0.98x     9.04     39.4%
+particle_filter       393.82    362.68    278.47    336.57    1.41x     1.17x    58.11     17.3%
+veros_eos             245.10    245.00    107.91    145.59    2.27x     1.68x    37.68     25.9%
+veros_isoneutral      409.07    409.01    264.70    315.52    1.55x     1.30x    50.82     16.1%
+veros_tke             184.83    174.90     94.10    133.24    1.96x     1.39x    39.14     29.4%
+cavity_flow           193.11    193.66    126.60     62.62    1.53x     3.08x   -63.98   -102.2%
+hdiff                 185.03    172.85     34.51     83.30    5.36x     2.22x    48.79     58.6%
+black_scholes          79.31     79.29     64.89     70.90    1.22x     1.12x     6.01      8.5%
+trimesh_mesh          141.19    121.93    121.77    121.92    1.16x     1.16x     0.16      0.1%
+sklearn_metrics      1036.17    323.04    322.58    328.39    3.21x     3.16x     5.81      1.8%
+empyrical_stats      1021.51    479.20    479.20    480.27    2.13x     2.13x     1.06      0.2%
+skimage_pipeline     1184.29   1130.21   1130.21   1111.75    1.05x     1.07x   -18.46     -1.7%
+pandas_sales          470.46    463.72    463.72    482.24    1.01x     0.98x    18.53      3.8%
+astropy_timeseries   1572.22   1393.60   1393.06   1417.32    1.13x     1.11x    24.26      1.7%
+example                38.27     14.96     11.19     15.39    3.42x     2.49x     4.20     27.3%
+flame                 119.22     76.25     63.19     85.28    1.89x     1.40x    22.09     25.9%
+azimint_naive          64.94     73.17     45.67     73.84    1.42x     0.88x    28.18     38.2%
+azimint_hist           96.20     64.20     64.19     62.90    1.50x     1.53x    -1.29     -2.1%
+mandelbrot1           101.08     95.20     66.67    103.26    1.52x     0.98x    36.59     35.4%
+mandelbrot2           151.96    165.07    158.20    167.76    0.96x     0.91x     9.56      5.7%
+make_decision         118.41     72.61         -    100.10        -     1.18x        -         -
+pandas_filter         157.30    120.77    120.77    118.46    1.30x     1.33x    -2.32     -2.0%
+equalize_hist         114.47    103.66    103.65    103.77    1.10x     1.10x     0.13      0.1%
 ```
 
-- **Where the most is left:** the equation of state (77.6 ms, 54% of its fused run), the horizontal diffusion (39.1 ms, 47%), the particle filter (49.8 ms) and isoneutral mixing (42.1 ms). The cavity flow's fused run is below its floor: the floor is the eager program less what could be removed from it, and fusion also removes the copies its writes made.
-- **A program's NumPy time is not steady on this machine.** The regression took 64.44 ms on plain NumPy in the table of four ways and 137.76 ms here, which is where its 8.68x at best comes from; its fused time moved by 2% between the two. Each table is the quickest of five runs; the two tables were taken one after the other.
+- **Where the most is left:** the particle filter (58.1 ms, 17% of its fused run), isoneutral mixing (50.8 ms, 16%), the horizontal diffusion (48.8 ms, 59%), turbulent kinetic energy (39.1 ms, 29%), the equation of state (37.7 ms, 26%) and the first Mandelbrot set (36.6 ms, 35%). The cavity flow's fused run is below its floor: the floor is the eager program less what could be removed from it, and fusion also removes the copies its writes made.
+- **The floor moves more than the runs do.** It is a difference of two sums of single calls' times, taken in one run. The equation of state's was 67.26 ms in the first take and is 107.91 ms here, the horizontal diffusion's 43.46 ms and 34.51 ms; their fused runs moved by 1%.
+- **The two tables agree on a program's NumPy time now.** The regression's is 53.31 ms above and 55.55 ms here, where the first take had 64.44 ms and 137.76 ms. Twenty of the twenty-six are within 5% between the two tables and the other six within 13%, `pandas_sales` the furthest; other work ran on the machine through both.
 - **The limits were not moved.** The block of 4,096 elements, the shortest rows, `OPERATIONS_A_COPY` and the 32,768 elements below which a call is made at once are the ones the M1 Pro set; with them the programs above are where they are. Whether other values do better on x86-64 was not measured.
 
 ### Ten programs from other codebases
@@ -1017,7 +1022,7 @@ Ten more programs were run on x86-64 as the corpus is, each the NumPy code of a 
 - **No pattern was missing:** every expression found on arrays a kernel can read was planned.
 - **A third of their time is a mathematics library's functions,** `cos`, `sin`, `x ** 3`, `%`, which end an expression; a sixth is reductions along an axis.
 - **They found things in the layer that the corpus had not:** an array left transposed by the call that made it is declined, where NumPy walks it as it lies; rows of four with a value for each row are declined in a program of several steps; a NumPy scalar of a whole-number type ends an expression; a ufunc called with `out=`, `np.clip` and a function called on plain arrays cost 1 to 8 µs over NumPy's call; a lazy run computed node by node is up to 1.4x slower than the eager program, which reuses its temporaries' memory; and `type(x)` of a lazy array stops Matplotlib.
-- **The order the ways are timed in was worth several percent,** and `fusion_time` has `--alternate` for it. The tables of this document were taken one way after another.
+- **The order the ways are timed in was worth several percent,** and both timing tools now time the ways in turn and keep no result of a program while they time ([what was built on it](lazy-codebases-findings.md#issue-323-the-ways-timed-in-turn-by-default)). The x86-64 tables of [Another processor](#another-processor) were taken again that way; the tables from the M1 Pro were taken one way after another.
 
 ### What is open in the layer, and is not fusion
 

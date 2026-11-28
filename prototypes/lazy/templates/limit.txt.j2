@@ -1,4 +1,4 @@
-How far fusion could take each program ({{ size }} size, the quickest of {{ runs }} runs, milliseconds)
+How far fusion could take each program ({{ size }} size, the quickest of {{ runs }} runs, {{ "the ways timed in turn" if alternate else "one way after another" }}, milliseconds)
 
 {{ "%-18s %9s %9s %9s %9s %8s %9s %8s %9s"|format("program", "NumPy", "installed", "floor", "fused", "at best", "now", "left", "left of") }}
 {{ "%-18s %9s %9s %9s %9s %8s %9s %8s %9s"|format("", "", "", "", "", "", "", "", "fused run") }}

@@ -13,7 +13,7 @@ Nothing here is in the package. The programs are in [`prototypes/lazy/programs/c
 - **The float64 arithmetic that fusion is for is 30% of the time, and a fifth of that was found and then given up for how the arrays lie.** An array left transposed by the call that made it, 300 ms; rows of four colour values with one value for each pixel, 100 ms; and arrays that step, a channel of an image (`lab[..., 0]`), a column of a table (`AB[:, j]`), every eighth element (`Y[::8]`), 30 ms in three programs. Each is how these codebases hold their data, and none is a missing pattern.
 - **A lazy run computed node by node is slower than the eager program on six of the ten,** by up to 1.4x, before fusion is counted. NumPy computes `a * (1 - t) + t * b` reusing the memory of its temporaries; computed with every intermediate held, as a graph's are, the same line takes 1.4 to 1.7 times as long. Fusion wins that back and no more, which is why several programs are level.
 - **Calls through the stand-in have slow roads the corpus did not meet:** a ufunc called with `out=`, `np.clip`, a function called on plain `ndarray`s, and `plain += lazy` cost 1.1 to 8.1 µs over NumPy's own call, where the same calls on the layer's arrays cost 0.05 to 0.2 µs. scikit-learn's perceptron makes 7,000 of them and is 0.88x for it.
-- **The timing tool's order was worth several percent, and has an option now.** Timed one way after another, the way timed first, NumPy's, was the slowest whatever it was: pvlib ran 10% "faster installed" with no kernel serving a single call. `fusion_time --alternate` times the ways in turn. Every figure below is taken that way.
+- **The timing tool's order was worth several percent, and the tools time in turn now.** Timed one way after another, the way timed first, NumPy's, was the slowest whatever it was: pvlib ran 10% "faster installed" with no kernel serving a single call. `fusion_time` and `limit` time the ways in turn, by default since [issue 323](#issue-323-the-ways-timed-in-turn-by-default), which also found that much of it was not the order: the tool kept a result of the program alive while it timed, and the runs after it reused memory. Every table of the four ways below is taken in turn, with that result kept.
 
 ## The programs
 
@@ -41,7 +41,7 @@ Each is run with `import numpy as np`, or with the stand-in for it put where tha
 ```bash
 uv run --group apps --group codebases python -m prototypes.lazy.build_core
 uv run --group apps --group codebases python -m prototypes.lazy.build_fused
-OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases --size large --plain --runs 7 --alternate
+OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.fusion_time --program codebases --size large --plain --runs 7
 OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.mine --program codebases --size large
 OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python -m prototypes.lazy.programs.limit --program codebases --size large
 ```
@@ -51,7 +51,7 @@ OPENBLAS_NUM_THREADS=1 taskset -c 6 uv run --group apps --group codebases python
 Everything is from an Intel Core i5-14600KF under Linux, NumPy 2.5.5, CPython 3.13, the layer's nodes written by its C core, the fused kernels as [the design's section on x86-64](lazy-fusion-design.md#another-processor) has them.
 
 - **One performance core, and one thread for the matrix products.** Another session was using the machine while these were taken. Unpinned, with OpenBLAS on every core, scikit-learn's perceptron took anything from 223 ms to 1,267 ms and the convolutional network 842 ms to 1,544 ms from one run of the table to the next. Pinned to one core with one BLAS thread they repeat to about 2%. So the two programs that are matrix products are timed with those products on one thread, which makes the products a larger share of them than on an idle machine with all cores.
-- **The ways in turn.** See [The order of timing](#the-order-of-timing).
+- **The ways in turn,** with the tool as it was then, which kept one result of the program while it timed. See [The order of timing](#the-order-of-timing), and [what issue 323 found](#issue-323-the-ways-timed-in-turn-by-default) for what that result moved: the times of prysm's program by 13%, and no ratio in these tables by more than 0.02.
 
 ## What was measured
 
@@ -294,7 +294,9 @@ What a call costs over NumPy's own, on arrays of 200 × 100, with fusion on:
 - prysm's fused run took 362 ms with the kernels installed and 318 ms without, in three tables out of three; computed node by node with each call timed, its nodes take 282.6 ms and 282.5 ms.
 - The noise program's fused run was 0.99x of NumPy with the kernels installed and 1.05x without, in one table.
 
-`--alternate` times every way once a round, round after round, and keeps the quickest of each. With it pvlib is 2,646 ms and 2,660 ms, and prysm 317 ms and 318 ms. The tables of [the design](lazy-fusion-design.md#the-programs-four-ways) were taken one way after another; a program there whose eager time moved between two tables, as the regression's did on x86-64, may be this.
+Timing in turn, every way once a round, round after round, with the quickest of each kept, was an option of the tool in this study, `--alternate`. With it pvlib was 2,646 ms and 2,660 ms, and prysm 317 ms and 318 ms.
+
+**What it was** came out when the order was made the tool's default ([issue 323](#issue-323-the-ways-timed-in-turn-by-default)). The time is new pages from the system, as guessed, and it was measured there. But the second of the three was not the order: the tool kept a result of the program alive from its comparison of bits onwards, and every run after that reused memory where the runs before it had not. prysm's 362 ms was the run with nothing kept, and 318 ms the run under a kept result. In turn every way ran under the kept result, so the two figures agreed at the lower one. The tool keeps nothing now, and prysm's fused run is 361 ms with the kernels installed and 362 ms without.
 
 ### What got in the way of running them
 
@@ -306,12 +308,84 @@ What a call costs over NumPy's own, on arrays of 200 × 100, with fusion on:
 
 - **`prototypes/lazy/programs/codebases.py`** has the ten programs. `corpus.by_name` finds them by name and takes `codebases` for all ten; `corpus.programs()` is the twenty-six it was.
 - **`prototypes/lazy/programs/vendor/`** has two more directories, `perlin_numpy/` and `dlfs/`, each with its licence; [its README](../prototypes/lazy/programs/vendor/README.md) has the commits.
-- **`fusion_time.py` has `--alternate`.** Its default is as before.
+- **`fusion_time.py` can time the ways in turn** (`alternately`). In this study that was an option, `--alternate`; it is the default now, and `--one-after-another` asks for the order before it ([issue 323](#issue-323-the-ways-timed-in-turn-by-default)).
 - **A dependency group, `codebases`:** Matplotlib, prysm, pvlib, python_speech_features, SALib, and setuptools below 81 for prysm's `pkg_resources`.
 - **The two tests that run every program of the corpus fused** run these ten as well, at their small size, and skip one whose library is missing.
 - **Nothing in the layer, in `fuse.py` or in a kernel changed.**
 
 The reasons a program was given up, the calls each kernel of the package took line by line, and the times of single calls were measured with scripts that wrap `fuse._Group.run`, read `hotkernels`' counters between lines and time a call both ways. They are not in the repository.
+
+## What was built on it
+
+One subsection for each issue of [What is open](#what-is-open) that was taken up, with what it measured. The tables of [What was measured](#what-was-measured) are the study's and are as they were.
+
+### Issue 323: the ways timed in turn by default
+
+[Issue 323](https://github.com/sofeikov/hotkernels/issues/323) asked for `--alternate` as the default of `fusion_time`, for `limit` to time in turn, and for the design's tables again.
+
+**What changed.**
+
+- **`fusion_time` and `limit` time the ways in turn.** A round runs the program once on NumPy, once eagerly with the kernels installed, once lazily and once fused, and with `--plain` once each for the two lazy ways with nothing installed; the quickest run of each way counts. `--one-after-another` asks either tool for the order before. Each table's heading says which it was.
+- **`fusion_time` keeps no result of a program while it times.** It did, and that was most of what the order had been taken for. See below.
+- **Neither tool prints the package's lines about installing,** which a round would print twice.
+
+**The time is new pages from the system, and it is a quarter of such a program.** The study guessed it and did not measure it. The equation of state of the corpus (`veros_eos`, 366 operations on arrays of 8.7 MB) was run alone in a new process, one way, pinned, with the page faults of each run counted. Every run after the first took the same:
+
+| How freed memory is kept | NumPy | Page faults a run | Lazy | Page faults | Fused | Page faults |
+|---|---|---|---|---|---|---|
+| By glibc as it is | 245 ms | 60,738 | 270 ms | 36,476 | 138 ms | 33,108 |
+| One result of the program still alive, as the tool had it | 196 ms | 12,071 | 225 ms | 0 | 99 ms | 0 |
+| glibc told to give nothing back (`MALLOC_MMAP_THRESHOLD_=33554432 MALLOC_TRIM_THRESHOLD_=4294967295`) | 181 ms | 0 | 224 ms | 0 | 99.5 ms | 0 |
+
+- **glibc gives memory back to the system.** A large array has a mapping of its own, unmapped when the array is freed, or lies at the top of the heap, which is cut back when enough of it is free. The next array of that size is then new pages, each zeroed by the system: 249 MB of them in one eager run of this program. That is 64 ms of its 245 ms, and 38 ms of the fused run's 138 ms.
+- **A process does not grow out of it.** Of twelve eager runs in a row, the eleven after the first took 244 to 251 ms each, with 60,228 page faults each. So "a process that has run a program several times runs it faster" is not what happens.
+- **An array that stays alive changes it.** With one result of the program alive, 8.7 MB, the next runs took their memory with a fifth of the page faults or none. The likeliest reason is that memory freed below a live array is not the top of the heap and cannot be given back; that much was not measured.
+
+**What the tool did.** To compare bits, `fusion_time` ran the program on NumPy and kept the result while it ran the lazy ways. With `--plain` that result stayed alive to the end of the program's measurement. Every run of the tool on the equation of state, in the order it made them, one way after another:
+
+| Runs | Each took | Page faults a run |
+|---|---|---|
+| NumPy, timed | 244 to 250 ms | 57,155 to 61,353 |
+| With the kernels installed, for the comparison of bits: NumPy, lazy and fused once each, the three results kept | 246 ms, 228 ms, 130 ms | 61,180, 7, 26 |
+| NumPy, timed, the three results dropped | 246 to 248 ms | 61,247 |
+| Lazy, timed | 271 ms | 36,475 |
+| Fused, timed | 138 to 140 ms | 33,020 |
+| NumPy once more, its result kept for the comparison of the plain ways | 246 ms | 61,247 |
+| With nothing installed and that result alive: lazy, timed | 225 ms | 0 |
+| Fused, timed | 99 ms | 0 |
+
+So the two plain columns were of another state of the process than the four before them, and that is the second of the study's three findings about the order: prysm's fused run at 362 ms with the kernels installed and 318 ms without. Timed in turn with the option of the study, every round came after that result was made, and every way ran under it.
+
+**Before and after,** each program on one performance core with one BLAS thread, the quickest of 7 rounds, taken within twenty minutes of each other at load averages of 1.0 to 2.4. NumPy, installed, and the fused run with the kernels installed and without, in milliseconds:
+
+| Program | How it was timed | NumPy | Installed | Fused | Fused, nothing installed | Fused against NumPy |
+|---|---|---|---|---|---|---|
+| `veros_eos` | One way after another, the tool as it was | 229.31 | 229.14 | 137.41 | 99.23 | 1.67x, and 2.31x with nothing installed |
+| | In turn, a result kept (`--alternate` of the study) | 182.24 | 184.53 | 99.16 | 98.94 | 1.84x |
+| | One way after another, nothing kept | 235.32 | 235.24 | 139.64 | 139.38 | 1.69x |
+| | In turn, nothing kept (the tool now) | 233.55 | 235.22 | 138.40 | 137.47 | 1.69x |
+| `prysm_zernike` | In turn, a result kept | 351.36 | 353.25 | 315.40 | 315.79 | 1.11x |
+| | One way after another, nothing kept | 396.96 | 376.63 | 360.18 | 360.55 | 1.10x |
+| | In turn, nothing kept | 397.14 | 399.58 | 361.48 | 361.97 | 1.10x |
+| `hdiff` | One way after another, the tool as it was | 188.92 | 178.36 | 89.29 | 89.56 | 2.12x |
+| | In turn, nothing kept | 193.15 | 180.76 | 92.12 | 91.60 | 2.10x |
+| `regression` | One way after another, the tool as it was | 51.15 | 51.45 | 49.48 | 49.23 | 1.03x |
+| | In turn, nothing kept | 52.27 | 53.45 | 51.46 | 51.22 | 1.02x |
+| `pvlib_solar` | One way after another, the tool as it was | 2,634.85 | 2,633.65 | 2,721.44 | 2,697.11 | 0.97x |
+| | In turn, a result kept | 2,650.63 | 2,657.33 | 2,702.08 | 2,707.03 | 0.98x |
+| | In turn, nothing kept | 2,678.86 | 2,701.34 | 2,755.16 | 2,762.00 | 0.97x |
+
+- **The kept result moved two programs' times and one ratio.** The equation of state is 28% slower on NumPy and 40% slower fused with nothing kept, and its fused run is 1.69x of NumPy where the study's way of timing made it 1.84x. prysm's program is 13% to 15% slower every way, and its ratio is the same. The other eleven programs timed both ways, the horizontal diffusion, the regression and nine of the study's ten, moved by 4.8% or less, with other work running on the machine.
+- **The order by itself moved one figure of these:** prysm's installed run, 376.63 ms after NumPy's 396.96 ms when each way's rounds come together, and 399.58 ms beside 397.14 ms in turn. That is a 5% gain from `install()` on a program where no kernel takes a call.
+- **pvlib's 10% did not come back.** One way after another it took 2,635 ms on NumPy and 2,634 ms installed, where the study's first table had 2,996 ms and 2,724 ms. What state the machine or the process was in for that table is not known.
+- **In the corpus the order moved turbulent kinetic energy.** All twenty-six programs were timed pinned with the tool as it was and as it is, one take after the other. `veros_tke` was 1.50x of NumPy with NumPy timed first (205.15 ms) and 1.38x in turn (176.90 ms), and 1.39x in a second take in turn; unpinned earlier the same day, with the tool as it was, 1.62x one way after another and 1.39x with `--alternate`. The equation of state's two fused columns, 141.41 ms and 103.90 ms in the tool as it was, are 139.26 ms and 139.86 ms. Five more programs' ratios moved by over 3% in both takes in turn: the regression from 1.10x to 1.02x and 1.04x, `pandas_sales` from 0.97x to 1.02x, the flame graph from 1.55x to 1.47x and 1.49x, `pandas_filter` from 1.35x to 1.23x and 1.29x, the naive azimuthal integration from 0.95x to 0.85x and 0.91x. With a program's time moving by up to 28% between two takes on this machine, at load averages of 2.1 to 3.8, that is not enough to call any of them the order.
+- **`limit` shows what the order is for on a machine that is doing something else.** One way after another, at load averages of 2.3 to 2.5, it had the equation of state at 282.31 ms on NumPy and 253.01 ms installed, 1.12x from kernels that take none of its calls, and Black-Scholes at 99.60 ms and 80.45 ms fused, 1.24x. In turn, straight after, 245.10 ms and 245.00 ms, and 79.31 ms and 70.90 ms, 1.12x. A slow stretch of some seconds falls on all the runs of one way, or on one round of every way.
+
+**What it means for the tables above.** They were timed in turn with a result kept, so each row is of one state of the process, and its ratios stand: taken again with nothing kept, no program's fused run against NumPy moved by more than 0.02. Its times do not all stand. prysm's are 13% to 15% longer now (397 ms on NumPy for the table's 348 ms, 361 ms fused for 317 ms), and scikit-image's 2% to 5%. The other eight are within 4%, which is what two takes differ by with other work on the machine.
+
+**The design's tables.** Those of [its section on x86-64](lazy-fusion-design.md#another-processor), the four ways and the limit, were taken again in turn, pinned to one core with one BLAS thread while other work ran on the machine, and that section has what moved: the regression from 2.26x to 1.02x, which was its NumPy time with BLAS on every core and not the order, turbulent kinetic energy from 1.62x to 1.38x, which was the order, and the attention block from 0.83x to 0.93x. The tables from the Apple M1 Pro were timed one way after another and could not be taken again here. What the order can have moved in them is a program whose NumPy run, timed first, was slow for it, as `veros_tke`'s here. The kept result shows less there: the equation of state's fused run is 73.97 ms with the kernels installed and 73.80 ms without in that machine's tables, where it was 141 ms and 104 ms here. macOS has another allocator.
+
+**What is not settled.** A program of large temporaries has two times, with pages given back and with pages kept, and they differ by a quarter. The tools now time the first, which is what a program run by itself gets from glibc. A program inside a longer process, with arrays alive above its own, gets the second. Which the layer should be judged by, and whether a fused run should keep the memory of its results itself, since that alone took the equation of state from 138 ms to 99 ms, is [issue 321](https://github.com/sofeikov/hotkernels/issues/321)'s question from another side; [issue 326](https://github.com/sofeikov/hotkernels/issues/326) has the figures and the two decisions.
 
 ## What is open
 
@@ -325,6 +399,7 @@ Each of these is a measurement above and a decision not taken here, with the iss
 - **`out=`, `np.clip` and plain operands on the core's quick road,** [issue 320](https://github.com/sofeikov/hotkernels/issues/320).
 - **Memory a graph holds,** [issue 321](https://github.com/sofeikov/hotkernels/issues/321): whether a node's value can be released, or its memory used again, as soon as its last reader has run.
 - **A library that keeps the type of what it is given,** [issue 322](https://github.com/sofeikov/hotkernels/issues/322).
-- **`--alternate` as the timing tool's default,** and the design's tables taken again with it, [issue 323](https://github.com/sofeikov/hotkernels/issues/323).
+- **The design's ARM64 tables taken again in turn,** [issue 323](https://github.com/sofeikov/hotkernels/issues/323). The tools time in turn by default now and the x86-64 tables were taken again ([below](#issue-323-the-ways-timed-in-turn-by-default)); the tables from the Apple M1 Pro were not, for want of the machine.
+- **Which state of the allocator a program is timed in, and whether a fused run should keep the memory of its results,** [issue 326](https://github.com/sofeikov/hotkernels/issues/326): new pages from the system are a quarter of the equation of state's time.
 - **Taking by a table of positions,** which is half of SALib's analysis: [issue 224](https://github.com/sofeikov/hotkernels/issues/224), open already for `a[idx]`.
 - **Kernels that read arrays at a step.** The design left them for two programs; three more have such arrays here, for 30 ms. No issue: it weighs too little in these to add to what the design says.

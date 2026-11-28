@@ -14,15 +14,22 @@ single-operation kernels serving it, and the fused run has them too.
 
 For each program of `corpus.py` this tool:
 
-- times the program eagerly, as it is and then with the kernels installed;
+- times the program four ways: eagerly as it is, eagerly with the kernels
+  installed, lazily node by node, and fused;
 - runs it lazily, node by node, with every call timed, and puts each
   operation in a class by what a fused kernel would need to make it;
 - measures, for each different operation, what an element costs in the
   cache, on the first elements of the operands the program gave it, and
   takes that times the elements as the part that has to stay;
-- times the fused run;
 - runs it fused once more with every call NumPy still makes timed, and holds
   each against what its loop costs in the cache.
+
+The four ways are timed in turn: each round runs the program once every
+way, and the quickest run of each way counts. Timed one way after another,
+a slow stretch of the machine or a state of the process falls on all the
+runs of one way, and `at best` and `now`, which are against NumPy's run,
+timed first, are too high by what that run lost. `--one-after-another` asks
+for that order.
 
 The values matter: what `erf` or `exp` costs depends on its argument, so an
 operation is timed on the program's own numbers, not on made-up ones, and
@@ -72,6 +79,9 @@ TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 TABLE_TEMPLATE = "limit.txt.j2"
 # Nanoseconds in a millisecond.
 NS_PER_MS = 1e6
+# The ways a program is timed, in the order of a round: eagerly with nothing installed, and under
+# `hotkernels.install()` eagerly, lazily node by node, and lazily with fusion.
+NUMPY, INSTALLED, LAZY, FUSED = "numpy", "installed", "lazy", "fused"
 # The classes an operation of the graph is counted under. The first five are what fusion could reach: the
 # operations a kernel makes now; comparisons, `np.where` and logic, which give or read a mask; float64 operations
 # that are a call into a mathematics library; the same kinds of operation on other element types; and reductions.
@@ -91,6 +101,9 @@ MOST_PIECES, CALIBRATION_ROUNDS = 64, 5
 
 # The smallest part of a program's eager time its floor may be, as a divisor, and still be printed: a hundredth.
 LEAST_FLOOR = 100
+# The package's logger. It says at INFO that it was installed and uninstalled, which timing in turn does once a
+# round for every program; the tool lets only its warnings through.
+PACKAGE = "hotkernels"
 
 app = typer.Typer(add_completion=False)
 
@@ -436,7 +449,86 @@ def _timed(program: corpus.Program, inputs: tuple, np: Any, runs: int) -> int:
     return best or 0
 
 
-def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any]) -> Limit:
+def _timed_fused(program: corpus.Program, inputs: tuple, runs: int) -> int:
+    """Time a program's fused run several times and return the quickest, in nanoseconds.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many times to run it.
+
+    Returns:
+        The quickest run, or 0 where the fused kernels are not built.
+    """
+    if not fuse.enable(install=False):  # The caller has the single-operation kernels installed around this.
+        return 0
+    try:
+        return _timed(program, inputs, get_lazy(), runs)
+    finally:
+        fuse.disable()
+
+
+def _installed_ways(program: corpus.Program, inputs: tuple, runs: int) -> dict[str, int]:
+    """Time the three ways that run under `hotkernels.install()`, one after another.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many times each way is run before the next.
+
+    Returns:
+        The quickest run in nanoseconds by INSTALLED, LAZY and FUSED.
+    """
+    return {INSTALLED: _timed(program, inputs, numpy, runs), LAZY: _timed(program, inputs, get_lazy(), runs),
+            FUSED: _timed_fused(program, inputs, runs)}
+
+
+def one_after_another(program: corpus.Program, inputs: tuple, runs: int, enabled: Callable[[], Any]) -> dict[str, int]:
+    """Time a program one way after another: every run of NumPy's first, then every run of the next way.
+
+    What lasts a few seconds then falls on one way and not on the next; see `in_turn`.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many times each way is timed.
+        enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
+
+    Returns:
+        The quickest run in nanoseconds by NUMPY, INSTALLED, LAZY and FUSED; FUSED is 0 where fusion is not built.
+    """
+    times = {NUMPY: _timed(program, inputs, numpy, runs)}
+    with enabled():
+        times.update(_installed_ways(program, inputs, runs))
+    return times
+
+
+def in_turn(program: corpus.Program, inputs: tuple, runs: int, enabled: Callable[[], Any]) -> dict[str, int]:
+    """Time a program every way in turn, round after round, and keep the quickest run of each way.
+
+    Timed one way after another, a slow stretch of the machine or a state of the process falls on all the runs
+    of one way. In turn it falls on a round of every way, as in `fusion_time.alternately`;
+    docs/lazy-codebases-findings.md, "Issue 323", has what the order was worth.
+
+    Args:
+        program: The program.
+        inputs: What `program.make` returned.
+        runs: How many rounds; each times every way once.
+        enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
+
+    Returns:
+        The quickest run in nanoseconds by NUMPY, INSTALLED, LAZY and FUSED; FUSED is 0 where fusion is not built.
+    """
+    times: dict[str, int] = {}
+    for _ in range(runs):
+        once = {NUMPY: _timed(program, inputs, numpy, 1)}
+        with enabled():
+            once.update(_installed_ways(program, inputs, 1))
+        times = {way: min(ns, times.get(way, ns)) for way, ns in once.items()}
+    return times
+
+
+def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[], Any], alternate: bool = True) -> Limit:
     """Measure one program's floor and where it stands.
 
     Args:
@@ -444,30 +536,29 @@ def measure(program: corpus.Program, size: str, runs: int, enabled: Callable[[],
         size: `corpus.SMALL` or `corpus.LARGE`.
         runs: How many times each way is timed.
         enabled: `hotkernels.enabled`: a block inside which the single-operation kernels are installed.
+        alternate: Whether the ways are timed in turn, round after round (`in_turn`), and not one after another.
 
     Returns:
         What was measured.
     """
     inputs = program.make(size)
     limit = Limit(program.name)
-    limit.numpy_ns = _timed(program, inputs, numpy, runs)
+    times = (in_turn if alternate else one_after_another)(program, inputs, runs, enabled)
+    limit.numpy_ns, limit.eager_ns, limit.lazy_ns, limit.fused_ns = (times[way] for way in (NUMPY, INSTALLED, LAZY, FUSED))
     with enabled():
-        _installed(program, inputs, runs, limit)
+        _installed(program, inputs, limit)
     return limit
 
 
-def _installed(program: corpus.Program, inputs: tuple, runs: int, limit: Limit) -> None:
-    """Measure everything about one program that is measured with the single-operation kernels installed.
+def _installed(program: corpus.Program, inputs: tuple, limit: Limit) -> None:
+    """Measure where one program's time is, node by node and fused, with the single-operation kernels installed.
 
     Args:
         program: The program.
         inputs: What `program.make` returned.
-        runs: How many times each way is timed.
         limit: Where what is measured goes.
     """
     lazy = get_lazy()
-    limit.eager_ns = _timed(program, inputs, numpy, runs)
-    limit.lazy_ns = _timed(program, inputs, lazy, runs)
     watcher = _Watcher()
     planner, meter = evaluate.planner, evaluate.meter
     evaluate.planner, evaluate.meter = watcher.plan, watcher.measure
@@ -486,7 +577,6 @@ def _installed(program: corpus.Program, inputs: tuple, runs: int, limit: Limit) 
         limit.kept[label] = limit.kept.get(label, 0) + stays
     if fuse.enable(install=False):  # `measure` has the kernels installed around this.
         try:
-            limit.fused_ns = _timed(program, inputs, lazy, runs)
             limit.kernel_ns, limit.fused_nodes = _in_kernels(program, inputs, lazy)
             limit.still_ns, limit.still_kept = _still_numpys(program, inputs, lazy, watcher)
         finally:
@@ -621,13 +711,14 @@ def _in_kernels(program: corpus.Program, inputs: tuple, lazy: Any) -> tuple[int,
     return spent[0], fuse.STATS.fused_nodes
 
 
-def render(limits: list[Limit], size: str, runs: int) -> str:
+def render(limits: list[Limit], size: str, runs: int, alternate: bool) -> str:
     """Write the tables as text.
 
     Args:
         limits: One per program.
         size: The size the programs were run at.
         runs: How many times each way was timed.
+        alternate: Whether the ways were timed in turn and not one after another.
 
     Returns:
         The tables.
@@ -635,21 +726,26 @@ def render(limits: list[Limit], size: str, runs: int) -> str:
     environment = Environment(loader=FileSystemLoader(TEMPLATES), undefined=StrictUndefined, trim_blocks=True,
                               lstrip_blocks=True, keep_trailing_newline=True)
     return environment.get_template(TABLE_TEMPLATE).render(
-        limits=limits, size=size, runs=runs, ns_per_ms=NS_PER_MS, classes=CLASSES, reachable=REACHABLE, short=SHORT, long=LONG)
+        limits=limits, size=size, runs=runs, alternate=alternate, ns_per_ms=NS_PER_MS, classes=CLASSES, reachable=REACHABLE, short=SHORT, long=LONG)
 
 
 @app.command()
 def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are run at: small or large."),
          program: list[str] = typer.Option(None, help="A program to measure; may be given several times. Default: all."),
-         runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts.")) -> None:
+         runs: int = typer.Option(5, help="How many times each way is timed; the quickest counts."),
+         alternate: bool = typer.Option(True, "--alternate/--one-after-another",
+                                        help="Time the ways in turn, round after round, so that each meets the "
+                                             "process in the same state; or every run of one way before the next.")) -> None:
     """Measure how far fusion could take each program, and print the tables.
 
     Args:
         size: `corpus.SMALL` or `corpus.LARGE`.
         program: Names of the programs to measure; every program when empty.
         runs: How many times each way is timed.
+        alternate: Whether the ways are timed in turn and not one after another.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger(PACKAGE).setLevel(logging.WARNING)
     import hotkernels
     limits = []
     for asked in corpus.by_name(list(program) if program else None):
@@ -658,8 +754,8 @@ def main(size: str = typer.Option(corpus.LARGE, help="The size the programs are 
             continue
         if not asked.eager:
             continue  # A program that gathers by name has no eager run to set its floor against.
-        limits.append(measure(asked, size, runs, hotkernels.enabled))
-    log.info("%s", render(limits, size, runs).rstrip("\n"))
+        limits.append(measure(asked, size, runs, hotkernels.enabled, alternate))
+    log.info("%s", render(limits, size, runs, alternate).rstrip("\n"))
 
 
 if __name__ == "__main__":
