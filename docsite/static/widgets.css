@@ -100,3 +100,31 @@ button.cell:hover { border-color: var(--hot); }
   [data-widget].w { padding: .9rem; }
   .w-range input[type="range"] { width: 7rem; }
 }
+
+/* The kinds of node in the lazy layer's graphs, shared by the figures of that
+   chapter: a line colour and a soft fill for each, and three colours that tell
+   one computed graph from the next. */
+:root {
+  --k-input: #8a8172;       --k-input-soft: #f1ece2;
+  --k-elementwise: #3f6fa8; --k-elementwise-soft: #dfe9f5;
+  --k-reduction: #c27a12;   --k-reduction-soft: #fbecd2;
+  --k-matmul: #7b5cc4;      --k-matmul-soft: #ece5fa;
+  --k-view: #2f8a74;        --k-view-soft: #dcf0e9;
+  --k-write: #6f8a1f;       --k-write-soft: #ebf2d3;
+  --k-atonce: #b3261e;      --k-atonce-soft: #f8dedb;
+  --g1: #d9480f; --g2: #3f6fa8; --g3: #2c7a4b;
+}
+:root[data-theme="dark"] {
+  --k-input: #a0988a;       --k-input-soft: #27231d;
+  --k-elementwise: #86aee4; --k-elementwise-soft: #1b2a3f;
+  --k-reduction: #e7a94a;   --k-reduction-soft: #3a2a10;
+  --k-matmul: #b59cf0;      --k-matmul-soft: #2a2140;
+  --k-view: #6cc5ab;        --k-view-soft: #15302a;
+  --k-write: #b5cf5e;       --k-write-soft: #27301a;
+  --k-atonce: #f08a80;      --k-atonce-soft: #3d1a17;
+  --g1: #ff8a4c; --g2: #6f9bd6; --g3: #4fae74;
+}
+
+/* ---- fusion chapter (report/fusion.md) ---- */
+
+/* ---- fusion results chapter (report/fusion-results.md) ---- */

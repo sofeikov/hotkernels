@@ -59,4 +59,5 @@ The report walks through all of it from the ground up. It assumes you know NumPy
 <a class="card" href="[[ root ]]report/loop/"><h3>Agents in a loop</h3><p>[[ data.attempts.total ]] logged attempts, [[ data.attempts.reverted ]] of them thrown away. Browse every one.</p><span class="more">Chapter 4 →</span></a>
 <a class="card" href="[[ root ]]report/selection/"><h3>The kernels</h3><p>How <code>x[mask]</code> runs without a branch, why float <code>cumsum</code> cannot be both exact and fast, and a histogram that replaces arithmetic with a proof.</p><span class="more">Chapters 5 and 6 →</span></a>
 <a class="card" href="[[ root ]]report/delivery/"><h3>Into NumPy</h3><p>Seven kinds of hook that route unmodified code to the kernels, including <code>x[mask]</code>, which is not a function at all, and <code>a + b</code>.</p><span class="more">Chapter 7 →</span></a>
+<a class="card" href="[[ root ]]report/lazy/"><h3>A whole expression at once</h3><p>A prototype, not in the package: NumPy code written down as a graph with NumPy's bits, and kernels that compute an expression from it in one pass.</p><span class="more">Chapters 10 to 12 →</span></a>
 </div>

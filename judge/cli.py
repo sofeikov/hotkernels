@@ -29,6 +29,11 @@ from .spec import Kernel
 log = logging.getLogger(__name__)
 
 KERNELS = ROOT / "kernels"
+# The kernels of the lazy layer's prototype: one per fused expression (docs/lazy-fusion-design.md). They are checked
+# and timed as any other kernel, and are not built into the package, which takes its kernels from KERNELS alone.
+PROTOTYPE_KERNELS = ROOT / "prototypes" / "lazy" / "kernels"
+# Where a kernel is looked for by name, in this order.
+KERNEL_ROOTS = (KERNELS, PROTOTYPE_KERNELS)
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # Recorded results, committed to the repository.
 RESULTS = ROOT / "results"
@@ -68,7 +73,7 @@ _JSON_INDENT = 2
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 
-KernelArg = typer.Argument(..., help="Kernel name: a directory under kernels/.")
+KernelArg = typer.Argument(..., help="Kernel name: a directory under kernels/ or prototypes/lazy/kernels/.")
 UnlockedOpt = typer.Option(
     False, "--unlocked",
     help="Allow modified reference files. For people creating a kernel or changing the "
@@ -97,39 +102,54 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 def resolve(name: str) -> tuple[Path, bool]:
     """Find a kernel by name. Returns (directory, whether it is a judge fixture)."""
-    if (KERNELS / name / "spec.py").exists():
-        return KERNELS / name, False
+    for root in KERNEL_ROOTS:
+        if (root / name / "spec.py").exists():
+            return root / name, False
     if (FIXTURES / name / "spec.py").exists():
         return FIXTURES / name, True
-    log.error("unknown kernel %r: no kernels/%s/spec.py", name, name)
+    log.error("unknown kernel %r: no %s", name,
+              " or ".join(f"{root.relative_to(ROOT).as_posix()}/{name}/spec.py" for root in KERNEL_ROOTS))
     raise typer.Exit(EXIT_REFUSED)
 
 
-def reference_changes(name: str) -> list[str]:
+def reference_changes(kernel_dir: Path) -> list[str]:
     """List the locked files that differ from the reference branch.
 
     The locked files are the judge itself, its dependencies, and the kernel's
     spec and naive reference: everything a kernel is measured against.
+
+    Args:
+        kernel_dir: The kernel's directory, under one of KERNEL_ROOTS.
+
+    Returns:
+        The paths that differ or are not tracked, relative to the repository's root.
     """
     if _git("rev-parse", "--verify", "--quiet", _REFERENCE_BRANCH).returncode != 0:
         return []
-    locked = ["judge", "pyproject.toml", "uv.lock",
-              f"kernels/{name}/spec.py", f"kernels/{name}/naive.c"]
+    relative = kernel_dir.relative_to(ROOT).as_posix()
+    locked = ["judge", "pyproject.toml", "uv.lock", f"{relative}/spec.py", f"{relative}/naive.c"]
     changed = _git("diff", "--name-only", _REFERENCE_BRANCH, "--", *locked).stdout.split()
     untracked = _git("ls-files", "--others", "--exclude-standard", "--", *locked).stdout.split()
     return sorted(set(changed + untracked))
 
 
-def guard(name: str, is_fixture: bool, unlocked: bool) -> bool:
+def guard(name: str, kernel_dir: Path, is_fixture: bool, unlocked: bool) -> bool:
     """Refuse to run when the reference files were modified.
 
-    Returns True when the reference files are verified unchanged, and False
-    when they differ but `unlocked` allowed the run anyway. Fixtures are part
-    of the judge and are not guarded.
+    Args:
+        name: The kernel's name, for the message.
+        kernel_dir: Its directory.
+        is_fixture: Whether it is a judge fixture.
+        unlocked: Whether the caller asked to run anyway.
+
+    Returns:
+        True when the reference files are verified unchanged, and False
+        when they differ but `unlocked` allowed the run anyway. Fixtures are
+        part of the judge and are not guarded.
     """
     if is_fixture:
         return True
-    changed = reference_changes(name)
+    changed = reference_changes(kernel_dir)
     if not changed:
         return True
     log.info(render("guard.txt.j2", unlocked=unlocked, changed=changed, name=name, arch=ARCH))
@@ -286,7 +306,7 @@ def check_command(
 ) -> None:
     """Lint and correctness only. Fast enough to run after every edit."""
     kernel_dir, is_fixture = resolve(kernel)
-    guard(kernel, is_fixture, unlocked)
+    guard(kernel, kernel_dir, is_fixture, unlocked)
     _checked(kernel, kernel_dir, case)
 
 
@@ -294,7 +314,7 @@ def check_command(
 def bench(kernel: str = KernelArg, quick: bool = QuickOpt, unlocked: bool = UnlockedOpt) -> None:
     """Timing report only, without the correctness check."""
     kernel_dir, is_fixture = resolve(kernel)
-    locked = guard(kernel, is_fixture, unlocked)
+    locked = guard(kernel, kernel_dir, is_fixture, unlocked)
     built, failure, k = build_all(kernel_dir)
     if failure:
         log.info(format_result(CheckResult(k.name, False, failure), kernel))
@@ -313,7 +333,7 @@ def run(
 ) -> None:
     """Correctness, then the timing report against naive C and NumPy."""
     kernel_dir, is_fixture = resolve(kernel)
-    locked = guard(kernel, is_fixture, unlocked)
+    locked = guard(kernel, kernel_dir, is_fixture, unlocked)
     result = _checked(kernel, kernel_dir)
     log.info("")
     report = run_bench(result.built, quick, locked)
@@ -375,7 +395,7 @@ def compare(
     has to be larger than that to count: see COMPARE_ROUNDS in judge/bench.py.
     """
     kernel_dir, is_fixture = resolve(kernel)
-    guard(kernel, is_fixture, unlocked)
+    guard(kernel, kernel_dir, is_fixture, unlocked)
     built = _checked(kernel, kernel_dir).built
     k = built.k
     if not built.kernel:
