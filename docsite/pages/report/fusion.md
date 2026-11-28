@@ -35,6 +35,7 @@ What an expression may contain is decided by one rule: **each operation must be 
 | `np.radians`, `np.degrees` | NumPy's loop for each is one multiplication by a constant, which a kernel makes with the same float64 |
 | A comparison, as the condition of `np.where(c, a, b)` | The comparison gives a mask, which a kernel keeps in a register and never writes to memory |
 | A sum or a mean of every element, at the top | NumPy's order of addition can be reproduced exactly ([below](#a-sum-adds-in-numpys-order)) |
+| A sum or a mean along a last axis of two to seven elements, of an array or of a product | NumPy adds a row that short from left to right, starting from 0.0 ([below](#a-sum-adds-in-numpys-order)) |
 
 Everything else ends an expression, and each ending has a reason:
 
@@ -44,7 +45,7 @@ Everything else ends an expression, and each ending has a reason:
 | An array of any element type but float64, a NumPy scalar that is neither float64 nor a whole number | The kernels are for float64 |
 | An intermediate read twice, or one the program still holds a name for | Its value is wanted again, so it has to exist; computing past it would compute it twice. It becomes an operand of the expressions that read it |
 | An intermediate of another shape than the result | It belongs to another loop |
-| The matrix product, a reduction along an axis, indexing by arrays | Not element by element. NumPy computes each, and the result is an operand of what reads it |
+| The matrix product, any other reduction along an axis, indexing by arrays | Not element by element. NumPy computes each, and the result is an operand of what reads it |
 
 Each thing an expression reads, an **operand**, is one of two kinds along the innermost axis. A **V** is an array as long as the result. An **S** is the same number for the whole row: a Python number, a float64 scalar, a whole number of NumPy's such as the `np.int64` that indexing a table of integers gives, an array with no dimensions, or an array of length one along that axis, such as a row mean kept with `keepdims=True`. NumPy converts a whole number to float64 before its float64 loop runs, and the kernel is handed the same float64. Along the outer axes an operand may broadcast in any way.
 
@@ -216,7 +217,7 @@ Draw random numbers in the figure and keep count: the two differ on ordinary inp
 
 `(x ** 2).sum()` is the pattern `sum(sq(V0))`: the square and the sum in one pass, with no array of squares. A sum has an order, and NumPy's is not left to right. For a contiguous array it adds **pairwise**: eight running sums over blocks of up to 128 elements, combined in a fixed tree whose shape depends on the length ([kernels/sum_f64/spec.py](repo:kernels/sum_f64/spec.py) has the rules). Floating-point addition is not associative, so a sum in any other order is another number.
 
-A fused reduction is exact only because it makes the same additions in the same order on the values it computes. `fuse_sum_squares_f64` walks NumPy's tree with two small stacks below the stack pointer and squares each element as it meets it; a test compares it with `np.sum(x ** 2)` at every length to 700 and at several up to 300,000. The mean is the same kernel, since NumPy's mean is its sum divided by the count. A kernel reduces only an array that lies in one run, C-contiguous or left in another order by a transpose, which NumPy adds in memory order whatever its dimensions, and only over every element. A sum along an axis adds in yet another order (down the columns it is not pairwise at all) and is left to NumPy.
+A fused reduction is exact only because it makes the same additions in the same order on the values it computes. `fuse_sum_squares_f64` walks NumPy's tree with two small stacks below the stack pointer and squares each element as it meets it; a test compares it with `np.sum(x ** 2)` at every length to 700 and at several up to 300,000. The mean is the same kernel, since NumPy's mean is its sum divided by the count. A kernel reduces only an array that lies in one run, C-contiguous or left in another order by a transpose, which NumPy adds in memory order whatever its dimensions, and only over every element. A sum along an axis adds in yet another order (down the columns it is not pairwise at all) and is left to NumPy, but for one case: along a last axis of fewer than eight elements NumPy adds each row from left to right, starting from 0.0, so `np.sum(a * b, axis=-1)` on rows of two to seven is made by one loop of the layer's own, with no array of products, wherever NumPy's result would be in C order. `np.max` and `np.min` along such rows follow no one rule on x86-64 and are left to NumPy.
 
 ### Floating-point exceptions are NumPy's too
 
